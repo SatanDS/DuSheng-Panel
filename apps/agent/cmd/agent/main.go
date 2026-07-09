@@ -13,6 +13,7 @@ import (
 
 	"dusheng-panel/apps/agent/internal/client"
 	"dusheng-panel/apps/agent/internal/configsync"
+	agentruntime "dusheng-panel/apps/agent/internal/runtime"
 	"dusheng-panel/apps/agent/internal/supervisor"
 )
 
@@ -68,12 +69,13 @@ func main() {
 	}
 
 	gost := supervisor.New(*gostPath, logger)
-	syncer := configsync.New(api, *dataDir, gost, logger)
+	rt := agentruntime.New(api, logger, agentruntime.Options{})
+	syncer := configsync.New(api, *dataDir, rt, logger)
 
 	if err := syncer.SyncOnce(ctx); err != nil {
 		logger.Printf("initial config sync failed: %v", err)
 	}
-	if err := sendHeartbeat(ctx, api, syncer, strings.TrimSpace(*gostPath), logger); err != nil {
+	if err := sendHeartbeat(ctx, api, syncer, gost, strings.TrimSpace(*gostPath), logger); err != nil {
 		logger.Printf("initial heartbeat failed: %v", err)
 	}
 
@@ -87,6 +89,9 @@ func main() {
 		case <-ctx.Done():
 			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 			defer cancel()
+			if err := rt.Stop(shutdownCtx); err != nil {
+				logger.Printf("stop runtime: %v", err)
+			}
 			if err := gost.Stop(shutdownCtx); err != nil {
 				logger.Printf("stop gost: %v", err)
 			}
@@ -97,15 +102,16 @@ func main() {
 				logger.Printf("config sync failed: %v", err)
 			}
 		case <-heartbeatTicker.C:
-			if err := sendHeartbeat(ctx, api, syncer, strings.TrimSpace(*gostPath), logger); err != nil {
+			if err := sendHeartbeat(ctx, api, syncer, gost, strings.TrimSpace(*gostPath), logger); err != nil {
 				logger.Printf("heartbeat failed: %v", err)
 			}
 		}
 	}
 }
 
-func sendHeartbeat(ctx context.Context, api *client.Client, syncer *configsync.Syncer, gostPath string, logger *log.Logger) error {
+func sendHeartbeat(ctx context.Context, api *client.Client, syncer *configsync.Syncer, gost *supervisor.Supervisor, gostPath string, logger *log.Logger) error {
 	host, _ := os.Hostname()
+	runtimeStatus := syncer.RuntimeStatus()
 	resp, err := api.Heartbeat(ctx, client.HeartbeatRequest{
 		Version:         version,
 		AppliedRevision: syncer.AppliedRevision(),
@@ -114,11 +120,13 @@ func sendHeartbeat(ctx context.Context, api *client.Client, syncer *configsync.S
 			"os":                runtime.GOOS,
 			"arch":              runtime.GOARCH,
 			"goVersion":         runtime.Version(),
-			"gostActive":        syncer.SupervisorActive(),
-			"gostStatus":        syncer.SupervisorStatus(),
+			"runtimeActive":     syncer.RuntimeActive(),
+			"runtime":           runtimeStatus,
+			"gostActive":        gost.Running(),
+			"gostStatus":        gost.Status(),
 			"gostPath":          gostPath,
-			"trafficReporting":  "api_client_ready",
-			"protocolDetection": "metadata_only",
+			"trafficReporting":  "tcp_runtime",
+			"protocolDetection": "tcp_runtime",
 		},
 	})
 	if err != nil {

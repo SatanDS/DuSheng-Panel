@@ -1,6 +1,11 @@
 package protocol
 
-import "testing"
+import (
+	"crypto/tls"
+	"net"
+	"testing"
+	"time"
+)
 
 func TestIdentify(t *testing.T) {
 	tests := []struct {
@@ -67,4 +72,74 @@ func TestDetectAllowsNonViolations(t *testing.T) {
 	if result.Action != ActionAllow {
 		t.Fatalf("Action = %q, want %q", result.Action, ActionAllow)
 	}
+}
+
+func TestInspectTLSClientHelloMetadata(t *testing.T) {
+	packet := captureClientHello(t, "example.com", []string{"h2", "http/1.1"})
+	result := Inspect(packet)
+	if result.Protocol != NameTLS {
+		t.Fatalf("Protocol = %q, want %q", result.Protocol, NameTLS)
+	}
+	if result.Host != "example.com" {
+		t.Fatalf("Host = %q, want example.com", result.Host)
+	}
+	if len(result.ALPN) != 2 || result.ALPN[0] != "h2" || result.ALPN[1] != "http/1.1" {
+		t.Fatalf("ALPN = %#v, want h2/http/1.1", result.ALPN)
+	}
+}
+
+func TestInspectHTTPHost(t *testing.T) {
+	result := Inspect([]byte("GET / HTTP/1.1\r\nHost: app.example.com\r\n\r\n"))
+	if result.Protocol != NameHTTP {
+		t.Fatalf("Protocol = %q, want %q", result.Protocol, NameHTTP)
+	}
+	if result.Host != "app.example.com" {
+		t.Fatalf("Host = %q, want app.example.com", result.Host)
+	}
+}
+
+func TestInspectHTTPConnectHost(t *testing.T) {
+	result := Inspect([]byte("CONNECT tunnel.example.com:443 HTTP/1.1\r\nHost: tunnel.example.com\r\n\r\n"))
+	if result.Protocol != NameHTTPConnect {
+		t.Fatalf("Protocol = %q, want %q", result.Protocol, NameHTTPConnect)
+	}
+	if result.Host != "tunnel.example.com:443" {
+		t.Fatalf("Host = %q, want tunnel.example.com:443", result.Host)
+	}
+}
+
+func TestInspectShortPacket(t *testing.T) {
+	result := Inspect([]byte{0x16, 0x03})
+	if result.Protocol != NameUnknown {
+		t.Fatalf("Protocol = %q, want %q", result.Protocol, NameUnknown)
+	}
+}
+
+func captureClientHello(t *testing.T, serverName string, alpn []string) []byte {
+	t.Helper()
+	clientConn, serverConn := net.Pipe()
+	defer clientConn.Close()
+	defer serverConn.Close()
+
+	errc := make(chan error, 1)
+	go func() {
+		tlsConn := tls.Client(clientConn, &tls.Config{
+			ServerName:         serverName,
+			NextProtos:         alpn,
+			InsecureSkipVerify: true,
+		})
+		errc <- tlsConn.Handshake()
+	}()
+
+	if err := serverConn.SetReadDeadline(time.Now().Add(time.Second)); err != nil {
+		t.Fatalf("SetReadDeadline() error = %v", err)
+	}
+	buf := make([]byte, 4096)
+	n, err := serverConn.Read(buf)
+	if err != nil {
+		t.Fatalf("Read() error = %v", err)
+	}
+	_ = serverConn.Close()
+	<-errc
+	return buf[:n]
 }

@@ -855,7 +855,13 @@ func (s *Server) createInstallToken(c *gin.Context) {
 		fail(c, err)
 		return
 	}
-	command := fmt.Sprintf("curl -fsSL %s/install-agent.sh | sudo DUSHENG_API_URL=%q DUSHENG_INSTALL_TOKEN=%q bash", strings.TrimRight(s.cfg.PublicURL, "/"), s.cfg.PublicURL, token)
+	command := fmt.Sprintf(
+		"curl -fsSL %s/install-agent.sh | sudo DUSHENG_API_URL=%q DUSHENG_INSTALL_TOKEN=%q DUSHENG_RELEASE_BASE=%q bash",
+		strings.TrimRight(s.cfg.PublicURL, "/"),
+		s.cfg.PublicURL,
+		token,
+		s.cfg.AgentReleaseBase,
+	)
 	s.audit(c, actor(c), "install_token.create", "install_token", fmt.Sprint(row.ID), "{}")
 	c.JSON(http.StatusCreated, gin.H{"installToken": row, "token": token, "command": command})
 }

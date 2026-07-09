@@ -29,6 +29,7 @@ services:
       DUSHENG_ADMIN_PASSWORD: ${DUSHENG_ADMIN_PASSWORD:-admin_user}
       DUSHENG_PUBLIC_URL: ${DUSHENG_PUBLIC_URL:-http://127.0.0.1:7070}
       DUSHENG_CORS_ORIGINS: ${DUSHENG_CORS_ORIGINS:-http://127.0.0.1:7070}
+      DUSHENG_AGENT_RELEASE_BASE: ${DUSHENG_AGENT_RELEASE_BASE:-https://github.com/SatanDS/DuSheng-Panel/releases/latest/download}
       TZ: ${TZ:-Asia/Taipei}
     volumes:
       - api-data:/app/data

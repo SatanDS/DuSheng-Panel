@@ -24,30 +24,37 @@ type Supervisor interface {
 	Running() bool
 }
 
+type Runtime interface {
+	Apply(ctx context.Context, cfg client.AgentConfig) error
+	Running() bool
+	Status() map[string]any
+	Stop(ctx context.Context) error
+}
+
 type statusReporter interface {
 	Status() string
 }
 
 type Syncer struct {
-	api        *client.Client
-	renderer   *Renderer
-	supervisor Supervisor
-	logger     *log.Logger
+	api      *client.Client
+	renderer *Renderer
+	runtime  Runtime
+	logger   *log.Logger
 
 	mu              sync.RWMutex
 	appliedRevision int64
 	hasSynced       bool
 }
 
-func New(api *client.Client, dataDir string, supervisor Supervisor, logger *log.Logger) *Syncer {
+func New(api *client.Client, dataDir string, runtime Runtime, logger *log.Logger) *Syncer {
 	if logger == nil {
 		logger = log.Default()
 	}
 	return &Syncer{
-		api:        api,
-		renderer:   NewRenderer(dataDir),
-		supervisor: supervisor,
-		logger:     logger,
+		api:      api,
+		renderer: NewRenderer(dataDir),
+		runtime:  runtime,
+		logger:   logger,
 	}
 }
 
@@ -62,20 +69,20 @@ func (s *Syncer) SyncOnce(ctx context.Context) error {
 		return err
 	}
 
+	if result.Changed {
+		s.logger.Printf("rendered compatibility gost config path=%s revision=%d services=%d", result.Path, cfg.Revision, result.ServiceCount)
+	}
+	if s.runtime != nil {
+		if err := s.runtime.Apply(ctx, cfg); err != nil {
+			return err
+		}
+	}
+
 	s.mu.Lock()
-	firstSync := !s.hasSynced
 	s.appliedRevision = cfg.Revision
 	s.hasSynced = true
 	s.mu.Unlock()
 
-	if result.Changed || firstSync {
-		s.logger.Printf("rendered gost config path=%s revision=%d services=%d", result.Path, cfg.Revision, result.ServiceCount)
-		if s.supervisor != nil {
-			if err := s.supervisor.Apply(ctx, result.Path); err != nil {
-				return err
-			}
-		}
-	}
 	return nil
 }
 
@@ -85,24 +92,18 @@ func (s *Syncer) AppliedRevision() int64 {
 	return s.appliedRevision
 }
 
-func (s *Syncer) SupervisorActive() bool {
-	if s.supervisor == nil {
+func (s *Syncer) RuntimeActive() bool {
+	if s.runtime == nil {
 		return false
 	}
-	return s.supervisor.Running()
+	return s.runtime.Running()
 }
 
-func (s *Syncer) SupervisorStatus() string {
-	if s.supervisor == nil {
-		return "not_configured"
+func (s *Syncer) RuntimeStatus() map[string]any {
+	if s.runtime == nil {
+		return map[string]any{"running": false}
 	}
-	if reporter, ok := s.supervisor.(statusReporter); ok {
-		return reporter.Status()
-	}
-	if s.supervisor.Running() {
-		return "running"
-	}
-	return "unknown"
+	return s.runtime.Status()
 }
 
 type Renderer struct {

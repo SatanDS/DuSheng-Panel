@@ -1609,7 +1609,8 @@ function StatusPill({ value }: { value: string }) {
     normalized.includes("active") ||
     normalized.includes("allow") ||
     normalized === "synced" ||
-    normalized === "running"
+    normalized === "running" ||
+    normalized.startsWith("runtime ")
       ? "good"
       : normalized.includes("block") ||
           normalized.includes("violation") ||
@@ -1658,7 +1659,10 @@ function renderNodeSync(row: Entity) {
 
 function renderNodeHealth(row: Entity) {
   const system = parseSystem(row.systemJson);
-  const status = text(system?.gostStatus ?? (system?.gostActive ? "running" : "unknown"));
+  const runtimeStatus = system?.runtime && typeof system.runtime === "object" ? (system.runtime as Record<string, unknown>) : null;
+  const status = runtimeStatus?.running
+    ? `runtime ${runtimeStatus.listeners ?? 0}/${runtimeStatus.activeConnections ?? 0}`
+    : text(system?.gostStatus ?? (system?.gostActive ? "running" : "unknown"));
   return <StatusPill value={status} />;
 }
 

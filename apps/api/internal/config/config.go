@@ -7,32 +7,35 @@ import (
 )
 
 const (
-	DefaultJWTSecret     = "change-me-in-production"
-	DefaultAdminUsername = "admin_user"
-	DefaultAdminPassword = "admin_user"
+	DefaultJWTSecret        = "change-me-in-production"
+	DefaultAdminUsername    = "admin_user"
+	DefaultAdminPassword    = "admin_user"
+	DefaultAgentReleaseBase = "https://github.com/SatanDS/DuSheng-Panel/releases/latest/download"
 )
 
 type Config struct {
-	Listen        string
-	DatabaseURL   string
-	JWTSecret     string
-	AdminUsername string
-	AdminPassword string
-	PublicURL     string
-	Environment   string
-	CORSOrigins   []string
+	Listen           string
+	DatabaseURL      string
+	JWTSecret        string
+	AdminUsername    string
+	AdminPassword    string
+	PublicURL        string
+	Environment      string
+	CORSOrigins      []string
+	AgentReleaseBase string
 }
 
 func FromEnv() Config {
 	return Config{
-		Listen:        getenv("DUSHENG_LISTEN", "0.0.0.0:18888"),
-		DatabaseURL:   getenv("DUSHENG_DATABASE_URL", "sqlite://data/dusheng.db"),
-		JWTSecret:     getenv("DUSHENG_JWT_SECRET", DefaultJWTSecret),
-		AdminUsername: getenv("DUSHENG_ADMIN_USERNAME", DefaultAdminUsername),
-		AdminPassword: getenv("DUSHENG_ADMIN_PASSWORD", DefaultAdminPassword),
-		PublicURL:     getenv("DUSHENG_PUBLIC_URL", "http://127.0.0.1:18888"),
-		Environment:   strings.ToLower(getenv("DUSHENG_ENV", "development")),
-		CORSOrigins:   splitCSV(getenv("DUSHENG_CORS_ORIGINS", "*")),
+		Listen:           getenv("DUSHENG_LISTEN", "0.0.0.0:18888"),
+		DatabaseURL:      getenv("DUSHENG_DATABASE_URL", "sqlite://data/dusheng.db"),
+		JWTSecret:        getenv("DUSHENG_JWT_SECRET", DefaultJWTSecret),
+		AdminUsername:    getenv("DUSHENG_ADMIN_USERNAME", DefaultAdminUsername),
+		AdminPassword:    getenv("DUSHENG_ADMIN_PASSWORD", DefaultAdminPassword),
+		PublicURL:        getenv("DUSHENG_PUBLIC_URL", "http://127.0.0.1:18888"),
+		Environment:      strings.ToLower(getenv("DUSHENG_ENV", "development")),
+		CORSOrigins:      splitCSV(getenv("DUSHENG_CORS_ORIGINS", "*")),
+		AgentReleaseBase: strings.TrimRight(getenv("DUSHENG_AGENT_RELEASE_BASE", DefaultAgentReleaseBase), "/"),
 	}
 }
 
