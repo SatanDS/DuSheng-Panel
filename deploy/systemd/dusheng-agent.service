@@ -1,6 +1,6 @@
 [Unit]
 Description=DuSheng Panel node agent
-Documentation=https://github.com/dusheng-panel/dusheng-panel
+Documentation=https://github.com/SatanDS/DuSheng-Panel
 After=network-online.target
 Wants=network-online.target
 

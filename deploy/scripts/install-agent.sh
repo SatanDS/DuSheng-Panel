@@ -7,7 +7,7 @@ CONFIG_DIR="${DUSHENG_CONFIG_DIR:-/etc/dusheng}"
 DATA_DIR="${DUSHENG_DATA_DIR:-/var/lib/dusheng-agent}"
 LOG_DIR="${DUSHENG_LOG_DIR:-/var/log/dusheng-agent}"
 AGENT_USER="${DUSHENG_AGENT_USER:-dusheng-agent}"
-RELEASE_BASE="${DUSHENG_RELEASE_BASE:-https://github.com/dusheng-panel/dusheng-panel/releases/latest/download}"
+RELEASE_BASE="${DUSHENG_RELEASE_BASE:-https://github.com/SatanDS/DuSheng-Panel/releases/latest/download}"
 AGENT_URL="${DUSHENG_AGENT_URL:-}"
 GOST_URL="${DUSHENG_GOST_URL:-}"
 GOST_BIN="${DUSHENG_GOST_BIN:-/usr/local/bin/gost}"
@@ -166,7 +166,7 @@ write_service() {
   cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<EOF
 [Unit]
 Description=DuSheng Panel node agent
-Documentation=https://github.com/dusheng-panel/dusheng-panel
+Documentation=https://github.com/SatanDS/DuSheng-Panel
 After=network-online.target
 Wants=network-online.target
 
