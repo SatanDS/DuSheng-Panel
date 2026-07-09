@@ -1,0 +1,28 @@
+[Unit]
+Description=DuSheng Panel node agent
+Documentation=https://github.com/dusheng-panel/dusheng-panel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=dusheng-agent
+Group=dusheng-agent
+WorkingDirectory=/opt/dusheng-agent
+Environment=DUSHENG_DATA_DIR=/var/lib/dusheng-agent
+Environment=DUSHENG_GOST_BIN=/usr/local/bin/gost
+EnvironmentFile=-/etc/dusheng/agent.env
+ExecStart=/opt/dusheng-agent/dusheng-agent -base-url ${DUSHENG_API_URL} -install-token ${DUSHENG_INSTALL_TOKEN} -data-dir ${DUSHENG_DATA_DIR}
+Restart=always
+RestartSec=3
+LimitNOFILE=1048576
+AmbientCapabilities=CAP_NET_BIND_SERVICE
+CapabilityBoundingSet=CAP_NET_BIND_SERVICE
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/var/lib/dusheng-agent /var/log/dusheng-agent /opt/dusheng-agent
+
+[Install]
+WantedBy=multi-user.target

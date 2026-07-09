@@ -1,0 +1,70 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: ${POSTGRES_DB:-dusheng}
+      POSTGRES_USER: ${POSTGRES_USER:-dusheng}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-change-me-dusheng}
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U \"$${POSTGRES_USER}\" -d \"$${POSTGRES_DB}\""]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+
+  api:
+    build:
+      context: ..
+      dockerfile: deploy/api.Dockerfile
+    image: dusheng-panel/api:local
+    restart: unless-stopped
+    environment:
+      DUSHENG_LISTEN: 0.0.0.0:18888
+      DUSHENG_DATABASE_URL: postgres://${POSTGRES_USER:-dusheng}:${POSTGRES_PASSWORD:-change-me-dusheng}@postgres:5432/${POSTGRES_DB:-dusheng}?sslmode=disable
+      DUSHENG_JWT_SECRET: ${DUSHENG_JWT_SECRET:-change-me-in-production}
+      DUSHENG_ADMIN_USERNAME: ${DUSHENG_ADMIN_USERNAME:-admin_user}
+      DUSHENG_ADMIN_PASSWORD: ${DUSHENG_ADMIN_PASSWORD:-admin_user}
+      DUSHENG_PUBLIC_URL: ${DUSHENG_PUBLIC_URL:-http://127.0.0.1}
+      TZ: ${TZ:-Asia/Taipei}
+    volumes:
+      - api-data:/app/data
+    expose:
+      - "18888"
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  web:
+    build:
+      context: ..
+      dockerfile: deploy/web.Dockerfile
+    image: dusheng-panel/web:local
+    restart: unless-stopped
+    expose:
+      - "8080"
+    depends_on:
+      - api
+
+  caddy:
+    image: caddy:2-alpine
+    restart: unless-stopped
+    environment:
+      DUSHENG_SITE_ADDRESS: ${DUSHENG_SITE_ADDRESS:-:80}
+    ports:
+      - "${HTTP_PORT:-80}:80"
+      - "${HTTPS_PORT:-443}:443"
+    volumes:
+      - ./Caddyfile.example:/etc/caddy/Caddyfile:ro
+      - caddy-data:/data
+      - caddy-config:/config
+    depends_on:
+      - api
+      - web
+
+volumes:
+  postgres-data:
+  api-data:
+  caddy-data:
+  caddy-config:

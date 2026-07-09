@@ -1,0 +1,18 @@
+{
+  auto_https disable_redirects
+}
+
+{$DUSHENG_SITE_ADDRESS:panel.example.com} {
+  encode zstd gzip
+
+  header {
+    X-Content-Type-Options nosniff
+    X-Frame-Options DENY
+    Referrer-Policy strict-origin-when-cross-origin
+  }
+
+  @api path /api/* /healthz /install-agent.sh
+  reverse_proxy @api api:18888
+
+  reverse_proxy web:8080
+}

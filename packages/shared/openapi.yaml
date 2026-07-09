@@ -1,0 +1,1789 @@
+openapi: 3.1.0
+info:
+  title: DuSheng Panel API
+  version: 0.1.0
+  description: >
+    REST contract for DuSheng Panel. The API manages users, device groups,
+    nodes, tunnels, forwarding rules, protocol policies, install tokens,
+    traffic samples, audit logs, and node-agent synchronization.
+servers:
+  - url: http://127.0.0.1:18888
+    description: Local API server
+  - url: https://panel.example.com
+    description: Production reverse proxy
+tags:
+  - name: System
+  - name: Auth
+  - name: User
+  - name: Admin
+  - name: Agent
+paths:
+  /healthz:
+    get:
+      tags: [System]
+      operationId: getHealthz
+      summary: Health check
+      security: []
+      responses:
+        "200":
+          description: API process is healthy.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  /install-agent.sh:
+    get:
+      tags: [System]
+      operationId: getInstallAgentScript
+      summary: Download the node-agent install script
+      security: []
+      responses:
+        "200":
+          description: POSIX shell installer.
+          content:
+            text/x-shellscript:
+              schema:
+                type: string
+
+  /api/v1/auth/login:
+    post:
+      tags: [Auth]
+      operationId: login
+      summary: Create access and refresh tokens
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/LoginRequest"
+      responses:
+        "200":
+          description: Login succeeded.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuthResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/auth/refresh:
+    post:
+      tags: [Auth]
+      operationId: refreshAccessToken
+      summary: Exchange a bearer refresh token for a new access token
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Access token refreshed.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RefreshResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/me:
+    get:
+      tags: [User]
+      operationId: getMe
+      summary: Get the current user profile
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Current user.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/dashboard:
+    get:
+      tags: [User]
+      operationId: getDashboard
+      summary: Get dashboard counters and recent activity
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Dashboard summary.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Dashboard"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/forward-rules:
+    get:
+      tags: [User]
+      operationId: listForwardRules
+      summary: List forwarding rules visible to the current user
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Forwarding rules.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ForwardRule"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      tags: [User]
+      operationId: createForwardRule
+      summary: Create a forwarding rule
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ForwardRuleWrite"
+      responses:
+        "201":
+          description: Forwarding rule created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForwardRule"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/forward-rules/{id}:
+    put:
+      tags: [User]
+      operationId: updateForwardRule
+      summary: Replace a forwarding rule
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ForwardRuleWrite"
+      responses:
+        "200":
+          description: Forwarding rule updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ForwardRule"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      tags: [User]
+      operationId: deleteForwardRule
+      summary: Delete a forwarding rule
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      responses:
+        "204":
+          $ref: "#/components/responses/NoContent"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/users:
+    get:
+      tags: [Admin]
+      operationId: listUsers
+      summary: List users
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Users.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/User"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      tags: [Admin]
+      operationId: createUser
+      summary: Create a user
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserCreate"
+      responses:
+        "201":
+          description: User created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/v1/users/{id}:
+    put:
+      tags: [Admin]
+      operationId: updateUser
+      summary: Update a user
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/UserUpdate"
+      responses:
+        "200":
+          description: User updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/User"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      tags: [Admin]
+      operationId: deleteUser
+      summary: Delete a user
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      responses:
+        "204":
+          $ref: "#/components/responses/NoContent"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/device-groups:
+    get:
+      tags: [Admin]
+      operationId: listDeviceGroups
+      summary: List device groups
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Device groups.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/DeviceGroup"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      tags: [Admin]
+      operationId: createDeviceGroup
+      summary: Create a device group
+      security:
+        - BearerAuth: []
+      requestBody:
+        $ref: "#/components/requestBodies/DeviceGroupWrite"
+      responses:
+        "201":
+          description: Device group created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeviceGroup"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/v1/device-groups/{id}:
+    put:
+      tags: [Admin]
+      operationId: updateDeviceGroup
+      summary: Replace a device group
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      requestBody:
+        $ref: "#/components/requestBodies/DeviceGroupWrite"
+      responses:
+        "200":
+          description: Device group updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeviceGroup"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      tags: [Admin]
+      operationId: deleteDeviceGroup
+      summary: Delete a device group
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      responses:
+        "204":
+          $ref: "#/components/responses/NoContent"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/tunnels:
+    get:
+      tags: [Admin]
+      operationId: listTunnels
+      summary: List tunnels
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Tunnels.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Tunnel"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      tags: [Admin]
+      operationId: createTunnel
+      summary: Create a tunnel
+      security:
+        - BearerAuth: []
+      requestBody:
+        $ref: "#/components/requestBodies/TunnelWrite"
+      responses:
+        "201":
+          description: Tunnel created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tunnel"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/v1/tunnels/{id}:
+    put:
+      tags: [Admin]
+      operationId: updateTunnel
+      summary: Replace a tunnel
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      requestBody:
+        $ref: "#/components/requestBodies/TunnelWrite"
+      responses:
+        "200":
+          description: Tunnel updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Tunnel"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      tags: [Admin]
+      operationId: deleteTunnel
+      summary: Delete a tunnel
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      responses:
+        "204":
+          $ref: "#/components/responses/NoContent"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/protocol-policies:
+    get:
+      tags: [Admin]
+      operationId: listProtocolPolicies
+      summary: List protocol policies
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Protocol policies.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ProtocolPolicy"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      tags: [Admin]
+      operationId: createProtocolPolicy
+      summary: Create a protocol policy
+      security:
+        - BearerAuth: []
+      requestBody:
+        $ref: "#/components/requestBodies/ProtocolPolicyWrite"
+      responses:
+        "201":
+          description: Protocol policy created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProtocolPolicy"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/v1/protocol-policies/{id}:
+    put:
+      tags: [Admin]
+      operationId: updateProtocolPolicy
+      summary: Replace a protocol policy
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      requestBody:
+        $ref: "#/components/requestBodies/ProtocolPolicyWrite"
+      responses:
+        "200":
+          description: Protocol policy updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProtocolPolicy"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      tags: [Admin]
+      operationId: deleteProtocolPolicy
+      summary: Delete a protocol policy
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      responses:
+        "204":
+          $ref: "#/components/responses/NoContent"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/speed-limits:
+    get:
+      tags: [Admin]
+      operationId: listSpeedLimits
+      summary: List speed limits
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Speed limits.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/SpeedLimit"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      tags: [Admin]
+      operationId: createSpeedLimit
+      summary: Create a speed limit
+      security:
+        - BearerAuth: []
+      requestBody:
+        $ref: "#/components/requestBodies/SpeedLimitWrite"
+      responses:
+        "201":
+          description: Speed limit created.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SpeedLimit"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/v1/speed-limits/{id}:
+    put:
+      tags: [Admin]
+      operationId: updateSpeedLimit
+      summary: Replace a speed limit
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      requestBody:
+        $ref: "#/components/requestBodies/SpeedLimitWrite"
+      responses:
+        "200":
+          description: Speed limit updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SpeedLimit"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      tags: [Admin]
+      operationId: deleteSpeedLimit
+      summary: Delete a speed limit
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      responses:
+        "204":
+          $ref: "#/components/responses/NoContent"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/nodes:
+    get:
+      tags: [Admin]
+      operationId: listNodes
+      summary: List registered nodes
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Nodes.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Node"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/v1/nodes/{id}:
+    put:
+      tags: [Admin]
+      operationId: updateNode
+      summary: Update node metadata
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NodeUpdate"
+      responses:
+        "200":
+          description: Node updated.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Node"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+    delete:
+      tags: [Admin]
+      operationId: deleteNode
+      summary: Delete a node
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      responses:
+        "204":
+          $ref: "#/components/responses/NoContent"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /api/v1/install-tokens:
+    get:
+      tags: [Admin]
+      operationId: listInstallTokens
+      summary: List node install tokens
+      security:
+        - BearerAuth: []
+      responses:
+        "200":
+          description: Install tokens.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/InstallToken"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+    post:
+      tags: [Admin]
+      operationId: createInstallToken
+      summary: Create a node install token
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/InstallTokenCreate"
+      responses:
+        "201":
+          description: Install token created. The plain token is returned once.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/InstallTokenCreateResponse"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/v1/audit-logs:
+    get:
+      tags: [Admin]
+      operationId: listAuditLogs
+      summary: List audit logs
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Audit logs.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/AuditLog"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/v1/protocol-violations:
+    get:
+      tags: [Admin]
+      operationId: listProtocolViolations
+      summary: List protocol policy violations
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/Limit"
+      responses:
+        "200":
+          description: Protocol violations.
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ProtocolViolation"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /api/v1/agent/register:
+    post:
+      tags: [Agent]
+      operationId: registerAgent
+      summary: Register a node using an install token
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentRegisterRequest"
+      responses:
+        "201":
+          description: Node registered. The node token is returned once.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentRegisterResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/agent/heartbeat:
+    post:
+      tags: [Agent]
+      operationId: agentHeartbeat
+      summary: Report node liveness and revision state
+      security:
+        - AgentBearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentHeartbeatRequest"
+      responses:
+        "200":
+          description: Desired revision and server time.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentHeartbeatResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/agent/config:
+    get:
+      tags: [Agent]
+      operationId: getAgentConfig
+      summary: Pull effective node configuration
+      security:
+        - AgentBearerAuth: []
+      responses:
+        "200":
+          description: Node configuration bundle.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentConfig"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/agent/traffic:
+    post:
+      tags: [Agent]
+      operationId: reportAgentTraffic
+      summary: Report rule traffic counters
+      security:
+        - AgentBearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentTrafficRequest"
+      responses:
+        "200":
+          description: Samples accepted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AcceptedResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/agent/violations:
+    post:
+      tags: [Agent]
+      operationId: reportProtocolViolation
+      summary: Report a protocol policy violation
+      security:
+        - AgentBearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProtocolViolationCreate"
+      responses:
+        "201":
+          description: Violation accepted.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProtocolViolation"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+      description: User access or refresh JWT.
+    AgentBearerAuth:
+      type: http
+      scheme: bearer
+      description: Node token returned by agent registration.
+
+  parameters:
+    Id:
+      name: id
+      in: path
+      required: true
+      schema:
+        type: integer
+        minimum: 1
+    Limit:
+      name: limit
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 1000
+        default: 200
+
+  requestBodies:
+    DeviceGroupWrite:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/DeviceGroupWrite"
+    TunnelWrite:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/TunnelWrite"
+    ProtocolPolicyWrite:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ProtocolPolicyWrite"
+    SpeedLimitWrite:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/SpeedLimitWrite"
+
+  responses:
+    BadRequest:
+      description: Invalid request.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Unauthorized:
+      description: Missing or invalid credentials.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    Forbidden:
+      description: Authenticated principal is not allowed to perform this action.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NotFound:
+      description: Resource was not found.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/Error"
+    NoContent:
+      description: Resource deleted.
+
+  schemas:
+    Error:
+      type: object
+      required: [error]
+      properties:
+        error:
+          type: string
+
+    HealthResponse:
+      type: object
+      required: [status, time]
+      properties:
+        status:
+          type: string
+          const: ok
+        time:
+          type: string
+          format: date-time
+
+    BaseModel:
+      type: object
+      required: [id, createdAt, updatedAt]
+      properties:
+        id:
+          type: integer
+          minimum: 1
+        createdAt:
+          type: string
+          format: date-time
+        updatedAt:
+          type: string
+          format: date-time
+
+    LoginRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          minLength: 1
+          maxLength: 80
+        password:
+          type: string
+          minLength: 1
+
+    AuthResponse:
+      type: object
+      required: [accessToken, refreshToken, user]
+      properties:
+        accessToken:
+          type: string
+        refreshToken:
+          type: string
+        user:
+          $ref: "#/components/schemas/User"
+
+    RefreshResponse:
+      type: object
+      required: [accessToken]
+      properties:
+        accessToken:
+          type: string
+
+    User:
+      allOf:
+        - $ref: "#/components/schemas/BaseModel"
+        - type: object
+          required: [username, role, status, flowLimitBytes, usedBytes, forwardLimit]
+          properties:
+            username:
+              type: string
+              maxLength: 80
+            displayName:
+              type: string
+              maxLength: 120
+            role:
+              $ref: "#/components/schemas/UserRole"
+            status:
+              $ref: "#/components/schemas/UserStatus"
+            flowLimitBytes:
+              type: integer
+              minimum: 0
+              format: int64
+            usedBytes:
+              type: integer
+              minimum: 0
+              format: int64
+            forwardLimit:
+              type: integer
+              minimum: 0
+            expiresAt:
+              type: [string, "null"]
+              format: date-time
+
+    UserCreate:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+          minLength: 1
+          maxLength: 80
+        displayName:
+          type: string
+          maxLength: 120
+        password:
+          type: string
+          minLength: 1
+        role:
+          $ref: "#/components/schemas/UserRole"
+        status:
+          $ref: "#/components/schemas/UserStatus"
+        flowLimitBytes:
+          type: integer
+          minimum: 0
+          format: int64
+        forwardLimit:
+          type: integer
+          minimum: 0
+        expiresAt:
+          type: [string, "null"]
+          format: date-time
+
+    UserUpdate:
+      type: object
+      properties:
+        username:
+          type: string
+          minLength: 1
+          maxLength: 80
+        displayName:
+          type: string
+          maxLength: 120
+        password:
+          type: string
+          minLength: 1
+        role:
+          $ref: "#/components/schemas/UserRole"
+        status:
+          $ref: "#/components/schemas/UserStatus"
+        flowLimitBytes:
+          type: integer
+          minimum: 0
+          format: int64
+        forwardLimit:
+          type: integer
+          minimum: 0
+        expiresAt:
+          type: [string, "null"]
+          format: date-time
+
+    UserRole:
+      type: string
+      enum: [admin, user]
+
+    UserStatus:
+      type: string
+      enum: [active, disabled, expired]
+
+    DeviceGroup:
+      allOf:
+        - $ref: "#/components/schemas/BaseModel"
+        - $ref: "#/components/schemas/DeviceGroupWrite"
+
+    DeviceGroupWrite:
+      type: object
+      required: [name, role]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 120
+        role:
+          type: string
+          enum: [entry, exit, relay]
+        bindIPs:
+          type: string
+          description: Comma separated bind IP list or empty for default bind.
+          maxLength: 255
+        portStart:
+          type: integer
+          minimum: 0
+          maximum: 65535
+        portEnd:
+          type: integer
+          minimum: 0
+          maximum: 65535
+        trafficRatio:
+          type: number
+          minimum: 0
+          default: 1
+        protocolPolicyId:
+          type: [integer, "null"]
+          minimum: 1
+        failoverGroupId:
+          type: [integer, "null"]
+          minimum: 1
+        advancedJson:
+          type: string
+          description: Raw JSON string reserved for agent-specific options.
+
+    Node:
+      allOf:
+        - $ref: "#/components/schemas/BaseModel"
+        - type: object
+          required:
+            - deviceGroupId
+            - name
+            - uuid
+            - status
+            - appliedRevision
+            - desiredRevision
+          properties:
+            deviceGroupId:
+              type: integer
+              minimum: 1
+            name:
+              type: string
+              maxLength: 120
+            uuid:
+              type: string
+              maxLength: 80
+            status:
+              type: string
+              enum: [online, offline, disabled]
+            version:
+              type: string
+              maxLength: 80
+            publicIp:
+              type: string
+              maxLength: 80
+            connectHost:
+              type: string
+              maxLength: 160
+            lastSeenAt:
+              type: [string, "null"]
+              format: date-time
+            systemJson:
+              type: string
+            appliedRevision:
+              type: integer
+              format: int64
+            desiredRevision:
+              type: integer
+              format: int64
+
+    NodeUpdate:
+      type: object
+      properties:
+        deviceGroupId:
+          type: integer
+          minimum: 1
+        name:
+          type: string
+          maxLength: 120
+        status:
+          type: string
+          enum: [online, offline, disabled]
+        connectHost:
+          type: string
+          maxLength: 160
+
+    Tunnel:
+      allOf:
+        - $ref: "#/components/schemas/BaseModel"
+        - $ref: "#/components/schemas/TunnelWrite"
+
+    TunnelWrite:
+      type: object
+      required: [name, mode, entryGroupId, protocol, flowAccounting]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 120
+        mode:
+          type: string
+          enum: [single, relay, failover]
+        entryGroupId:
+          type: integer
+          minimum: 1
+        exitGroupId:
+          type: [integer, "null"]
+          minimum: 1
+        protocol:
+          type: string
+          description: Transport profile used by the agent supervisor.
+          enum: [direct, tcp, udp, ws, wss, tls, quic, relay]
+        flowAccounting:
+          type: string
+          enum: [single, entry, exit, both]
+        entryTrafficRatio:
+          type: number
+          minimum: 0
+          default: 1
+        exitTrafficRatio:
+          type: number
+          minimum: 0
+          default: 1
+        protocolPolicyId:
+          type: [integer, "null"]
+          minimum: 1
+        advancedJson:
+          type: string
+
+    ForwardRule:
+      allOf:
+        - $ref: "#/components/schemas/BaseModel"
+        - $ref: "#/components/schemas/ForwardRuleWrite"
+        - type: object
+          required: [status, inBytes, outBytes, revision, violationCount]
+          properties:
+            status:
+              $ref: "#/components/schemas/ForwardRuleStatus"
+            inBytes:
+              type: integer
+              minimum: 0
+              format: int64
+            outBytes:
+              type: integer
+              minimum: 0
+              format: int64
+            revision:
+              type: integer
+              format: int64
+            lastSyncError:
+              type: string
+            violationCount:
+              type: integer
+              minimum: 0
+
+    ForwardRuleWrite:
+      type: object
+      required: [tunnelId, name, protocol, remoteHost, remotePort]
+      properties:
+        userId:
+          type: integer
+          minimum: 1
+          description: Required for admin callers; non-admin callers are forced to their own user ID.
+        tunnelId:
+          type: integer
+          minimum: 1
+        name:
+          type: string
+          minLength: 1
+          maxLength: 120
+        protocol:
+          $ref: "#/components/schemas/ForwardRuleProtocol"
+        listenPort:
+          type: integer
+          minimum: 0
+          maximum: 65535
+          description: Zero or omitted asks the API to allocate a port from the tunnel entry group.
+        remoteHost:
+          type: string
+          minLength: 1
+          maxLength: 255
+        remotePort:
+          type: integer
+          minimum: 1
+          maximum: 65535
+        strategy:
+          type: string
+          enum: [least_conn, round_robin, random, hash]
+          default: least_conn
+        protocolPolicyId:
+          type: [integer, "null"]
+          minimum: 1
+
+    ForwardRuleProtocol:
+      type: string
+      enum: [tcp, udp, tcp_udp]
+
+    ForwardRuleStatus:
+      type: string
+      enum: [unsynced, syncing, active, paused, failed, protocol_violation]
+
+    ProtocolPolicy:
+      description: >
+        ProtocolPolicy controls payload or tunnel protocol restrictions. Effective
+        policy precedence is forwarding rule, then tunnel, then device group.
+      allOf:
+        - $ref: "#/components/schemas/BaseModel"
+        - $ref: "#/components/schemas/ProtocolPolicyWrite"
+
+    ProtocolPolicyWrite:
+      type: object
+      required: [name, template, mode]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 120
+        template:
+          type: string
+          enum: [none, iepl_iplc_no_tls, plain_tcp_only, http_only, block_proxy_like, custom]
+        mode:
+          type: string
+          enum: [observe, block, reject]
+          default: block
+        blockTls:
+          type: boolean
+          default: false
+        blockQuic:
+          type: boolean
+          default: false
+        allowPlainTcpOnly:
+          type: boolean
+          default: false
+        allowHttpOnly:
+          type: boolean
+          default: false
+        blockProxyLike:
+          type: boolean
+          default: false
+        blockEncryptedTunnel:
+          type: boolean
+          default: false
+        description:
+          type: string
+
+    SpeedLimit:
+      allOf:
+        - $ref: "#/components/schemas/BaseModel"
+        - $ref: "#/components/schemas/SpeedLimitWrite"
+
+    SpeedLimitWrite:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+          minLength: 1
+          maxLength: 120
+        userId:
+          type: [integer, "null"]
+          minimum: 1
+        tunnelId:
+          type: [integer, "null"]
+          minimum: 1
+        ruleId:
+          type: [integer, "null"]
+          minimum: 1
+        uploadBps:
+          type: integer
+          minimum: 0
+          format: int64
+        downloadBps:
+          type: integer
+          minimum: 0
+          format: int64
+        maxConns:
+          type: integer
+          minimum: 0
+        maxIps:
+          type: integer
+          minimum: 0
+
+    TrafficSample:
+      allOf:
+        - $ref: "#/components/schemas/BaseModel"
+        - type: object
+          required: [userId, ruleId, nodeId, direction, bytes, sampledAt]
+          properties:
+            userId:
+              type: integer
+              minimum: 1
+            ruleId:
+              type: integer
+              minimum: 1
+            nodeId:
+              type: integer
+              minimum: 1
+            direction:
+              type: string
+              enum: [in, out]
+            bytes:
+              type: integer
+              minimum: 0
+              format: int64
+            sampledAt:
+              type: string
+              format: date-time
+
+    AuditLog:
+      allOf:
+        - $ref: "#/components/schemas/BaseModel"
+        - type: object
+          required: [action, resourceType]
+          properties:
+            actorId:
+              type: [integer, "null"]
+              minimum: 1
+            action:
+              type: string
+              maxLength: 100
+            resourceType:
+              type: string
+              maxLength: 80
+            resourceId:
+              type: string
+              maxLength: 80
+            metadataJson:
+              type: string
+
+    InstallToken:
+      allOf:
+        - $ref: "#/components/schemas/BaseModel"
+        - type: object
+          required: [deviceGroupId, expiresAt]
+          properties:
+            label:
+              type: string
+              maxLength: 120
+            deviceGroupId:
+              type: integer
+              minimum: 1
+            expiresAt:
+              type: string
+              format: date-time
+            usedAt:
+              type: [string, "null"]
+              format: date-time
+
+    InstallTokenCreate:
+      type: object
+      required: [deviceGroupId]
+      properties:
+        label:
+          type: string
+          maxLength: 120
+        deviceGroupId:
+          type: integer
+          minimum: 1
+        ttlHours:
+          type: integer
+          minimum: 1
+          default: 24
+
+    InstallTokenCreateResponse:
+      type: object
+      required: [installToken, token, command]
+      properties:
+        installToken:
+          $ref: "#/components/schemas/InstallToken"
+        token:
+          type: string
+          description: Plain install token, returned once.
+        command:
+          type: string
+          description: Shell command for installing a node.
+
+    ProtocolViolation:
+      allOf:
+        - $ref: "#/components/schemas/BaseModel"
+        - type: object
+          required: [ruleId, nodeId, policyId, protocol, action, occurredAt]
+          properties:
+            ruleId:
+              type: integer
+              minimum: 1
+            nodeId:
+              type: integer
+              minimum: 1
+            policyId:
+              type: integer
+              minimum: 1
+            protocol:
+              type: string
+              maxLength: 60
+            sourceIp:
+              type: string
+              maxLength: 120
+            action:
+              type: string
+              enum: [observe, block, reject]
+            detail:
+              type: string
+            occurredAt:
+              type: string
+              format: date-time
+
+    ProtocolViolationCreate:
+      type: object
+      required: [ruleId, policyId, protocol]
+      properties:
+        ruleId:
+          type: integer
+          minimum: 1
+        policyId:
+          type: integer
+          minimum: 1
+        protocol:
+          type: string
+          maxLength: 60
+        sourceIp:
+          type: string
+          maxLength: 120
+        action:
+          type: string
+          enum: [observe, block, reject]
+          default: block
+        detail:
+          type: string
+
+    Dashboard:
+      type: object
+      required:
+        - users
+        - nodes
+        - onlineNodes
+        - forwardRules
+        - todayBytes
+        - violations24h
+        - recentViolations
+        - recentRules
+      properties:
+        users:
+          type: integer
+          minimum: 0
+        nodes:
+          type: integer
+          minimum: 0
+        onlineNodes:
+          type: integer
+          minimum: 0
+        forwardRules:
+          type: integer
+          minimum: 0
+        todayBytes:
+          type: integer
+          minimum: 0
+          format: int64
+        violations24h:
+          type: integer
+          minimum: 0
+        recentViolations:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProtocolViolation"
+        recentRules:
+          type: array
+          items:
+            $ref: "#/components/schemas/ForwardRule"
+
+    AgentRegisterRequest:
+      type: object
+      required: [installToken]
+      properties:
+        installToken:
+          type: string
+        name:
+          type: string
+          maxLength: 120
+        uuid:
+          type: string
+          maxLength: 80
+        version:
+          type: string
+          maxLength: 80
+        publicIp:
+          type: string
+          maxLength: 80
+        connectHost:
+          type: string
+          maxLength: 160
+
+    AgentRegisterResponse:
+      type: object
+      required: [nodeId, nodeToken, uuid]
+      properties:
+        nodeId:
+          type: integer
+          minimum: 1
+        nodeToken:
+          type: string
+        uuid:
+          type: string
+
+    AgentHeartbeatRequest:
+      type: object
+      required: [version, appliedRevision]
+      properties:
+        version:
+          type: string
+          maxLength: 80
+        publicIp:
+          type: string
+          maxLength: 80
+        connectHost:
+          type: string
+          maxLength: 160
+        appliedRevision:
+          type: integer
+          format: int64
+        system:
+          type: object
+          additionalProperties: true
+
+    AgentHeartbeatResponse:
+      type: object
+      required: [desiredRevision, serverTime]
+      properties:
+        desiredRevision:
+          type: integer
+          format: int64
+        serverTime:
+          type: string
+          format: date-time
+
+    AgentConfig:
+      type: object
+      required:
+        - node
+        - deviceGroup
+        - tunnels
+        - forwardRules
+        - protocolPolicies
+        - speedLimits
+        - revision
+        - generatedAt
+      properties:
+        node:
+          $ref: "#/components/schemas/Node"
+        deviceGroup:
+          $ref: "#/components/schemas/DeviceGroup"
+        tunnels:
+          type: array
+          items:
+            $ref: "#/components/schemas/Tunnel"
+        forwardRules:
+          type: array
+          items:
+            $ref: "#/components/schemas/ForwardRule"
+        protocolPolicies:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProtocolPolicy"
+        speedLimits:
+          type: array
+          items:
+            $ref: "#/components/schemas/SpeedLimit"
+        revision:
+          type: integer
+          format: int64
+        generatedAt:
+          type: string
+          format: date-time
+
+    AgentTrafficRequest:
+      type: object
+      required: [samples]
+      properties:
+        samples:
+          type: array
+          items:
+            type: object
+            required: [ruleId]
+            properties:
+              ruleId:
+                type: integer
+                minimum: 1
+              inBytes:
+                type: integer
+                minimum: 0
+                format: int64
+              outBytes:
+                type: integer
+                minimum: 0
+                format: int64
+
+    AcceptedResponse:
+      type: object
+      required: [accepted]
+      properties:
+        accepted:
+          type: integer
+          minimum: 0
+
+    ForwardingRuleBundle:
+      type: object
+      description: Portable forwarding-rule import/export bundle.
+      required: [schemaVersion, rules]
+      properties:
+        schemaVersion:
+          type: string
+          const: dusheng.forwarding-rules.v1
+        exportedAt:
+          type: string
+          format: date-time
+        source:
+          type: object
+          properties:
+            panelUrl:
+              type: string
+              format: uri
+            panelVersion:
+              type: string
+        protocolPolicies:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProtocolPolicyWrite"
+        rules:
+          type: array
+          items:
+            $ref: "#/components/schemas/ForwardingRuleImportItem"
+
+    ForwardingRuleImportItem:
+      type: object
+      required: [name, protocol, remoteHost, remotePort]
+      properties:
+        id:
+          type: integer
+          minimum: 1
+          description: Optional source-side ID retained only for audit or diff tools.
+        userId:
+          type: integer
+          minimum: 1
+        username:
+          type: string
+        tunnelId:
+          type: integer
+          minimum: 1
+        tunnelName:
+          type: string
+        name:
+          type: string
+          minLength: 1
+          maxLength: 120
+        protocol:
+          $ref: "#/components/schemas/ForwardRuleProtocol"
+        listenPort:
+          type: integer
+          minimum: 0
+          maximum: 65535
+        remoteHost:
+          type: string
+          minLength: 1
+          maxLength: 255
+        remotePort:
+          type: integer
+          minimum: 1
+          maximum: 65535
+        strategy:
+          type: string
+          enum: [least_conn, round_robin, random, hash]
+        protocolPolicyId:
+          type: integer
+          minimum: 1
+        protocolPolicyName:
+          type: string
+        status:
+          $ref: "#/components/schemas/ForwardRuleStatus"
+        revision:
+          type: integer
+          format: int64
+        metadata:
+          type: object
+          additionalProperties: true

@@ -1,0 +1,271 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://dusheng.dev/schemas/forwarding-rule.schema.json",
+  "title": "DuSheng Forwarding Rule Import/Export Bundle",
+  "description": "Portable bundle for exporting and importing forwarding rules, referenced tunnels, and ProtocolPolicy definitions.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schemaVersion", "rules"],
+  "properties": {
+    "schemaVersion": {
+      "type": "string",
+      "const": "dusheng.forwarding-rules.v1"
+    },
+    "exportedAt": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "mode": {
+      "type": "string",
+      "enum": ["export", "import"],
+      "default": "export"
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "panelUrl": {
+          "type": "string",
+          "format": "uri"
+        },
+        "panelVersion": {
+          "type": "string",
+          "minLength": 1
+        },
+        "exportedBy": {
+          "type": "string"
+        }
+      }
+    },
+    "protocolPolicies": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/protocolPolicy"
+      },
+      "uniqueItems": true,
+      "default": []
+    },
+    "tunnels": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/tunnelRef"
+      },
+      "uniqueItems": true,
+      "default": []
+    },
+    "rules": {
+      "type": "array",
+      "minItems": 1,
+      "items": {
+        "$ref": "#/$defs/forwardingRule"
+      }
+    }
+  },
+  "$defs": {
+    "id": {
+      "type": "integer",
+      "minimum": 1
+    },
+    "port": {
+      "type": "integer",
+      "minimum": 1,
+      "maximum": 65535
+    },
+    "optionalPort": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 65535
+    },
+    "protocolPolicy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "template", "mode"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "template": {
+          "type": "string",
+          "enum": [
+            "none",
+            "iepl_iplc_no_tls",
+            "plain_tcp_only",
+            "http_only",
+            "block_proxy_like",
+            "custom"
+          ]
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["observe", "block", "reject"],
+          "default": "block"
+        },
+        "blockTls": {
+          "type": "boolean",
+          "default": false
+        },
+        "blockQuic": {
+          "type": "boolean",
+          "default": false
+        },
+        "allowPlainTcpOnly": {
+          "type": "boolean",
+          "default": false
+        },
+        "allowHttpOnly": {
+          "type": "boolean",
+          "default": false
+        },
+        "blockProxyLike": {
+          "type": "boolean",
+          "default": false
+        },
+        "blockEncryptedTunnel": {
+          "type": "boolean",
+          "default": false
+        },
+        "description": {
+          "type": "string"
+        }
+      }
+    },
+    "tunnelRef": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "mode": {
+          "type": "string",
+          "enum": ["single", "relay", "failover"]
+        },
+        "entryGroupName": {
+          "type": "string"
+        },
+        "exitGroupName": {
+          "type": ["string", "null"]
+        },
+        "protocol": {
+          "type": "string",
+          "enum": ["direct", "tcp", "udp", "ws", "wss", "tls", "quic", "relay"]
+        },
+        "flowAccounting": {
+          "type": "string",
+          "enum": ["single", "entry", "exit", "both"]
+        },
+        "protocolPolicyName": {
+          "type": ["string", "null"]
+        }
+      }
+    },
+    "forwardingRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["name", "protocol", "remoteHost", "remotePort"],
+      "properties": {
+        "id": {
+          "$ref": "#/$defs/id"
+        },
+        "userId": {
+          "$ref": "#/$defs/id"
+        },
+        "username": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 80
+        },
+        "tunnelId": {
+          "$ref": "#/$defs/id"
+        },
+        "tunnelName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "name": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "protocol": {
+          "type": "string",
+          "enum": ["tcp", "udp", "tcp_udp"]
+        },
+        "listenPort": {
+          "$ref": "#/$defs/optionalPort",
+          "description": "Use 0 or omit to let the target panel allocate a port."
+        },
+        "remoteHost": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 255
+        },
+        "remotePort": {
+          "$ref": "#/$defs/port"
+        },
+        "status": {
+          "type": "string",
+          "enum": ["unsynced", "syncing", "active", "paused", "failed", "protocol_violation"]
+        },
+        "strategy": {
+          "type": "string",
+          "enum": ["least_conn", "round_robin", "random", "hash"],
+          "default": "least_conn"
+        },
+        "protocolPolicyId": {
+          "$ref": "#/$defs/id"
+        },
+        "protocolPolicyName": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 120
+        },
+        "revision": {
+          "type": "integer"
+        },
+        "inBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0
+        },
+        "outBytes": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0
+        },
+        "lastSyncError": {
+          "type": "string"
+        },
+        "violationCount": {
+          "type": "integer",
+          "minimum": 0,
+          "default": 0
+        },
+        "metadata": {
+          "type": "object",
+          "additionalProperties": true
+        }
+      },
+      "anyOf": [
+        {
+          "required": ["tunnelId"]
+        },
+        {
+          "required": ["tunnelName"]
+        }
+      ]
+    }
+  }
+}
