@@ -22,6 +22,8 @@ const (
 	defaultFirstPacketBytes = 2048
 	defaultReadTimeout      = time.Second
 	defaultFlushInterval    = 15 * time.Second
+	defaultUDPIdleTimeout   = 60 * time.Second
+	maxUDPPacketBytes       = 64 * 1024
 )
 
 type Reporter interface {
@@ -34,6 +36,7 @@ type Options struct {
 	FirstPacketBytes int
 	ReadTimeout      time.Duration
 	FlushInterval    time.Duration
+	UDPIdleTimeout   time.Duration
 }
 
 type Runtime struct {
@@ -43,11 +46,24 @@ type Runtime struct {
 	traffic  *trafficBuffer
 
 	mu           sync.Mutex
-	listeners    map[uint]*ruleListener
+	listeners    map[listenerKey]managedListener
+	trackers     map[uint]*limitTracker
 	running      bool
 	lastApplyErr string
 	closed       bool
 	stopFlush    chan struct{}
+}
+
+type listenerKey struct {
+	RuleID  uint
+	Network string
+}
+
+type managedListener interface {
+	stop()
+	active() int64
+	network() string
+	fingerprint() string
 }
 
 func New(reporter Reporter, logger *log.Logger, options Options) *Runtime {
@@ -63,12 +79,16 @@ func New(reporter Reporter, logger *log.Logger, options Options) *Runtime {
 	if options.FlushInterval <= 0 {
 		options.FlushInterval = defaultFlushInterval
 	}
+	if options.UDPIdleTimeout <= 0 {
+		options.UDPIdleTimeout = defaultUDPIdleTimeout
+	}
 	rt := &Runtime{
 		reporter:  reporter,
 		logger:    logger,
 		options:   options,
 		traffic:   newTrafficBuffer(reporter, logger),
-		listeners: map[uint]*ruleListener{},
+		listeners: map[listenerKey]managedListener{},
+		trackers:  map[uint]*limitTracker{},
 		stopFlush: make(chan struct{}),
 	}
 	go rt.flushLoop()
@@ -89,16 +109,28 @@ func (r *Runtime) Apply(ctx context.Context, cfg client.AgentConfig) error {
 	}
 	r.running = true
 	current := r.listeners
-	next := make(map[uint]*ruleListener, len(desired))
-	var toStop []*ruleListener
+	next := make(map[listenerKey]managedListener, len(desired))
+	nextTrackers := make(map[uint]*limitTracker)
+	var toStop []managedListener
 	var startErr error
 
-	for ruleID, desiredCfg := range desired {
-		if existing := current[ruleID]; existing != nil && existing.cfg.fingerprint == desiredCfg.fingerprint {
-			next[ruleID] = existing
+	for key, desiredCfg := range desired {
+		tracker := nextTrackers[desiredCfg.rule.ID]
+		if tracker == nil {
+			if existing := r.trackers[desiredCfg.rule.ID]; existing != nil && existing.sameLimit(desiredCfg.limit) {
+				tracker = existing
+			} else {
+				tracker = newLimitTracker(desiredCfg.limit)
+			}
+			nextTrackers[desiredCfg.rule.ID] = tracker
+		}
+		desiredCfg.tracker = tracker
+
+		if existing := current[key]; existing != nil && existing.fingerprint() == desiredCfg.fingerprint {
+			next[key] = existing
 			continue
 		}
-		if existing := current[ruleID]; existing != nil {
+		if existing := current[key]; existing != nil {
 			toStop = append(toStop, existing)
 		}
 		listener, err := r.startListener(ctx, desiredCfg)
@@ -106,14 +138,15 @@ func (r *Runtime) Apply(ctx context.Context, cfg client.AgentConfig) error {
 			startErr = errors.Join(startErr, err)
 			continue
 		}
-		next[ruleID] = listener
+		next[key] = listener
 	}
-	for ruleID, existing := range current {
-		if _, ok := desired[ruleID]; !ok {
+	for key, existing := range current {
+		if _, ok := desired[key]; !ok {
 			toStop = append(toStop, existing)
 		}
 	}
 	r.listeners = next
+	r.trackers = nextTrackers
 	r.lastApplyErr = errorString(startErr)
 	r.mu.Unlock()
 
@@ -135,14 +168,25 @@ func (r *Runtime) Running() bool {
 func (r *Runtime) Status() map[string]any {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	var active int64
+	var activeTCP, activeUDP int64
+	var tcpListeners, udpListeners int
 	for _, listener := range r.listeners {
-		active += listener.active()
+		switch listener.network() {
+		case "udp":
+			udpListeners++
+			activeUDP += listener.active()
+		default:
+			tcpListeners++
+			activeTCP += listener.active()
+		}
 	}
 	return map[string]any{
 		"running":           r.running && !r.closed,
 		"listeners":         len(r.listeners),
-		"activeConnections": active,
+		"tcpListeners":      tcpListeners,
+		"udpListeners":      udpListeners,
+		"activeConnections": activeTCP + activeUDP,
+		"activeUDPSessions": activeUDP,
 		"lastApplyError":    r.lastApplyErr,
 	}
 }
@@ -156,11 +200,12 @@ func (r *Runtime) Stop(ctx context.Context) error {
 	r.closed = true
 	r.running = false
 	close(r.stopFlush)
-	listeners := make([]*ruleListener, 0, len(r.listeners))
+	listeners := make([]managedListener, 0, len(r.listeners))
 	for _, listener := range r.listeners {
 		listeners = append(listeners, listener)
 	}
-	r.listeners = map[uint]*ruleListener{}
+	r.listeners = map[listenerKey]managedListener{}
+	r.trackers = map[uint]*limitTracker{}
 	r.mu.Unlock()
 
 	done := make(chan struct{})
@@ -179,7 +224,7 @@ func (r *Runtime) Stop(ctx context.Context) error {
 	}
 }
 
-func (r *Runtime) desiredListeners(cfg client.AgentConfig) (map[uint]ruleRuntimeConfig, error) {
+func (r *Runtime) desiredListeners(cfg client.AgentConfig) (map[listenerKey]ruleRuntimeConfig, error) {
 	tunnels := map[uint]client.Tunnel{}
 	for _, tunnel := range cfg.Tunnels {
 		tunnels[tunnel.ID] = tunnel
@@ -189,9 +234,9 @@ func (r *Runtime) desiredListeners(cfg client.AgentConfig) (map[uint]ruleRuntime
 		policies[policy.ID] = policy
 	}
 
-	desired := map[uint]ruleRuntimeConfig{}
+	desired := map[listenerKey]ruleRuntimeConfig{}
 	for _, rule := range cfg.ForwardRules {
-		if skipRule(rule) || !isTCPRule(rule) {
+		if skipRule(rule) || (!isTCPRule(rule) && !isUDPRule(rule)) {
 			continue
 		}
 		tunnel, ok := tunnels[rule.TunnelID]
@@ -201,14 +246,25 @@ func (r *Runtime) desiredListeners(cfg client.AgentConfig) (map[uint]ruleRuntime
 		policy := effectivePolicy(rule, tunnel, cfg.DeviceGroup, policies)
 		limit := effectiveLimit(rule, cfg.SpeedLimits)
 		listenHost := r.listenHost(cfg.DeviceGroup)
-		desired[rule.ID] = ruleRuntimeConfig{
+		base := ruleRuntimeConfig{
 			rule:        rule,
 			tunnel:      tunnel,
 			deviceGroup: cfg.DeviceGroup,
 			policy:      policy,
 			limit:       limit,
 			listenAddr:  net.JoinHostPort(listenHost, strconv.Itoa(rule.ListenPort)),
-			fingerprint: fingerprint(rule, tunnel, cfg.DeviceGroup, policy, limit, listenHost),
+		}
+		if isTCPRule(rule) {
+			cfg := base
+			cfg.network = "tcp"
+			cfg.fingerprint = fingerprint(rule, tunnel, cfg.deviceGroup, policy, limit, listenHost, cfg.network)
+			desired[listenerKey{RuleID: rule.ID, Network: cfg.network}] = cfg
+		}
+		if isUDPRule(rule) {
+			cfg := base
+			cfg.network = "udp"
+			cfg.fingerprint = fingerprint(rule, tunnel, cfg.deviceGroup, policy, limit, listenHost, cfg.network)
+			desired[listenerKey{RuleID: rule.ID, Network: cfg.network}] = cfg
 		}
 	}
 	return desired, nil
@@ -229,7 +285,10 @@ func (r *Runtime) listenHost(group client.DeviceGroup) string {
 	return ""
 }
 
-func (r *Runtime) startListener(ctx context.Context, cfg ruleRuntimeConfig) (*ruleListener, error) {
+func (r *Runtime) startListener(ctx context.Context, cfg ruleRuntimeConfig) (managedListener, error) {
+	if cfg.network == "udp" {
+		return r.startUDPListener(ctx, cfg)
+	}
 	ln, err := (&net.ListenConfig{}).Listen(ctx, "tcp", cfg.listenAddr)
 	if err != nil {
 		return nil, fmt.Errorf("listen rule %d on %s: %w", cfg.rule.ID, cfg.listenAddr, err)
@@ -239,12 +298,11 @@ func (r *Runtime) startListener(ctx context.Context, cfg ruleRuntimeConfig) (*ru
 		cfg:     cfg,
 		ln:      ln,
 		stopCh:  make(chan struct{}),
-		ipCount: map[string]int{},
 		conns:   map[net.Conn]struct{}{},
 	}
 	listener.wg.Add(1)
 	go listener.acceptLoop()
-	r.logger.Printf("runtime listener started rule=%d addr=%s target=%s:%d", cfg.rule.ID, cfg.listenAddr, cfg.rule.RemoteHost, cfg.rule.RemotePort)
+	r.logger.Printf("runtime tcp listener started rule=%d addr=%s target=%s:%d", cfg.rule.ID, cfg.listenAddr, cfg.rule.RemoteHost, cfg.rule.RemotePort)
 	return listener, nil
 }
 
@@ -273,6 +331,8 @@ type ruleRuntimeConfig struct {
 	deviceGroup client.DeviceGroup
 	policy      *client.ProtocolPolicy
 	limit       effectiveSpeedLimit
+	tracker     *limitTracker
+	network     string
 	listenAddr  string
 	fingerprint string
 }
@@ -286,7 +346,6 @@ type ruleListener struct {
 
 	activeConns int64
 	mu          sync.Mutex
-	ipCount     map[string]int
 	conns       map[net.Conn]struct{}
 }
 
@@ -371,32 +430,18 @@ func (l *ruleListener) handle(conn net.Conn) {
 }
 
 func (l *ruleListener) acquire(sourceIP string) bool {
-	limit := l.cfg.limit
-	if limit.MaxConns > 0 && atomic.LoadInt64(&l.activeConns) >= int64(limit.MaxConns) {
+	if l.cfg.tracker != nil && !l.cfg.tracker.acquire(sourceIP) {
 		return false
 	}
-
-	l.mu.Lock()
-	defer l.mu.Unlock()
-	if limit.MaxIPs > 0 {
-		if l.ipCount[sourceIP] == 0 && len(l.ipCount) >= limit.MaxIPs {
-			return false
-		}
-	}
-	l.ipCount[sourceIP]++
 	atomic.AddInt64(&l.activeConns, 1)
 	return true
 }
 
 func (l *ruleListener) release(sourceIP string) {
-	l.mu.Lock()
-	if count := l.ipCount[sourceIP]; count <= 1 {
-		delete(l.ipCount, sourceIP)
-	} else {
-		l.ipCount[sourceIP] = count - 1
-	}
-	l.mu.Unlock()
 	atomic.AddInt64(&l.activeConns, -1)
+	if l.cfg.tracker != nil {
+		l.cfg.tracker.release(sourceIP)
+	}
 }
 
 func (l *ruleListener) trackConn(conn net.Conn) {
@@ -413,6 +458,14 @@ func (l *ruleListener) untrackConn(conn net.Conn) {
 
 func (l *ruleListener) active() int64 {
 	return atomic.LoadInt64(&l.activeConns)
+}
+
+func (l *ruleListener) network() string {
+	return "tcp"
+}
+
+func (l *ruleListener) fingerprint() string {
+	return l.cfg.fingerprint
 }
 
 func (l *ruleListener) stop() {
@@ -455,6 +508,307 @@ func (l *ruleListener) reportViolation(ctx context.Context, result protocol.Resu
 	if err != nil {
 		l.runtime.logger.Printf("runtime violation report failed rule=%d: %v", l.cfg.rule.ID, err)
 	}
+}
+
+func (r *Runtime) startUDPListener(ctx context.Context, cfg ruleRuntimeConfig) (managedListener, error) {
+	conn, err := (&net.ListenConfig{}).ListenPacket(ctx, "udp", cfg.listenAddr)
+	if err != nil {
+		return nil, fmt.Errorf("listen udp rule %d on %s: %w", cfg.rule.ID, cfg.listenAddr, err)
+	}
+	listener := &udpListener{
+		runtime:  r,
+		cfg:      cfg,
+		conn:     conn,
+		stopCh:   make(chan struct{}),
+		sessions: map[string]*udpSession{},
+	}
+	listener.wg.Add(2)
+	go listener.readLoop()
+	go listener.cleanupLoop()
+	r.logger.Printf("runtime udp listener started rule=%d addr=%s target=%s:%d", cfg.rule.ID, cfg.listenAddr, cfg.rule.RemoteHost, cfg.rule.RemotePort)
+	return listener, nil
+}
+
+type udpListener struct {
+	runtime *Runtime
+	cfg     ruleRuntimeConfig
+	conn    net.PacketConn
+	stopCh  chan struct{}
+	wg      sync.WaitGroup
+
+	mu       sync.Mutex
+	sessions map[string]*udpSession
+}
+
+type udpSession struct {
+	listener        *udpListener
+	key             string
+	clientAddr      net.Addr
+	sourceIP        string
+	upstream        net.Conn
+	uploadLimiter   *tokenBucket
+	downloadLimiter *tokenBucket
+	lastSeen        int64
+	closeOnce       sync.Once
+}
+
+func (l *udpListener) readLoop() {
+	defer l.wg.Done()
+	buf := make([]byte, maxUDPPacketBytes)
+	for {
+		n, addr, err := l.conn.ReadFrom(buf)
+		if err != nil {
+			select {
+			case <-l.stopCh:
+				return
+			default:
+				l.runtime.logger.Printf("runtime udp read failed rule=%d: %v", l.cfg.rule.ID, err)
+				continue
+			}
+		}
+		packet := append([]byte(nil), buf[:n]...)
+		l.handleDatagram(addr, packet)
+	}
+}
+
+func (l *udpListener) cleanupLoop() {
+	defer l.wg.Done()
+	interval := l.runtime.options.UDPIdleTimeout / 2
+	if interval <= 0 {
+		interval = time.Second
+	}
+	if interval > 30*time.Second {
+		interval = 30 * time.Second
+	}
+	ticker := time.NewTicker(interval)
+	defer ticker.Stop()
+	for {
+		select {
+		case <-ticker.C:
+			l.closeIdleSessions(time.Now())
+		case <-l.stopCh:
+			return
+		}
+	}
+}
+
+func (l *udpListener) handleDatagram(clientAddr net.Addr, packet []byte) {
+	key := clientAddr.String()
+	l.mu.Lock()
+	session := l.sessions[key]
+	l.mu.Unlock()
+	if session != nil {
+		session.forwardClientPacket(packet)
+		return
+	}
+
+	sourceIP := remoteIP(clientAddr)
+	result := protocol.Detect(packet, policyFromClient(l.cfg.policy))
+	if result.Action != protocol.ActionAllow {
+		if result.Action == protocol.ActionBlock {
+			l.reportViolation(context.Background(), result, sourceIP, clientAddr.String())
+			return
+		}
+		go l.reportViolation(context.Background(), result, sourceIP, clientAddr.String())
+	}
+
+	if l.cfg.tracker != nil && !l.cfg.tracker.acquire(sourceIP) {
+		l.runtime.logger.Printf("runtime udp session rejected by limit rule=%d client=%s", l.cfg.rule.ID, clientAddr.String())
+		return
+	}
+	upstream, err := net.DialTimeout("udp", net.JoinHostPort(l.cfg.rule.RemoteHost, strconv.Itoa(l.cfg.rule.RemotePort)), 10*time.Second)
+	if err != nil {
+		if l.cfg.tracker != nil {
+			l.cfg.tracker.release(sourceIP)
+		}
+		l.runtime.logger.Printf("runtime udp dial failed rule=%d target=%s:%d: %v", l.cfg.rule.ID, l.cfg.rule.RemoteHost, l.cfg.rule.RemotePort, err)
+		return
+	}
+	session = &udpSession{
+		listener:        l,
+		key:             key,
+		clientAddr:      clientAddr,
+		sourceIP:        sourceIP,
+		upstream:        upstream,
+		uploadLimiter:   newTokenBucket(l.cfg.limit.UploadBps),
+		downloadLimiter: newTokenBucket(l.cfg.limit.DownloadBps),
+		lastSeen:        time.Now().UnixNano(),
+	}
+
+	l.mu.Lock()
+	if existing := l.sessions[key]; existing != nil {
+		l.mu.Unlock()
+		session.close()
+		if l.cfg.tracker != nil {
+			l.cfg.tracker.release(sourceIP)
+		}
+		existing.forwardClientPacket(packet)
+		return
+	}
+	l.sessions[key] = session
+	l.mu.Unlock()
+
+	l.wg.Add(1)
+	go session.readLoop()
+	session.forwardClientPacket(packet)
+}
+
+func (l *udpListener) closeIdleSessions(now time.Time) {
+	deadline := now.Add(-l.runtime.options.UDPIdleTimeout).UnixNano()
+	var stale []*udpSession
+	l.mu.Lock()
+	for key, session := range l.sessions {
+		if session.lastSeenAt() <= deadline {
+			delete(l.sessions, key)
+			stale = append(stale, session)
+		}
+	}
+	l.mu.Unlock()
+	for _, session := range stale {
+		session.close()
+		if l.cfg.tracker != nil {
+			l.cfg.tracker.release(session.sourceIP)
+		}
+	}
+}
+
+func (l *udpListener) removeSession(session *udpSession) {
+	l.mu.Lock()
+	if existing := l.sessions[session.key]; existing == session {
+		delete(l.sessions, session.key)
+		l.mu.Unlock()
+		session.close()
+		if l.cfg.tracker != nil {
+			l.cfg.tracker.release(session.sourceIP)
+		}
+		return
+	}
+	l.mu.Unlock()
+}
+
+func (l *udpListener) reportViolation(ctx context.Context, result protocol.Result, sourceIP, clientAddr string) {
+	if l.runtime.reporter == nil || l.cfg.policy == nil {
+		return
+	}
+	detail, _ := json.Marshal(map[string]any{
+		"reason":     result.Reason,
+		"host":       result.Host,
+		"alpn":       result.ALPN,
+		"protocol":   result.Protocol,
+		"ruleId":     l.cfg.rule.ID,
+		"tunnelId":   l.cfg.tunnel.ID,
+		"clientAddr": clientAddr,
+		"source":     "udp_runtime",
+	})
+	_, err := l.runtime.reporter.ReportViolation(ctx, client.ViolationReport{
+		RuleID:   l.cfg.rule.ID,
+		PolicyID: l.cfg.policy.ID,
+		Protocol: result.Protocol,
+		SourceIP: sourceIP,
+		Action:   result.Action,
+		Detail:   string(detail),
+	})
+	if err != nil {
+		l.runtime.logger.Printf("runtime udp violation report failed rule=%d: %v", l.cfg.rule.ID, err)
+	}
+}
+
+func (l *udpListener) active() int64 {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	return int64(len(l.sessions))
+}
+
+func (l *udpListener) network() string {
+	return "udp"
+}
+
+func (l *udpListener) fingerprint() string {
+	return l.cfg.fingerprint
+}
+
+func (l *udpListener) stop() {
+	select {
+	case <-l.stopCh:
+		return
+	default:
+		close(l.stopCh)
+		_ = l.conn.Close()
+		l.mu.Lock()
+		sessions := make([]*udpSession, 0, len(l.sessions))
+		for key, session := range l.sessions {
+			delete(l.sessions, key)
+			sessions = append(sessions, session)
+		}
+		l.mu.Unlock()
+		for _, session := range sessions {
+			session.close()
+			if l.cfg.tracker != nil {
+				l.cfg.tracker.release(session.sourceIP)
+			}
+		}
+		l.wg.Wait()
+		l.runtime.logger.Printf("runtime udp listener stopped rule=%d addr=%s", l.cfg.rule.ID, l.cfg.listenAddr)
+	}
+}
+
+func (s *udpSession) readLoop() {
+	defer s.listener.wg.Done()
+	defer s.listener.removeSession(s)
+	buf := make([]byte, maxUDPPacketBytes)
+	for {
+		n, err := s.upstream.Read(buf)
+		if n > 0 {
+			packet := append([]byte(nil), buf[:n]...)
+			s.downloadLimiter.wait(len(packet))
+			written, writeErr := s.listener.conn.WriteTo(packet, s.clientAddr)
+			if written > 0 {
+				s.listener.runtime.traffic.add(s.listener.cfg.rule.ID, 0, int64(written))
+			}
+			s.touch()
+			if writeErr != nil {
+				s.listener.runtime.logger.Printf("runtime udp client write failed rule=%d client=%s: %v", s.listener.cfg.rule.ID, s.clientAddr.String(), writeErr)
+				return
+			}
+		}
+		if err != nil {
+			select {
+			case <-s.listener.stopCh:
+			default:
+				if !errors.Is(err, net.ErrClosed) {
+					s.listener.runtime.logger.Printf("runtime udp upstream read failed rule=%d client=%s: %v", s.listener.cfg.rule.ID, s.clientAddr.String(), err)
+				}
+			}
+			return
+		}
+	}
+}
+
+func (s *udpSession) forwardClientPacket(packet []byte) {
+	s.touch()
+	s.uploadLimiter.wait(len(packet))
+	written, err := s.upstream.Write(packet)
+	if written > 0 {
+		s.listener.runtime.traffic.add(s.listener.cfg.rule.ID, int64(written), 0)
+	}
+	if err != nil {
+		s.listener.runtime.logger.Printf("runtime udp upstream write failed rule=%d client=%s: %v", s.listener.cfg.rule.ID, s.clientAddr.String(), err)
+		s.listener.removeSession(s)
+	}
+}
+
+func (s *udpSession) touch() {
+	atomic.StoreInt64(&s.lastSeen, time.Now().UnixNano())
+}
+
+func (s *udpSession) lastSeenAt() int64 {
+	return atomic.LoadInt64(&s.lastSeen)
+}
+
+func (s *udpSession) close() {
+	s.closeOnce.Do(func() {
+		_ = s.upstream.Close()
+	})
 }
 
 type trafficBuffer struct {
@@ -520,6 +874,63 @@ type effectiveSpeedLimit struct {
 	DownloadBps int64
 	MaxConns    int
 	MaxIPs      int
+}
+
+type limitTracker struct {
+	limit   effectiveSpeedLimit
+	mu      sync.Mutex
+	active  int64
+	ipCount map[string]int
+}
+
+func newLimitTracker(limit effectiveSpeedLimit) *limitTracker {
+	return &limitTracker{limit: limit, ipCount: map[string]int{}}
+}
+
+func (t *limitTracker) sameLimit(limit effectiveSpeedLimit) bool {
+	return t != nil && t.limit == limit
+}
+
+func (t *limitTracker) acquire(sourceIP string) bool {
+	if t == nil {
+		return true
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if t.limit.MaxConns > 0 && t.active >= int64(t.limit.MaxConns) {
+		return false
+	}
+	if t.limit.MaxIPs > 0 && t.ipCount[sourceIP] == 0 && len(t.ipCount) >= t.limit.MaxIPs {
+		return false
+	}
+	t.ipCount[sourceIP]++
+	t.active++
+	return true
+}
+
+func (t *limitTracker) release(sourceIP string) {
+	if t == nil {
+		return
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	if count := t.ipCount[sourceIP]; count <= 1 {
+		delete(t.ipCount, sourceIP)
+	} else {
+		t.ipCount[sourceIP] = count - 1
+	}
+	if t.active > 0 {
+		t.active--
+	}
+}
+
+func (t *limitTracker) activeCount() int64 {
+	if t == nil {
+		return 0
+	}
+	t.mu.Lock()
+	defer t.mu.Unlock()
+	return t.active
 }
 
 func effectiveLimit(rule client.ForwardRule, limits []client.SpeedLimit) effectiveSpeedLimit {
@@ -683,6 +1094,15 @@ func isTCPRule(rule client.ForwardRule) bool {
 	}
 }
 
+func isUDPRule(rule client.ForwardRule) bool {
+	switch strings.ToLower(strings.TrimSpace(rule.Protocol)) {
+	case "udp", "tcp_udp":
+		return true
+	default:
+		return false
+	}
+}
+
 func effectivePolicy(rule client.ForwardRule, tunnel client.Tunnel, group client.DeviceGroup, policies map[uint]client.ProtocolPolicy) *client.ProtocolPolicy {
 	var id *uint
 	switch {
@@ -718,7 +1138,7 @@ func policyFromClient(policy *client.ProtocolPolicy) protocol.Policy {
 	}
 }
 
-func fingerprint(rule client.ForwardRule, tunnel client.Tunnel, group client.DeviceGroup, policy *client.ProtocolPolicy, limit effectiveSpeedLimit, listenHost string) string {
+func fingerprint(rule client.ForwardRule, tunnel client.Tunnel, group client.DeviceGroup, policy *client.ProtocolPolicy, limit effectiveSpeedLimit, listenHost, network string) string {
 	value := struct {
 		Rule       client.ForwardRule
 		Tunnel     client.Tunnel
@@ -726,7 +1146,8 @@ func fingerprint(rule client.ForwardRule, tunnel client.Tunnel, group client.Dev
 		Policy     *client.ProtocolPolicy
 		Limit      effectiveSpeedLimit
 		ListenHost string
-	}{rule, tunnel, group.ID, policy, limit, listenHost}
+		Network    string
+	}{rule, tunnel, group.ID, policy, limit, listenHost, network}
 	content, _ := json.Marshal(value)
 	return string(content)
 }

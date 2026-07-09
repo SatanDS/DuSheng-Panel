@@ -75,13 +75,13 @@ HTTPS_PORT=443
 - `DUSHENG_ADMIN_USERNAME` / `DUSHENG_ADMIN_PASSWORD`：生产环境不能同时保留默认管理员账号和密码。
 - `DUSHENG_CORS_ORIGINS`：逗号分隔的允许来源；本地可用 `*`，生产建议设置为面板域名。
 - `DUSHENG_AGENT_RELEASE_BASE`：节点安装脚本下载 agent 二进制的 GitHub Release 地址，默认是 `https://github.com/SatanDS/DuSheng-Panel/releases/latest/download`。
-- `DUSHENG_GOST_PATH` / `DUSHENG_GOST_BIN`：节点端 `gost` 二进制路径，安装脚本会同时写入两者以兼容旧配置。当前第一版入口监听默认由 `dusheng-agent` TCP runtime 承担，`gost` 保留给后续复杂 tunnel/relay transport。
+- `DUSHENG_GOST_PATH` / `DUSHENG_GOST_BIN`：节点端 `gost` 二进制路径，安装脚本会同时写入两者以兼容旧配置。当前第一版入口监听默认由 `dusheng-agent` TCP/UDP runtime 承担，`gost` 保留给后续复杂 tunnel/relay transport。
 
-## 节点 TCP Runtime
+## 节点 TCP/UDP Runtime
 
 节点端会按面板下发的 TCP / TCP+UDP 转发规则启动本地 TCP listener。连接进入后，agent 会预读首包并执行轻量协议检测，支持 TLS ClientHello SNI/ALPN、HTTP Host、HTTP CONNECT、SOCKS4/5、SSH 和未知明文 TCP。命中协议策略后，`block` 会直接关闭连接并上报违规，`alert` / `observe` 会允许转发并记录事件。
 
-TCP 转发链路由 agent 直接计量流量，并定时批量上报 `/agent/traffic`。限速、最大连接数和最大 IP 数也在 agent runtime 内执行。UDP runtime 和 `gost` transport adapter 会在后续阶段补齐。
+TCP/UDP 转发链路由 agent 直接计量流量，并定时批量上报 `/agent/traffic`。限速、最大连接数和最大 IP 数也在 agent runtime 内执行；UDP v1 按 clientAddr 维护 session，支持 QUIC 首包检测、阻断/告警、计量、限速和空闲清理。`gost` transport adapter 会在后续阶段补齐。
 
 ## 本地生成 Agent Release 二进制
 
@@ -113,6 +113,126 @@ release/checksums.txt
 
 面板生成的节点安装命令会显式带上 `DUSHENG_RELEASE_BASE`，默认指向本仓库最新 Release。若你使用自建下载源，只需在面板端 `.env` 中覆盖 `DUSHENG_AGENT_RELEASE_BASE`。
 
+## 面板部署教程
+
+以下命令在面板服务器上执行。生产环境推荐 Debian 12 或 Ubuntu 22.04+。
+
+### 1. 安装基础依赖
+
+```bash
+apt update
+apt install -y ca-certificates curl git
+curl -fsSL https://get.docker.com | sh
+systemctl enable --now docker
+```
+
+### 2. 拉取项目
+
+```bash
+cd /opt
+git clone https://github.com/SatanDS/DuSheng-Panel.git dusheng-panel
+cd /opt/dusheng-panel
+```
+
+### 3. 创建生产配置
+
+默认面板 HTTP 访问端口是 `7070`。如果你用服务器 IP 访问，推荐这样写：
+
+```bash
+cat > .env <<'EOF'
+POSTGRES_DB=dusheng
+POSTGRES_USER=dusheng
+POSTGRES_PASSWORD=请改成数据库强密码
+
+DUSHENG_ENV=production
+DUSHENG_JWT_SECRET=请改成至少32位随机长密钥
+DUSHENG_ADMIN_USERNAME=admin_user
+DUSHENG_ADMIN_PASSWORD=请改成管理员强密码
+
+DUSHENG_PUBLIC_URL=http://你的服务器IP:7070
+DUSHENG_CORS_ORIGINS=http://你的服务器IP:7070
+DUSHENG_AGENT_RELEASE_BASE=https://github.com/SatanDS/DuSheng-Panel/releases/latest/download
+
+DUSHENG_SITE_ADDRESS=:80
+HTTP_PORT=7070
+HTTPS_PORT=443
+TZ=Asia/Taipei
+EOF
+```
+
+如果你使用域名并希望 Caddy 自动申请 HTTPS，建议使用标准 80/443：
+
+```env
+DUSHENG_PUBLIC_URL=https://panel.example.com
+DUSHENG_CORS_ORIGINS=https://panel.example.com
+DUSHENG_SITE_ADDRESS=panel.example.com
+HTTP_PORT=80
+HTTPS_PORT=443
+```
+
+### 4. 启动面板
+
+```bash
+docker compose -f deploy/docker-compose.yml up -d --build
+```
+
+查看状态：
+
+```bash
+docker compose -f deploy/docker-compose.yml ps
+docker compose -f deploy/docker-compose.yml logs -f api
+```
+
+访问地址：
+
+```text
+http://你的服务器IP:7070
+```
+
+### 5. 放行端口
+
+如果服务器使用 `ufw`：
+
+```bash
+ufw allow 22/tcp
+ufw allow 7070/tcp
+ufw enable
+```
+
+如果使用域名 HTTPS，请放行：
+
+```bash
+ufw allow 80/tcp
+ufw allow 443/tcp
+```
+
+云服务器还需要在安全组中放行对应端口。
+
+### 6. 对接节点端
+
+节点服务器支持 Debian 11、Debian 12、Ubuntu 22.04+，架构支持 `amd64` 和 `arm64`。
+
+在面板中进入节点/安装令牌页面，生成安装令牌并复制安装命令。命令会自动指向 GitHub Release 中的 agent 二进制：
+
+```text
+https://github.com/SatanDS/DuSheng-Panel/releases/latest/download
+```
+
+在节点服务器执行面板复制出的命令即可。安装完成后检查：
+
+```bash
+systemctl status dusheng-agent
+journalctl -u dusheng-agent -f
+```
+
+### 7. 更新面板
+
+```bash
+cd /opt/dusheng-panel
+git pull
+docker compose -f deploy/docker-compose.yml up -d --build
+```
+
 ## 生产部署目标
 
 面板端：
@@ -134,7 +254,7 @@ release/checksums.txt
 ## 项目结构
 
 - `apps/api`：Go REST API，包含数据库模型、认证、同步接口。
-- `apps/agent`：Go 节点端，包含心跳、配置同步、TCP runtime、协议检测、流量上报和 gost supervisor。
+- `apps/agent`：Go 节点端，包含心跳、配置同步、TCP/UDP runtime、协议检测、流量上报和 gost supervisor。
 - `apps/web`：React/Vite 管理面板。
 - `packages/shared`：OpenAPI 和共享 JSON Schema。
 - `deploy`：Docker Compose、反向代理、systemd 和安装脚本。

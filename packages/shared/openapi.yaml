@@ -1506,7 +1506,7 @@ components:
               enum: [observe, alert, block]
             detail:
               type: string
-              description: JSON text with runtime protocol metadata such as reason, host, alpn, ruleId, tunnelId, and source.
+              description: JSON text with runtime protocol metadata such as reason, host, alpn, protocol, ruleId, tunnelId, clientAddr, and source (tcp_runtime or udp_runtime).
             occurredAt:
               type: string
               format: date-time
@@ -1533,7 +1533,7 @@ components:
           default: block
         detail:
           type: string
-          description: JSON text with runtime protocol metadata such as reason, host, alpn, ruleId, tunnelId, and source.
+          description: JSON text with runtime protocol metadata such as reason, host, alpn, protocol, ruleId, tunnelId, clientAddr, and source (tcp_runtime or udp_runtime).
 
     Dashboard:
       type: object

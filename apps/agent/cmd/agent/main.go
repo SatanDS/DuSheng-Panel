@@ -125,8 +125,8 @@ func sendHeartbeat(ctx context.Context, api *client.Client, syncer *configsync.S
 			"gostActive":        gost.Running(),
 			"gostStatus":        gost.Status(),
 			"gostPath":          gostPath,
-			"trafficReporting":  "tcp_runtime",
-			"protocolDetection": "tcp_runtime",
+			"trafficReporting":  "tcp_udp_runtime",
+			"protocolDetection": "tcp_udp_runtime",
 		},
 	})
 	if err != nil {
