@@ -94,7 +94,7 @@ TCP/UDP 转发链路由 agent 直接计量流量，并定时批量上报 `/agent
 
 ```powershell
 cd "D:\DuSheng Panel"
-powershell -ExecutionPolicy Bypass -File .\deploy\scripts\build-agent-release.ps1 -Version v0.1.0 -Clean
+powershell -ExecutionPolicy Bypass -File .\deploy\scripts\build-agent-release.ps1 -Version v0.1.1 -Clean
 ```
 
 生成文件位于：
@@ -112,6 +112,23 @@ release/checksums.txt
 ```
 
 面板生成的节点安装命令会显式带上 `DUSHENG_RELEASE_BASE`，默认指向本仓库最新 Release。若你使用自建下载源，只需在面板端 `.env` 中覆盖 `DUSHENG_AGENT_RELEASE_BASE`。
+
+每次源码提交推送后，也要同步发布 agent 二进制。推荐用本地发布脚本一次完成构建和上传：
+
+```powershell
+cd "D:\DuSheng Panel"
+powershell -ExecutionPolicy Bypass -File .\deploy\scripts\publish-agent-release.ps1 -Version v0.1.1
+```
+
+发布脚本会生成 Linux `amd64` / `arm64` agent 压缩包，创建或更新 GitHub Release，并上传：
+
+```text
+dusheng-agent-linux-amd64.tar.gz
+dusheng-agent-linux-arm64.tar.gz
+checksums.txt
+```
+
+如果没有安装 GitHub CLI 也没关系，脚本会优先读取 `GH_TOKEN` / `GITHUB_TOKEN`，否则尝试使用本机 Git Credential Manager 的 GitHub 凭据。
 
 ## 面板部署教程
 
