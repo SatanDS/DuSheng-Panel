@@ -12,9 +12,15 @@ import (
 	"golang.org/x/crypto/bcrypt"
 )
 
+const (
+	TokenTypeAccess  = "access"
+	TokenTypeRefresh = "refresh"
+)
+
 type Claims struct {
-	UserID uint   `json:"uid"`
-	Role   string `json:"role"`
+	UserID    uint   `json:"uid"`
+	Role      string `json:"role"`
+	TokenType string `json:"typ"`
 	jwt.RegisteredClaims
 }
 
@@ -28,10 +34,15 @@ func CheckPassword(hash, password string) bool {
 }
 
 func GenerateJWT(userID uint, role, secret string, ttl time.Duration) (string, error) {
+	return GenerateToken(userID, role, TokenTypeAccess, secret, ttl)
+}
+
+func GenerateToken(userID uint, role, tokenType, secret string, ttl time.Duration) (string, error) {
 	now := time.Now()
 	claims := Claims{
-		UserID: userID,
-		Role:   role,
+		UserID:    userID,
+		Role:      role,
+		TokenType: tokenType,
 		RegisteredClaims: jwt.RegisteredClaims{
 			IssuedAt:  jwt.NewNumericDate(now),
 			ExpiresAt: jwt.NewNumericDate(now.Add(ttl)),
@@ -55,6 +66,16 @@ func ParseJWT(tokenString, secret string) (*Claims, error) {
 		return nil, errors.New("invalid token")
 	}
 	return claims, nil
+}
+
+func RequireTokenType(claims *Claims, tokenType string) error {
+	if claims == nil {
+		return errors.New("missing claims")
+	}
+	if claims.TokenType != tokenType {
+		return errors.New("unexpected token type")
+	}
+	return nil
 }
 
 func RandomToken() (string, error) {

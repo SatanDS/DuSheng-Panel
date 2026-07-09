@@ -26,7 +26,7 @@ func main() {
 	nodeToken := flag.String("node-token", firstEnv("DUSHENG_NODE_TOKEN", "NODE_TOKEN"), "registered node token")
 	dataDir := flag.String("data-dir", firstEnvDefault("data", "DUSHENG_DATA_DIR", "DATA_DIR"), "agent state directory")
 	name := flag.String("name", firstEnvDefault("DuSheng Node", "DUSHENG_NODE_NAME", "DUSHENG_NAME", "NAME"), "node name used during registration")
-	gostPath := flag.String("gost-path", firstEnv("DUSHENG_GOST_PATH", "GOST_PATH"), "path to gost binary")
+	gostPath := flag.String("gost-path", firstEnv("DUSHENG_GOST_PATH", "DUSHENG_GOST_BIN", "GOST_PATH", "GOST_BIN"), "path to gost binary")
 	flag.Parse()
 
 	if strings.TrimSpace(*baseURL) == "" {
@@ -73,7 +73,7 @@ func main() {
 	if err := syncer.SyncOnce(ctx); err != nil {
 		logger.Printf("initial config sync failed: %v", err)
 	}
-	if err := sendHeartbeat(ctx, api, syncer, logger); err != nil {
+	if err := sendHeartbeat(ctx, api, syncer, strings.TrimSpace(*gostPath), logger); err != nil {
 		logger.Printf("initial heartbeat failed: %v", err)
 	}
 
@@ -97,24 +97,28 @@ func main() {
 				logger.Printf("config sync failed: %v", err)
 			}
 		case <-heartbeatTicker.C:
-			if err := sendHeartbeat(ctx, api, syncer, logger); err != nil {
+			if err := sendHeartbeat(ctx, api, syncer, strings.TrimSpace(*gostPath), logger); err != nil {
 				logger.Printf("heartbeat failed: %v", err)
 			}
 		}
 	}
 }
 
-func sendHeartbeat(ctx context.Context, api *client.Client, syncer *configsync.Syncer, logger *log.Logger) error {
+func sendHeartbeat(ctx context.Context, api *client.Client, syncer *configsync.Syncer, gostPath string, logger *log.Logger) error {
 	host, _ := os.Hostname()
 	resp, err := api.Heartbeat(ctx, client.HeartbeatRequest{
 		Version:         version,
 		AppliedRevision: syncer.AppliedRevision(),
 		System: map[string]any{
-			"hostname":   host,
-			"os":         runtime.GOOS,
-			"arch":       runtime.GOARCH,
-			"goVersion":  runtime.Version(),
-			"gostActive": syncer.SupervisorActive(),
+			"hostname":          host,
+			"os":                runtime.GOOS,
+			"arch":              runtime.GOARCH,
+			"goVersion":         runtime.Version(),
+			"gostActive":        syncer.SupervisorActive(),
+			"gostStatus":        syncer.SupervisorStatus(),
+			"gostPath":          gostPath,
+			"trafficReporting":  "api_client_ready",
+			"protocolDetection": "metadata_only",
 		},
 	})
 	if err != nil {

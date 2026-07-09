@@ -10,6 +10,9 @@ import (
 
 func main() {
 	cfg := config.FromEnv()
+	if err := cfg.Validate(); err != nil {
+		log.Fatalf("invalid configuration: %v", err)
+	}
 
 	db, err := store.Open(cfg)
 	if err != nil {

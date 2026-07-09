@@ -23,11 +23,18 @@ type Server struct {
 	db  *gorm.DB
 }
 
+const nodeOfflineAfter = 90 * time.Second
+
+var (
+	errAgentPayload   = errors.New("invalid agent payload")
+	errAgentForbidden = errors.New("agent is not allowed to report this rule")
+)
+
 func NewServer(cfg config.Config, db *gorm.DB) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	s := &Server{cfg: cfg, db: db}
 	router := gin.New()
-	router.Use(gin.Logger(), gin.Recovery(), cors())
+	router.Use(gin.Logger(), gin.Recovery(), cors(cfg.CORSOrigins))
 
 	router.GET("/healthz", func(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok", "time": time.Now().UTC()})
@@ -73,9 +80,24 @@ func NewServer(cfg config.Config, db *gorm.DB) *gin.Engine {
 	return router
 }
 
-func cors() gin.HandlerFunc {
+func cors(origins []string) gin.HandlerFunc {
+	allowAll := len(origins) == 0 || contains(origins, "*")
+	allowed := map[string]bool{}
+	for _, origin := range origins {
+		origin = strings.TrimSpace(origin)
+		if origin != "" {
+			allowed[origin] = true
+		}
+	}
 	return func(c *gin.Context) {
-		c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+		origin := c.GetHeader("Origin")
+		switch {
+		case allowAll:
+			c.Writer.Header().Set("Access-Control-Allow-Origin", "*")
+		case origin != "" && allowed[origin]:
+			c.Writer.Header().Set("Access-Control-Allow-Origin", origin)
+			c.Writer.Header().Add("Vary", "Origin")
+		}
 		c.Writer.Header().Set("Access-Control-Allow-Methods", "GET,POST,PUT,DELETE,OPTIONS")
 		c.Writer.Header().Set("Access-Control-Allow-Headers", "Authorization,Content-Type")
 		if c.Request.Method == http.MethodOptions {
@@ -104,12 +126,12 @@ func (s *Server) login(c *gin.Context) {
 		unauthorized(c)
 		return
 	}
-	access, err := auth.GenerateJWT(user.ID, user.Role, s.cfg.JWTSecret, 8*time.Hour)
+	access, err := auth.GenerateToken(user.ID, user.Role, auth.TokenTypeAccess, s.cfg.JWTSecret, 8*time.Hour)
 	if err != nil {
 		fail(c, err)
 		return
 	}
-	refresh, err := auth.GenerateJWT(user.ID, user.Role, s.cfg.JWTSecret, 14*24*time.Hour)
+	refresh, err := auth.GenerateToken(user.ID, user.Role, auth.TokenTypeRefresh, s.cfg.JWTSecret, 14*24*time.Hour)
 	if err != nil {
 		fail(c, err)
 		return
@@ -125,7 +147,16 @@ func (s *Server) refresh(c *gin.Context) {
 		unauthorized(c)
 		return
 	}
-	access, err := auth.GenerateJWT(claims.UserID, claims.Role, s.cfg.JWTSecret, 8*time.Hour)
+	if err := auth.RequireTokenType(claims, auth.TokenTypeRefresh); err != nil {
+		unauthorized(c)
+		return
+	}
+	var user models.User
+	if err := s.db.First(&user, claims.UserID).Error; err != nil || user.Status != "active" {
+		unauthorized(c)
+		return
+	}
+	access, err := auth.GenerateToken(user.ID, user.Role, auth.TokenTypeAccess, s.cfg.JWTSecret, 8*time.Hour)
 	if err != nil {
 		fail(c, err)
 		return
@@ -143,28 +174,48 @@ func (s *Server) me(c *gin.Context) {
 }
 
 func (s *Server) dashboard(c *gin.Context) {
+	s.markStaleNodesOffline(time.Now())
+
 	var users, nodes, onlineNodes, rules, violations int64
-	s.db.Model(&models.User{}).Count(&users)
-	s.db.Model(&models.Node{}).Count(&nodes)
-	s.db.Model(&models.Node{}).Where("status = ?", "online").Count(&onlineNodes)
-	s.db.Model(&models.ForwardRule{}).Count(&rules)
-	s.db.Model(&models.ProtocolViolation{}).Where("occurred_at >= ?", time.Now().Add(-24*time.Hour)).Count(&violations)
-
 	var todayBytes int64
-	s.db.Model(&models.TrafficSample{}).
-		Where("sampled_at >= ?", time.Now().Truncate(24*time.Hour)).
-		Select("COALESCE(SUM(bytes),0)").
-		Scan(&todayBytes)
-
 	var recentViolations []models.ProtocolViolation
-	s.db.Order("occurred_at desc").Limit(8).Find(&recentViolations)
-
 	var recentRules []models.ForwardRule
-	query := s.db.Order("updated_at desc").Limit(8)
-	if ctxRole(c) != "admin" {
-		query = query.Where("user_id = ?", ctxUserID(c))
+	since := time.Now().Add(-24 * time.Hour)
+	dayStart := time.Now().Truncate(24 * time.Hour)
+
+	if ctxRole(c) == "admin" {
+		s.db.Model(&models.User{}).Count(&users)
+		s.db.Model(&models.Node{}).Count(&nodes)
+		s.db.Model(&models.Node{}).Where("status = ?", "online").Count(&onlineNodes)
+		s.db.Model(&models.ForwardRule{}).Count(&rules)
+		s.db.Model(&models.ProtocolViolation{}).Where("occurred_at >= ?", since).Count(&violations)
+		s.db.Model(&models.TrafficSample{}).
+			Where("sampled_at >= ?", dayStart).
+			Select("COALESCE(SUM(bytes),0)").
+			Scan(&todayBytes)
+		s.db.Order("occurred_at desc").Limit(8).Find(&recentViolations)
+		s.db.Order("updated_at desc").Limit(8).Find(&recentRules)
+	} else {
+		userID := ctxUserID(c)
+		users = 1
+		s.nodeScopeForUser(userID).Count(&nodes)
+		s.nodeScopeForUser(userID).Where("nodes.status = ?", "online").Count(&onlineNodes)
+		s.db.Model(&models.ForwardRule{}).Where("user_id = ?", userID).Count(&rules)
+		s.db.Model(&models.ProtocolViolation{}).
+			Joins("JOIN forward_rules ON forward_rules.id = protocol_violations.rule_id").
+			Where("forward_rules.user_id = ? AND protocol_violations.occurred_at >= ?", userID, since).
+			Count(&violations)
+		s.db.Model(&models.TrafficSample{}).
+			Where("user_id = ? AND sampled_at >= ?", userID, dayStart).
+			Select("COALESCE(SUM(bytes),0)").
+			Scan(&todayBytes)
+		s.db.Joins("JOIN forward_rules ON forward_rules.id = protocol_violations.rule_id").
+			Where("forward_rules.user_id = ?", userID).
+			Order("protocol_violations.occurred_at desc").
+			Limit(8).
+			Find(&recentViolations)
+		s.db.Where("user_id = ?", userID).Order("updated_at desc").Limit(8).Find(&recentRules)
 	}
-	query.Find(&recentRules)
 
 	c.JSON(http.StatusOK, gin.H{
 		"users":            users,
@@ -182,6 +233,10 @@ func (s *Server) userAuth() gin.HandlerFunc {
 	return func(c *gin.Context) {
 		claims, err := auth.ParseJWT(bearer(c), s.cfg.JWTSecret)
 		if err != nil {
+			unauthorized(c)
+			return
+		}
+		if err := auth.RequireTokenType(claims, auth.TokenTypeAccess); err != nil {
 			unauthorized(c)
 			return
 		}
@@ -235,6 +290,10 @@ func (s *Server) agentAuth() gin.HandlerFunc {
 		var node models.Node
 		if err := s.db.Where("token_hash = ?", auth.TokenHash(token)).First(&node).Error; err != nil {
 			unauthorized(c)
+			return
+		}
+		if node.Status == "disabled" {
+			forbidden(c)
 			return
 		}
 		c.Set("node", node)
@@ -335,9 +394,25 @@ func (s *Server) updateUser(c *gin.Context) {
 }
 
 func (s *Server) listNodes(c *gin.Context) {
+	s.markStaleNodesOffline(time.Now())
 	var nodes []models.Node
 	s.db.Order("id desc").Find(&nodes)
 	c.JSON(http.StatusOK, nodes)
+}
+
+func (s *Server) markStaleNodesOffline(now time.Time) {
+	cutoff := now.Add(-nodeOfflineAfter)
+	s.db.Model(&models.Node{}).
+		Where("status = ? AND (last_seen_at IS NULL OR last_seen_at < ?)", "online", cutoff).
+		Update("status", "offline")
+}
+
+func (s *Server) nodeScopeForUser(userID uint) *gorm.DB {
+	return s.db.Model(&models.Node{}).
+		Joins("JOIN tunnels ON nodes.device_group_id = tunnels.entry_group_id OR nodes.device_group_id = tunnels.exit_group_id").
+		Joins("JOIN forward_rules ON forward_rules.tunnel_id = tunnels.id").
+		Where("forward_rules.user_id = ?", userID).
+		Distinct("nodes.id")
 }
 
 func (s *Server) updateNode(c *gin.Context) {
@@ -605,6 +680,12 @@ func (s *Server) prepareForwardRule(rule *models.ForwardRule, excludeID uint) er
 	}
 	if !contains([]string{"tcp", "udp", "tcp_udp"}, rule.Protocol) {
 		return errors.New("protocol must be tcp, udp, or tcp_udp")
+	}
+	if rule.Strategy == "" {
+		rule.Strategy = "least_conn"
+	}
+	if !contains([]string{"least_conn", "round_robin", "random", "source_hash"}, rule.Strategy) {
+		return errors.New("strategy must be least_conn, round_robin, random, or source_hash")
 	}
 	if rule.RemoteHost == "" || rule.RemotePort <= 0 || rule.RemotePort > 65535 {
 		return errors.New("valid remoteHost and remotePort are required")
@@ -920,10 +1001,28 @@ func (s *Server) agentTraffic(c *gin.Context) {
 		bad(c, err)
 		return
 	}
+	if len(req.Samples) > 1000 {
+		bad(c, errors.New("samples must contain at most 1000 entries"))
+		return
+	}
+	for _, sample := range req.Samples {
+		if sample.RuleID == 0 {
+			bad(c, errors.New("ruleId is required"))
+			return
+		}
+		if sample.InBytes < 0 || sample.OutBytes < 0 {
+			bad(c, errors.New("traffic bytes must be non-negative"))
+			return
+		}
+		if sample.InBytes+sample.OutBytes < 0 {
+			bad(c, errors.New("traffic byte total overflow"))
+			return
+		}
+	}
 	err := s.db.Transaction(func(tx *gorm.DB) error {
 		for _, sample := range req.Samples {
-			var rule models.ForwardRule
-			if err := tx.First(&rule, sample.RuleID).Error; err != nil {
+			rule, err := s.findNodeRule(tx, node, sample.RuleID)
+			if err != nil {
 				return err
 			}
 			if sample.InBytes > 0 {
@@ -950,6 +1049,14 @@ func (s *Server) agentTraffic(c *gin.Context) {
 		return nil
 	})
 	if err != nil {
+		if errors.Is(err, errAgentPayload) {
+			bad(c, err)
+			return
+		}
+		if errors.Is(err, errAgentForbidden) {
+			forbidden(c)
+			return
+		}
 		fail(c, err)
 		return
 	}
@@ -973,6 +1080,22 @@ func (s *Server) agentViolation(c *gin.Context) {
 	if req.Action == "" {
 		req.Action = "block"
 	}
+	if req.RuleID == 0 || req.PolicyID == 0 || strings.TrimSpace(req.Protocol) == "" {
+		bad(c, errors.New("ruleId, policyId, and protocol are required"))
+		return
+	}
+	if !contains([]string{"observe", "alert", "block"}, req.Action) {
+		bad(c, errors.New("action must be observe, alert, or block"))
+		return
+	}
+	if _, err := s.findNodeRule(s.db, node, req.RuleID); err != nil {
+		if errors.Is(err, errAgentForbidden) {
+			forbidden(c)
+			return
+		}
+		fail(c, err)
+		return
+	}
 	row := models.ProtocolViolation{
 		RuleID:     req.RuleID,
 		NodeID:     node.ID,
@@ -987,11 +1110,34 @@ func (s *Server) agentViolation(c *gin.Context) {
 		fail(c, err)
 		return
 	}
-	s.db.Model(&models.ForwardRule{}).Where("id = ?", req.RuleID).Updates(map[string]any{
+	updates := map[string]any{
 		"violation_count": gorm.Expr("violation_count + 1"),
-		"status":          "protocol_violation",
-	})
+	}
+	if req.Action == "block" {
+		updates["status"] = "protocol_violation"
+	}
+	s.db.Model(&models.ForwardRule{}).Where("id = ?", req.RuleID).Updates(updates)
 	c.JSON(http.StatusCreated, row)
+}
+
+func (s *Server) findNodeRule(db *gorm.DB, node models.Node, ruleID uint) (models.ForwardRule, error) {
+	if ruleID == 0 {
+		return models.ForwardRule{}, errAgentPayload
+	}
+	var rule models.ForwardRule
+	err := db.Model(&models.ForwardRule{}).
+		Joins("JOIN tunnels ON tunnels.id = forward_rules.tunnel_id").
+		Where(
+			"forward_rules.id = ? AND (tunnels.entry_group_id = ? OR tunnels.exit_group_id = ?)",
+			ruleID,
+			node.DeviceGroupID,
+			node.DeviceGroupID,
+		).
+		First(&rule).Error
+	if errors.Is(err, gorm.ErrRecordNotFound) {
+		return models.ForwardRule{}, errAgentForbidden
+	}
+	return rule, err
 }
 
 func (s *Server) listAuditLogs(c *gin.Context) {
@@ -1073,6 +1219,10 @@ func notFound(c *gin.Context) {
 
 func unauthorized(c *gin.Context) {
 	c.AbortWithStatusJSON(http.StatusUnauthorized, gin.H{"error": "unauthorized"})
+}
+
+func forbidden(c *gin.Context) {
+	c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "forbidden"})
 }
 
 func defaultString(value, fallback string) string {

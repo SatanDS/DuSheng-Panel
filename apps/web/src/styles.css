@@ -233,6 +233,32 @@ textarea:disabled {
   gap: 14px;
 }
 
+.table-toolbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+}
+
+.table-toolbar input {
+  max-width: 360px;
+}
+
+.pagination,
+.tool-actions {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.pagination span {
+  min-width: 58px;
+  color: var(--muted);
+  font-size: 12px;
+  font-weight: 800;
+  text-align: center;
+}
+
 .metric-grid {
   display: grid;
   grid-template-columns: repeat(5, minmax(120px, 1fr));
@@ -649,6 +675,43 @@ code {
   padding: 12px;
 }
 
+.tool-panel {
+  padding-bottom: 12px;
+}
+
+.tool-actions {
+  padding: 12px 12px 0;
+}
+
+.file-action {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 7px;
+  min-height: 36px;
+  padding: 8px 11px;
+  border: 1px solid var(--line-strong);
+  border-radius: 6px;
+  background: white;
+  color: var(--text);
+  font-size: 13px;
+  font-weight: 750;
+  overflow: hidden;
+  white-space: nowrap;
+}
+
+.file-action:hover {
+  border-color: var(--blue);
+  color: var(--blue);
+}
+
+.file-action input {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+}
+
 .inline-form {
   display: grid;
   grid-template-columns: minmax(180px, 1fr) minmax(130px, 180px) minmax(110px, 150px) auto;
@@ -815,8 +878,16 @@ code {
   .metric-grid,
   .metric-grid.compact,
   .inline-form,
+  .table-toolbar,
+  .tool-actions,
   .detail-list {
     grid-template-columns: 1fr;
+  }
+
+  .table-toolbar,
+  .tool-actions {
+    align-items: stretch;
+    flex-direction: column;
   }
 
   .resource-form {

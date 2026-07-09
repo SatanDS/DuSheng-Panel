@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"dusheng-panel/apps/api/internal/auth"
 	"dusheng-panel/apps/api/internal/config"
@@ -26,6 +27,7 @@ func Open(cfg config.Config) (*gorm.DB, error) {
 		return nil, err
 	}
 	if err := db.AutoMigrate(
+		&models.SchemaMigration{},
 		&models.User{},
 		&models.DeviceGroup{},
 		&models.Node{},
@@ -38,6 +40,9 @@ func Open(cfg config.Config) (*gorm.DB, error) {
 		&models.InstallToken{},
 		&models.ProtocolViolation{},
 	); err != nil {
+		return nil, err
+	}
+	if err := runMigrations(db); err != nil {
 		return nil, err
 	}
 	if err := seedProtocolPolicies(db); err != nil {
@@ -64,6 +69,32 @@ func dialector(databaseURL string) (gorm.Dialector, error) {
 	default:
 		return nil, fmt.Errorf("unsupported database url %q", databaseURL)
 	}
+}
+
+func runMigrations(db *gorm.DB) error {
+	return applyMigration(db, "2026071001_forward_rule_unique_port", func(tx *gorm.DB) error {
+		if tx.Migrator().HasIndex(&models.ForwardRule{}, "idx_forward_rules_tunnel_listen") {
+			return nil
+		}
+		return tx.Migrator().CreateIndex(&models.ForwardRule{}, "idx_forward_rules_tunnel_listen")
+	})
+}
+
+func applyMigration(db *gorm.DB, version string, fn func(*gorm.DB) error) error {
+	var existing models.SchemaMigration
+	err := db.First(&existing, "version = ?", version).Error
+	if err == nil {
+		return nil
+	}
+	if err != nil && err != gorm.ErrRecordNotFound {
+		return err
+	}
+	return db.Transaction(func(tx *gorm.DB) error {
+		if err := fn(tx); err != nil {
+			return err
+		}
+		return tx.Create(&models.SchemaMigration{Version: version, AppliedAt: time.Now().UTC()}).Error
+	})
 }
 
 func seedAdmin(db *gorm.DB, cfg config.Config) error {

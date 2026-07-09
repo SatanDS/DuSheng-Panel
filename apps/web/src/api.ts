@@ -50,6 +50,10 @@ export function saveSession(response: LoginResponse) {
   localStorage.setItem(USER_KEY, JSON.stringify(response.user));
 }
 
+function saveAccessToken(accessToken: string) {
+  localStorage.setItem(ACCESS_TOKEN_KEY, accessToken);
+}
+
 export function clearSession() {
   localStorage.removeItem(ACCESS_TOKEN_KEY);
   localStorage.removeItem(REFRESH_TOKEN_KEY);
@@ -94,7 +98,34 @@ type RequestOptions = Omit<RequestInit, "body"> & {
   body?: unknown;
 };
 
-async function request<T>(path: string, options: RequestOptions = {}): Promise<T> {
+async function refreshAccessToken() {
+  const refreshToken = localStorage.getItem(REFRESH_TOKEN_KEY);
+  if (!refreshToken) {
+    return false;
+  }
+
+  const response = await fetch(buildUrl("/auth/refresh"), {
+    method: "POST",
+    headers: {
+      Accept: "application/json",
+      Authorization: `Bearer ${refreshToken}`
+    }
+  });
+  const payload = await readPayload(response);
+  if (!response.ok) {
+    return false;
+  }
+  if (payload && typeof payload === "object" && "accessToken" in payload) {
+    const accessToken = (payload as { accessToken?: unknown }).accessToken;
+    if (typeof accessToken === "string" && accessToken) {
+      saveAccessToken(accessToken);
+      return true;
+    }
+  }
+  return false;
+}
+
+async function request<T>(path: string, options: RequestOptions = {}, retry = true): Promise<T> {
   const headers = new Headers(options.headers);
   const token = localStorage.getItem(ACCESS_TOKEN_KEY);
 
@@ -120,6 +151,13 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
   const payload = await readPayload(response);
 
   if (!response.ok) {
+    if (response.status === 401 && retry && path !== "/auth/login" && path !== "/auth/refresh") {
+      const refreshed = await refreshAccessToken().catch(() => false);
+      if (refreshed) {
+        return request<T>(path, options, false);
+      }
+    }
+
     if (response.status === 401) {
       clearSession();
       onUnauthorized?.();

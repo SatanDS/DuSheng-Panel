@@ -1,12 +1,17 @@
 package app
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"strings"
 	"testing"
 	"time"
 
 	"dusheng-panel/apps/api/internal/auth"
+	"dusheng-panel/apps/api/internal/config"
 	"dusheng-panel/apps/api/internal/models"
 	"github.com/stretchr/testify/require"
 	"gorm.io/driver/sqlite"
@@ -78,6 +83,25 @@ func seedForwardFixture(t *testing.T, s *Server) (models.User, models.DeviceGrou
 	return user, entry, tunnel, policy
 }
 
+func testRouter(t *testing.T, s *Server) http.Handler {
+	t.Helper()
+	return NewServer(config.Config{JWTSecret: "test-secret-for-unit-tests"}, s.db)
+}
+
+func jsonRequest(t *testing.T, router http.Handler, method, path string, body any, token string) *httptest.ResponseRecorder {
+	t.Helper()
+	content, err := json.Marshal(body)
+	require.NoError(t, err)
+	req := httptest.NewRequest(method, path, bytes.NewReader(content))
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	rec := httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	return rec
+}
+
 func TestPrepareForwardRuleAllocatesFirstFreePort(t *testing.T) {
 	s := testServer(t)
 	user, _, tunnel, _ := seedForwardFixture(t, s)
@@ -140,4 +164,128 @@ func TestPrepareForwardRuleRejectsExpiredUser(t *testing.T) {
 		RemotePort: 8081,
 	}
 	require.ErrorContains(t, s.prepareForwardRule(&rule, 0), "expired")
+}
+
+func TestForwardRuleUniqueTunnelListenPort(t *testing.T) {
+	s := testServer(t)
+	user, _, tunnel, _ := seedForwardFixture(t, s)
+	first := models.ForwardRule{
+		UserID:     user.ID,
+		TunnelID:   tunnel.ID,
+		Name:       "first",
+		Protocol:   "tcp",
+		Strategy:   "least_conn",
+		ListenPort: 20001,
+		RemoteHost: "127.0.0.1",
+		RemotePort: 8081,
+	}
+	require.NoError(t, s.db.Create(&first).Error)
+
+	second := first
+	second.ID = 0
+	second.Name = "second"
+	require.Error(t, s.db.Create(&second).Error)
+}
+
+func TestAgentTrafficRejectsNegativeBytes(t *testing.T) {
+	s := testServer(t)
+	user, entry, tunnel, _ := seedForwardFixture(t, s)
+	rule := models.ForwardRule{
+		UserID:     user.ID,
+		TunnelID:   tunnel.ID,
+		Name:       "rule",
+		Protocol:   "tcp",
+		Strategy:   "least_conn",
+		ListenPort: 20001,
+		RemoteHost: "127.0.0.1",
+		RemotePort: 8081,
+	}
+	require.NoError(t, s.db.Create(&rule).Error)
+	nodeToken := "node-token"
+	node := models.Node{
+		DeviceGroupID: entry.ID,
+		Name:          "node",
+		UUID:          "node-1",
+		TokenHash:     auth.TokenHash(nodeToken),
+		Status:        "online",
+	}
+	require.NoError(t, s.db.Create(&node).Error)
+
+	rec := jsonRequest(t, testRouter(t, s), http.MethodPost, "/api/v1/agent/traffic", map[string]any{
+		"samples": []map[string]any{{"ruleId": rule.ID, "inBytes": -1, "outBytes": 0}},
+	}, nodeToken)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
+func TestAgentTrafficRejectsRuleOutsideNodeTunnel(t *testing.T) {
+	s := testServer(t)
+	user, _, tunnel, _ := seedForwardFixture(t, s)
+	otherGroup := models.DeviceGroup{Name: "other", Role: "entry", PortStart: 30000, PortEnd: 30010, TrafficRatio: 1}
+	require.NoError(t, s.db.Create(&otherGroup).Error)
+	rule := models.ForwardRule{
+		UserID:     user.ID,
+		TunnelID:   tunnel.ID,
+		Name:       "rule",
+		Protocol:   "tcp",
+		Strategy:   "least_conn",
+		ListenPort: 20001,
+		RemoteHost: "127.0.0.1",
+		RemotePort: 8081,
+	}
+	require.NoError(t, s.db.Create(&rule).Error)
+	nodeToken := "node-token"
+	node := models.Node{
+		DeviceGroupID: otherGroup.ID,
+		Name:          "node",
+		UUID:          "node-2",
+		TokenHash:     auth.TokenHash(nodeToken),
+		Status:        "online",
+	}
+	require.NoError(t, s.db.Create(&node).Error)
+
+	rec := jsonRequest(t, testRouter(t, s), http.MethodPost, "/api/v1/agent/traffic", map[string]any{
+		"samples": []map[string]any{{"ruleId": rule.ID, "inBytes": 1, "outBytes": 2}},
+	}, nodeToken)
+	require.Equal(t, http.StatusForbidden, rec.Code)
+}
+
+func TestDashboardScopesNonAdminUser(t *testing.T) {
+	s := testServer(t)
+	user, _, tunnel, _ := seedForwardFixture(t, s)
+	other := models.User{Username: "bob", PasswordHash: "x", Role: "user", Status: "active"}
+	require.NoError(t, s.db.Create(&other).Error)
+	userRule := models.ForwardRule{
+		UserID:     user.ID,
+		TunnelID:   tunnel.ID,
+		Name:       "alice-rule",
+		Protocol:   "tcp",
+		Strategy:   "least_conn",
+		ListenPort: 20001,
+		RemoteHost: "127.0.0.1",
+		RemotePort: 8081,
+	}
+	otherRule := userRule
+	otherRule.UserID = other.ID
+	otherRule.ListenPort = 20002
+	otherRule.Name = "bob-rule"
+	require.NoError(t, s.db.Create(&userRule).Error)
+	require.NoError(t, s.db.Create(&otherRule).Error)
+	require.NoError(t, s.db.Create(&models.TrafficSample{UserID: user.ID, RuleID: userRule.ID, Direction: "in", Bytes: 100, SampledAt: time.Now()}).Error)
+	require.NoError(t, s.db.Create(&models.TrafficSample{UserID: other.ID, RuleID: otherRule.ID, Direction: "in", Bytes: 900, SampledAt: time.Now()}).Error)
+	require.NoError(t, s.db.Create(&models.ProtocolViolation{RuleID: otherRule.ID, Protocol: "tls", Action: "block", OccurredAt: time.Now()}).Error)
+
+	token, err := auth.GenerateToken(user.ID, user.Role, auth.TokenTypeAccess, "test-secret-for-unit-tests", time.Hour)
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/dashboard", nil)
+	req.Header.Set("Authorization", "Bearer "+token)
+	rec := httptest.NewRecorder()
+	testRouter(t, s).ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
+	require.Equal(t, float64(1), payload["users"])
+	require.Equal(t, float64(1), payload["forwardRules"])
+	require.Equal(t, float64(100), payload["todayBytes"])
+	require.Equal(t, float64(0), payload["violations24h"])
 }

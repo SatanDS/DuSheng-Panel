@@ -8,6 +8,11 @@ type BaseModel struct {
 	UpdatedAt time.Time `json:"updatedAt"`
 }
 
+type SchemaMigration struct {
+	Version   string    `gorm:"primaryKey;size:80" json:"version"`
+	AppliedAt time.Time `json:"appliedAt"`
+}
+
 type User struct {
 	BaseModel
 	Username       string     `gorm:"uniqueIndex;size:80;not null" json:"username"`
@@ -67,10 +72,10 @@ type Tunnel struct {
 type ForwardRule struct {
 	BaseModel
 	UserID           uint   `gorm:"index;not null" json:"userId"`
-	TunnelID         uint   `gorm:"index;not null" json:"tunnelId"`
+	TunnelID         uint   `gorm:"index;uniqueIndex:idx_forward_rules_tunnel_listen;not null" json:"tunnelId"`
 	Name             string `gorm:"size:120;not null" json:"name"`
 	Protocol         string `gorm:"size:20;not null;default:tcp" json:"protocol"`
-	ListenPort       int    `gorm:"index;not null" json:"listenPort"`
+	ListenPort       int    `gorm:"index;uniqueIndex:idx_forward_rules_tunnel_listen;not null" json:"listenPort"`
 	RemoteHost       string `gorm:"size:255;not null" json:"remoteHost"`
 	RemotePort       int    `gorm:"not null" json:"remotePort"`
 	Status           string `gorm:"size:30;not null;default:unsynced" json:"status"`

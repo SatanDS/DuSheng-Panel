@@ -10,9 +10,10 @@ User=dusheng-agent
 Group=dusheng-agent
 WorkingDirectory=/opt/dusheng-agent
 Environment=DUSHENG_DATA_DIR=/var/lib/dusheng-agent
+Environment=DUSHENG_GOST_PATH=/usr/local/bin/gost
 Environment=DUSHENG_GOST_BIN=/usr/local/bin/gost
 EnvironmentFile=-/etc/dusheng/agent.env
-ExecStart=/opt/dusheng-agent/dusheng-agent -base-url ${DUSHENG_API_URL} -install-token ${DUSHENG_INSTALL_TOKEN} -data-dir ${DUSHENG_DATA_DIR}
+ExecStart=/opt/dusheng-agent/dusheng-agent -base-url ${DUSHENG_API_URL} -install-token ${DUSHENG_INSTALL_TOKEN} -data-dir ${DUSHENG_DATA_DIR} -gost-path ${DUSHENG_GOST_PATH}
 Restart=always
 RestartSec=3
 LimitNOFILE=1048576

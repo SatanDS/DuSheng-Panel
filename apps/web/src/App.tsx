@@ -4,6 +4,7 @@ import {
   Activity,
   AlertTriangle,
   Boxes,
+  Download,
   Gauge,
   KeyRound,
   LogOut,
@@ -13,9 +14,12 @@ import {
   RefreshCw,
   Route,
   Save,
+  ScrollText,
   Server,
   ShieldCheck,
+  SlidersHorizontal,
   Trash2,
+  Upload,
   Users,
   X
 } from "lucide-react";
@@ -29,6 +33,7 @@ import type {
   InstallTokenResponse,
   LoginResponse,
   ProtocolViolation,
+  AuditLog,
   Session
 } from "./types";
 
@@ -39,7 +44,9 @@ type PageKey =
   | "device-groups"
   | "tunnels"
   | "protocol-policies"
+  | "speed-limits"
   | "violations"
+  | "audit-logs"
   | "users";
 
 type FieldType = "text" | "password" | "number" | "select" | "textarea" | "checkbox" | "datetime-local";
@@ -58,6 +65,7 @@ interface FieldConfig {
   step?: number | string;
   rows?: number;
   fullWidth?: boolean;
+  reference?: ReferenceKey;
 }
 
 interface ColumnConfig {
@@ -68,7 +76,7 @@ interface ColumnConfig {
 }
 
 interface ResourceConfig {
-  key: Exclude<PageKey, "dashboard" | "violations">;
+  key: Exclude<PageKey, "dashboard" | "violations" | "audit-logs">;
   title: string;
   eyebrow: string;
   endpoint: string;
@@ -80,6 +88,9 @@ interface ResourceConfig {
 }
 
 type FormDraft = Record<string, string | boolean>;
+type ReferenceKey = "users" | "tunnels" | "protocol-policies" | "device-groups" | "forward-rules";
+
+const pageSize = 25;
 
 const navItems: { key: PageKey; label: string; icon: LucideIcon }[] = [
   { key: "dashboard", label: "Dashboard", icon: Gauge },
@@ -88,7 +99,9 @@ const navItems: { key: PageKey; label: string; icon: LucideIcon }[] = [
   { key: "device-groups", label: "Device Groups", icon: Boxes },
   { key: "tunnels", label: "Tunnels", icon: Network },
   { key: "protocol-policies", label: "Protocol Policies", icon: ShieldCheck },
+  { key: "speed-limits", label: "Speed Limits", icon: SlidersHorizontal },
   { key: "violations", label: "Violations", icon: AlertTriangle },
+  { key: "audit-logs", label: "Audit Logs", icon: ScrollText },
   { key: "users", label: "Users", icon: Users }
 ];
 
@@ -106,7 +119,7 @@ const policyOptions = [
   { value: "custom", label: "Custom" }
 ];
 
-const resourceConfigs: Record<Exclude<PageKey, "dashboard" | "violations">, ResourceConfig> = {
+const resourceConfigs: Record<Exclude<PageKey, "dashboard" | "violations" | "audit-logs">, ResourceConfig> = {
   "forward-rules": {
     key: "forward-rules",
     title: "Forward Rules",
@@ -115,8 +128,8 @@ const resourceConfigs: Record<Exclude<PageKey, "dashboard" | "violations">, Reso
     createLabel: "New rule",
     fields: [
       { key: "name", label: "Name", required: true },
-      { key: "userId", label: "User ID", type: "number", required: true, min: 1 },
-      { key: "tunnelId", label: "Tunnel ID", type: "number", required: true, min: 1 },
+      { key: "userId", label: "User", type: "number", optional: true, min: 1, reference: "users" },
+      { key: "tunnelId", label: "Tunnel", type: "number", required: true, min: 1, reference: "tunnels" },
       { key: "protocol", label: "Protocol", type: "select", options: protocolOptions, required: true },
       { key: "listenPort", label: "Listen Port", type: "number", min: 0, max: 65535 },
       { key: "remoteHost", label: "Remote Host", required: true },
@@ -128,10 +141,18 @@ const resourceConfigs: Record<Exclude<PageKey, "dashboard" | "violations">, Reso
         options: [
           { value: "least_conn", label: "Least connections" },
           { value: "round_robin", label: "Round robin" },
+          { value: "random", label: "Random" },
           { value: "source_hash", label: "Source hash" }
         ]
       },
-      { key: "protocolPolicyId", label: "Protocol Policy ID", type: "number", optional: true, min: 1 }
+      {
+        key: "protocolPolicyId",
+        label: "Protocol Policy",
+        type: "number",
+        optional: true,
+        min: 1,
+        reference: "protocol-policies"
+      }
     ],
     columns: [
       { key: "id", label: "ID", className: "mono" },
@@ -154,7 +175,7 @@ const resourceConfigs: Record<Exclude<PageKey, "dashboard" | "violations">, Reso
     createLabel: "Nodes register with install tokens",
     disableCreate: true,
     fields: [
-      { key: "deviceGroupId", label: "Device Group ID", type: "number", required: true, min: 1 },
+      { key: "deviceGroupId", label: "Device Group", type: "number", required: true, min: 1, reference: "device-groups" },
       { key: "name", label: "Name", required: true },
       {
         key: "status",
@@ -177,8 +198,8 @@ const resourceConfigs: Record<Exclude<PageKey, "dashboard" | "violations">, Reso
       { key: "publicIp", label: "Public IP" },
       { key: "connectHost", label: "Connect Host" },
       { key: "version", label: "Version" },
-      { key: "appliedRevision", label: "Applied", className: "mono" },
-      { key: "desiredRevision", label: "Desired", className: "mono" },
+      { key: "sync", label: "Sync", render: renderNodeSync },
+      { key: "systemJson", label: "Agent", render: renderNodeHealth },
       { key: "lastSeenAt", label: "Last Seen", render: (row) => formatDate(row.lastSeenAt) }
     ]
   },
@@ -205,8 +226,22 @@ const resourceConfigs: Record<Exclude<PageKey, "dashboard" | "violations">, Reso
       { key: "portStart", label: "Port Start", type: "number", min: 0, max: 65535 },
       { key: "portEnd", label: "Port End", type: "number", min: 0, max: 65535 },
       { key: "trafficRatio", label: "Traffic Ratio", type: "number", min: 0, step: 0.1 },
-      { key: "protocolPolicyId", label: "Protocol Policy ID", type: "number", optional: true, min: 1 },
-      { key: "failoverGroupId", label: "Failover Group ID", type: "number", optional: true, min: 1 },
+      {
+        key: "protocolPolicyId",
+        label: "Protocol Policy",
+        type: "number",
+        optional: true,
+        min: 1,
+        reference: "protocol-policies"
+      },
+      {
+        key: "failoverGroupId",
+        label: "Failover Group",
+        type: "number",
+        optional: true,
+        min: 1,
+        reference: "device-groups"
+      },
       { key: "advancedJson", label: "Advanced JSON", type: "textarea", rows: 4, fullWidth: true }
     ],
     columns: [
@@ -239,8 +274,8 @@ const resourceConfigs: Record<Exclude<PageKey, "dashboard" | "violations">, Reso
           { value: "failover", label: "Failover" }
         ]
       },
-      { key: "entryGroupId", label: "Entry Group ID", type: "number", required: true, min: 1 },
-      { key: "exitGroupId", label: "Exit Group ID", type: "number", optional: true, min: 1 },
+      { key: "entryGroupId", label: "Entry Group", type: "number", required: true, min: 1, reference: "device-groups" },
+      { key: "exitGroupId", label: "Exit Group", type: "number", optional: true, min: 1, reference: "device-groups" },
       {
         key: "protocol",
         label: "Protocol",
@@ -260,12 +295,21 @@ const resourceConfigs: Record<Exclude<PageKey, "dashboard" | "violations">, Reso
         type: "select",
         options: [
           { value: "single", label: "Single side" },
-          { value: "double", label: "Double side" }
+          { value: "entry", label: "Entry side" },
+          { value: "exit", label: "Exit side" },
+          { value: "both", label: "Both sides" }
         ]
       },
       { key: "entryTrafficRatio", label: "Entry Ratio", type: "number", min: 0, step: 0.1 },
       { key: "exitTrafficRatio", label: "Exit Ratio", type: "number", min: 0, step: 0.1 },
-      { key: "protocolPolicyId", label: "Protocol Policy ID", type: "number", optional: true, min: 1 },
+      {
+        key: "protocolPolicyId",
+        label: "Protocol Policy",
+        type: "number",
+        optional: true,
+        min: 1,
+        reference: "protocol-policies"
+      },
       { key: "advancedJson", label: "Advanced JSON", type: "textarea", rows: 4, fullWidth: true }
     ],
     columns: [
@@ -296,7 +340,7 @@ const resourceConfigs: Record<Exclude<PageKey, "dashboard" | "violations">, Reso
         options: [
           { value: "block", label: "Block" },
           { value: "alert", label: "Alert" },
-          { value: "allow", label: "Allow" }
+          { value: "observe", label: "Observe" }
         ]
       },
       { key: "blockTls", label: "Block TLS", type: "checkbox" },
@@ -314,6 +358,34 @@ const resourceConfigs: Record<Exclude<PageKey, "dashboard" | "violations">, Reso
       { key: "mode", label: "Mode", render: (row) => <StatusPill value={text(row.mode)} /> },
       { key: "flags", label: "Controls", render: renderPolicyFlags },
       { key: "updatedAt", label: "Updated", render: (row) => formatDate(row.updatedAt) }
+    ]
+  },
+  "speed-limits": {
+    key: "speed-limits",
+    title: "Speed Limits",
+    eyebrow: "Bandwidth and connection caps",
+    endpoint: "/speed-limits",
+    createLabel: "New limit",
+    fields: [
+      { key: "name", label: "Name", required: true },
+      { key: "userId", label: "User", type: "number", optional: true, min: 1, reference: "users" },
+      { key: "tunnelId", label: "Tunnel", type: "number", optional: true, min: 1, reference: "tunnels" },
+      { key: "ruleId", label: "Forward Rule", type: "number", optional: true, min: 1, reference: "forward-rules" },
+      { key: "uploadBps", label: "Upload Bps", type: "number", min: 0 },
+      { key: "downloadBps", label: "Download Bps", type: "number", min: 0 },
+      { key: "maxConns", label: "Max Connections", type: "number", min: 0 },
+      { key: "maxIps", label: "Max IPs", type: "number", min: 0 }
+    ],
+    columns: [
+      { key: "id", label: "ID", className: "mono" },
+      { key: "name", label: "Name" },
+      { key: "userId", label: "User" },
+      { key: "tunnelId", label: "Tunnel" },
+      { key: "ruleId", label: "Rule" },
+      { key: "uploadBps", label: "Up", render: (row) => formatBps(row.uploadBps) },
+      { key: "downloadBps", label: "Down", render: (row) => formatBps(row.downloadBps) },
+      { key: "maxConns", label: "Conns" },
+      { key: "maxIps", label: "IPs" }
     ]
   },
   users: {
@@ -508,6 +580,19 @@ function renderPage(activePage: PageKey, refreshSeed: number) {
     return <ViolationsPage refreshSeed={refreshSeed} />;
   }
 
+  if (activePage === "audit-logs") {
+    return <AuditLogsPage refreshSeed={refreshSeed} />;
+  }
+
+  if (activePage === "forward-rules") {
+    return (
+      <>
+        <ResourcePage config={resourceConfigs["forward-rules"]} refreshSeed={refreshSeed} />
+        <ForwardRuleTools />
+      </>
+    );
+  }
+
   if (activePage === "nodes") {
     return (
       <>
@@ -625,6 +710,9 @@ function ResourcePage({ config, refreshSeed }: { config: ResourceConfig; refresh
   const [error, setError] = useState<string | null>(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [reloadSeed, setReloadSeed] = useState(0);
+  const [query, setQuery] = useState("");
+  const [page, setPage] = useState(1);
+  const [references, setReferences] = useState<Record<string, { value: string; label: string }[]>>({});
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -632,6 +720,7 @@ function ResourcePage({ config, refreshSeed }: { config: ResourceConfig; refresh
     try {
       const data = await api.get<Entity[]>(config.endpoint);
       setRows(Array.isArray(data) ? data : []);
+      setPage(1);
     } catch (err) {
       setError(err instanceof Error ? err.message : `${config.title} request failed`);
     } finally {
@@ -643,11 +732,48 @@ function ResourcePage({ config, refreshSeed }: { config: ResourceConfig; refresh
     setDraft(emptyDraft(config.fields));
     setEditingId(null);
     setNotice(null);
+    setQuery("");
+    setPage(1);
   }, [config.key, config.fields]);
 
   useEffect(() => {
     void load();
   }, [load, refreshSeed, reloadSeed]);
+
+  useEffect(() => {
+    let alive = true;
+    const keys = Array.from(new Set(config.fields.map((field) => field.reference).filter(Boolean))) as ReferenceKey[];
+
+    async function loadReferences() {
+      const next: Record<string, { value: string; label: string }[]> = {};
+      await Promise.all(
+        keys.map(async (key) => {
+          try {
+            const rows = await api.get<Entity[]>(referenceEndpoint(key));
+            next[key] = rows.map((row) => ({
+              value: String(row.id ?? ""),
+              label: referenceLabel(key, row)
+            }));
+          } catch {
+            next[key] = [];
+          }
+        })
+      );
+      if (alive) {
+        setReferences(next);
+      }
+    }
+
+    void loadReferences();
+    return () => {
+      alive = false;
+    };
+  }, [config.fields]);
+
+  const filteredRows = useMemo(() => filterRows(rows, query), [rows, query]);
+  const pageCount = Math.max(1, Math.ceil(filteredRows.length / pageSize));
+  const currentPage = Math.min(page, pageCount);
+  const visibleRows = filteredRows.slice((currentPage - 1) * pageSize, currentPage * pageSize);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -732,17 +858,30 @@ function ResourcePage({ config, refreshSeed }: { config: ResourceConfig; refresh
         </button>
       </section>
 
+      <section className="table-toolbar">
+        <input
+          aria-label={`Search ${config.title}`}
+          placeholder="Search records"
+          value={query}
+          onChange={(event) => {
+            setQuery(event.target.value);
+            setPage(1);
+          }}
+        />
+        <PaginationControls page={currentPage} pageCount={pageCount} onPage={setPage} />
+      </section>
+
       {error ? <div className="notice error">{error}</div> : null}
       {notice ? <div className="notice success">{notice}</div> : null}
 
       <div className="resource-grid">
         <section className="panel table-panel">
-          <PanelHeader title="Records" icon={Activity} meta={`${rows.length} rows`} />
+          <PanelHeader title="Records" icon={Activity} meta={`${filteredRows.length}/${rows.length} rows`} />
           {loading ? (
             <StateBlock tone="loading" title="Loading records" />
           ) : (
             <DataTable
-              rows={rows}
+              rows={visibleRows}
               columns={config.columns}
               onRowClick={editRow}
               selectedId={editingId}
@@ -776,6 +915,7 @@ function ResourcePage({ config, refreshSeed }: { config: ResourceConfig; refresh
                 value={draft[field.key]}
                 disabled={saving || (Boolean(config.disableCreate) && editingId === null)}
                 editing={editingId !== null}
+                referenceOptions={references}
                 onChange={(value) => setDraft((current) => ({ ...current, [field.key]: value }))}
               />
             ))}
@@ -935,6 +1075,8 @@ function ViolationsPage({ refreshSeed }: { refreshSeed: number }) {
   const [selected, setSelected] = useState<ProtocolViolation | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const [page, setPage] = useState(1);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -942,6 +1084,7 @@ function ViolationsPage({ refreshSeed }: { refreshSeed: number }) {
     try {
       const data = await api.get<ProtocolViolation[]>("/protocol-violations");
       setRows(Array.isArray(data) ? data : []);
+      setPage(1);
       setSelected((current) => {
         if (!current) {
           return data[0] ?? null;
@@ -961,6 +1104,10 @@ function ViolationsPage({ refreshSeed }: { refreshSeed: number }) {
 
   const blocked = rows.filter((row) => row.action === "block").length;
   const uniqueProtocols = new Set(rows.map((row) => row.protocol).filter(Boolean)).size;
+  const filteredRows = useMemo(() => filterRows(rows, query), [rows, query]);
+  const pageCount = Math.max(1, Math.ceil(filteredRows.length / pageSize));
+  const currentPage = Math.min(page, pageCount);
+  const visibleRows = filteredRows.slice((currentPage - 1) * pageSize, currentPage * pageSize);
 
   return (
     <div className="stack">
@@ -976,6 +1123,19 @@ function ViolationsPage({ refreshSeed }: { refreshSeed: number }) {
       </section>
 
       {error ? <div className="notice error">{error}</div> : null}
+
+      <section className="table-toolbar">
+        <input
+          aria-label="Search protocol violations"
+          placeholder="Search violations"
+          value={query}
+          onChange={(event) => {
+            setQuery(event.target.value);
+            setPage(1);
+          }}
+        />
+        <PaginationControls page={currentPage} pageCount={pageCount} onPage={setPage} />
+      </section>
 
       <div className="metric-grid compact">
         <div className="metric">
@@ -994,12 +1154,12 @@ function ViolationsPage({ refreshSeed }: { refreshSeed: number }) {
 
       <div className="resource-grid">
         <section className="panel table-panel">
-          <PanelHeader title="Events" icon={AlertTriangle} meta={`${rows.length} latest`} />
+          <PanelHeader title="Events" icon={AlertTriangle} meta={`${filteredRows.length}/${rows.length} latest`} />
           {loading ? (
             <StateBlock tone="loading" title="Loading violations" />
           ) : (
             <DataTable
-              rows={rows}
+              rows={visibleRows}
               selectedId={selected?.id ?? null}
               onRowClick={(row) => setSelected(row as ProtocolViolation)}
               columns={[
@@ -1057,6 +1217,196 @@ function ViolationsPage({ refreshSeed }: { refreshSeed: number }) {
           )}
         </section>
       </div>
+    </div>
+  );
+}
+
+function AuditLogsPage({ refreshSeed }: { refreshSeed: number }) {
+  const [rows, setRows] = useState<AuditLog[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+  const [query, setQuery] = useState("");
+  const [page, setPage] = useState(1);
+
+  const load = useCallback(async () => {
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await api.get<AuditLog[]>("/audit-logs?limit=1000");
+      setRows(Array.isArray(data) ? data : []);
+      setPage(1);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Audit log request failed");
+    } finally {
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    void load();
+  }, [load, refreshSeed]);
+
+  const filteredRows = useMemo(() => filterRows(rows, query), [rows, query]);
+  const pageCount = Math.max(1, Math.ceil(filteredRows.length / pageSize));
+  const currentPage = Math.min(page, pageCount);
+  const visibleRows = filteredRows.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+
+  return (
+    <div className="stack">
+      <section className="section-heading">
+        <div>
+          <p>Administrative activity</p>
+          <h2>Audit Logs</h2>
+        </div>
+        <button className="ghost-action" onClick={() => void load()} disabled={loading}>
+          <RefreshCw size={15} />
+          Refresh
+        </button>
+      </section>
+
+      <section className="table-toolbar">
+        <input
+          aria-label="Search audit logs"
+          placeholder="Search logs"
+          value={query}
+          onChange={(event) => {
+            setQuery(event.target.value);
+            setPage(1);
+          }}
+        />
+        <PaginationControls page={currentPage} pageCount={pageCount} onPage={setPage} />
+      </section>
+
+      {error ? <div className="notice error">{error}</div> : null}
+
+      <section className="panel table-panel">
+        <PanelHeader title="Events" icon={ScrollText} meta={`${filteredRows.length}/${rows.length} rows`} />
+        {loading ? (
+          <StateBlock tone="loading" title="Loading audit logs" />
+        ) : (
+          <DataTable
+            rows={visibleRows}
+            columns={[
+              { key: "createdAt", label: "Time", render: (row) => formatDate(row.createdAt) },
+              { key: "actorId", label: "Actor" },
+              { key: "action", label: "Action", render: (row) => <Badge>{text(row.action)}</Badge> },
+              { key: "resourceType", label: "Resource" },
+              { key: "resourceId", label: "ID", className: "mono" },
+              { key: "metadataJson", label: "Metadata" }
+            ]}
+          />
+        )}
+      </section>
+    </div>
+  );
+}
+
+function ForwardRuleTools() {
+  const [notice, setNotice] = useState<string | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+
+  async function exportRules() {
+    setBusy(true);
+    setNotice(null);
+    setError(null);
+    try {
+      const rules = await api.get<ForwardRule[]>("/forward-rules");
+      const bundle = {
+        schemaVersion: "dusheng.forwarding-rules.v1",
+        exportedAt: new Date().toISOString(),
+        mode: "export",
+        rules
+      };
+      const blob = new Blob([JSON.stringify(bundle, null, 2)], { type: "application/json" });
+      const url = URL.createObjectURL(blob);
+      const link = document.createElement("a");
+      link.href = url;
+      link.download = `dusheng-forward-rules-${new Date().toISOString().slice(0, 10)}.json`;
+      link.click();
+      URL.revokeObjectURL(url);
+      setNotice(`Exported ${rules.length} rules`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Export failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function importRules(file: File | null) {
+    if (!file) {
+      return;
+    }
+    setBusy(true);
+    setNotice(null);
+    setError(null);
+    try {
+      const bundle = JSON.parse(await file.text()) as { rules?: Entity[] };
+      const rules = Array.isArray(bundle.rules) ? bundle.rules : [];
+      if (rules.length === 0) {
+        throw new Error("No rules found in import bundle");
+      }
+      for (const rule of rules) {
+        await api.post<Entity>("/forward-rules", importRulePayload(rule));
+      }
+      setNotice(`Imported ${rules.length} rules`);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "Import failed");
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <section className="panel tool-panel">
+      <PanelHeader title="Import / Export" icon={Route} />
+      {error ? <div className="notice error">{error}</div> : null}
+      {notice ? <div className="notice success">{notice}</div> : null}
+      <div className="tool-actions">
+        <button className="ghost-action" type="button" disabled={busy} onClick={() => void exportRules()}>
+          <Download size={15} />
+          Export JSON
+        </button>
+        <label className="file-action">
+          <Upload size={15} />
+          Import JSON
+          <input
+            type="file"
+            accept="application/json,.json"
+            disabled={busy}
+            onChange={(event) => void importRules(event.target.files?.[0] ?? null)}
+          />
+        </label>
+      </div>
+    </section>
+  );
+}
+
+function PaginationControls({
+  page,
+  pageCount,
+  onPage
+}: {
+  page: number;
+  pageCount: number;
+  onPage: (page: number) => void;
+}) {
+  return (
+    <div className="pagination">
+      <button className="ghost-action small-action" type="button" disabled={page <= 1} onClick={() => onPage(page - 1)}>
+        Prev
+      </button>
+      <span>
+        {page} / {pageCount}
+      </span>
+      <button
+        className="ghost-action small-action"
+        type="button"
+        disabled={page >= pageCount}
+        onClick={() => onPage(page + 1)}
+      >
+        Next
+      </button>
     </div>
   );
 }
@@ -1122,17 +1472,20 @@ function FieldControl({
   value,
   disabled,
   editing,
+  referenceOptions,
   onChange
 }: {
   field: FieldConfig;
   value: string | boolean | undefined;
   disabled: boolean;
   editing: boolean;
+  referenceOptions?: Record<string, { value: string; label: string }[]>;
   onChange: (value: string | boolean) => void;
 }) {
   const id = `field-${field.key}`;
   const required = field.required || (field.requiredOnCreate && !editing);
   const className = field.fullWidth || field.type === "checkbox" ? "field full" : "field";
+  const referenced = field.reference ? referenceOptions?.[field.reference] ?? [] : [];
 
   if (field.type === "checkbox") {
     return (
@@ -1162,6 +1515,28 @@ function FieldControl({
         >
           <option value="">Unset</option>
           {field.options?.map((option) => (
+            <option key={option.value} value={option.value}>
+              {option.label}
+            </option>
+          ))}
+        </select>
+      </label>
+    );
+  }
+
+  if (field.type === "number" && field.reference && referenced.length > 0) {
+    return (
+      <label className={className} htmlFor={id}>
+        <span>{field.label}</span>
+        <select
+          id={id}
+          value={String(value ?? "")}
+          required={required}
+          disabled={disabled}
+          onChange={(event) => onChange(event.target.value)}
+        >
+          <option value="">{field.optional ? "Unset" : "Select"}</option>
+          {referenced.map((option) => (
             <option key={option.value} value={option.value}>
               {option.label}
             </option>
@@ -1230,14 +1605,21 @@ function Badge({ children }: { children: ReactNode }) {
 function StatusPill({ value }: { value: string }) {
   const normalized = value.toLowerCase();
   const tone =
-    normalized.includes("online") || normalized.includes("active") || normalized.includes("allow")
+    normalized.includes("online") ||
+    normalized.includes("active") ||
+    normalized.includes("allow") ||
+    normalized === "synced" ||
+    normalized === "running"
       ? "good"
       : normalized.includes("block") ||
           normalized.includes("violation") ||
           normalized.includes("disabled") ||
           normalized.includes("suspended")
         ? "bad"
-        : normalized.includes("unsynced") || normalized.includes("alert")
+        : normalized.includes("unsynced") ||
+            normalized.includes("alert") ||
+            normalized.includes("missing") ||
+            normalized.includes("not_configured")
           ? "warn"
           : "neutral";
 
@@ -1267,6 +1649,19 @@ function renderPolicyFlags(row: Entity) {
   );
 }
 
+function renderNodeSync(row: Entity) {
+  const applied = Number(row.appliedRevision ?? 0);
+  const desired = Number(row.desiredRevision ?? 0);
+  const synced = applied >= desired;
+  return <StatusPill value={synced ? "synced" : `unsynced ${applied}/${desired}`} />;
+}
+
+function renderNodeHealth(row: Entity) {
+  const system = parseSystem(row.systemJson);
+  const status = text(system?.gostStatus ?? (system?.gostActive ? "running" : "unknown"));
+  return <StatusPill value={status} />;
+}
+
 function pageTitle(activePage: PageKey) {
   if (activePage === "dashboard") {
     return "Operational Overview";
@@ -1276,7 +1671,56 @@ function pageTitle(activePage: PageKey) {
     return "Protocol Alerts";
   }
 
+  if (activePage === "audit-logs") {
+    return "Administrative Activity";
+  }
+
   return resourceConfigs[activePage].eyebrow;
+}
+
+function referenceEndpoint(key: ReferenceKey) {
+  return `/${key}`;
+}
+
+function referenceLabel(key: ReferenceKey, row: Entity) {
+  const id = typeof row.id === "number" ? `#${row.id}` : "";
+  const primary = key === "users" ? row.username : row.name;
+  return [id, text(primary)].filter((part) => part && part !== "-").join(" ");
+}
+
+function filterRows<T extends Entity>(rows: T[], query: string) {
+  const needle = query.trim().toLowerCase();
+  if (!needle) {
+    return rows;
+  }
+  return rows.filter((row) =>
+    Object.values(row).some((value) => {
+      if (value === null || typeof value === "undefined") {
+        return false;
+      }
+      return String(value).toLowerCase().includes(needle);
+    })
+  );
+}
+
+function importRulePayload(row: Entity) {
+  const keys = [
+    "userId",
+    "tunnelId",
+    "name",
+    "protocol",
+    "listenPort",
+    "remoteHost",
+    "remotePort",
+    "strategy",
+    "protocolPolicyId"
+  ];
+  return keys.reduce<Record<string, unknown>>((payload, key) => {
+    if (typeof row[key] !== "undefined") {
+      payload[key] = row[key];
+    }
+    return payload;
+  }, {});
 }
 
 function emptyDraft(fields: FieldConfig[]): FormDraft {
@@ -1363,6 +1807,14 @@ function formatBytes(value: unknown) {
   return `${scaled.toFixed(scaled >= 10 || index === 0 ? 0 : 1)} ${units[index]}`;
 }
 
+function formatBps(value: unknown) {
+  const bytes = Number(value ?? 0);
+  if (!Number.isFinite(bytes) || bytes <= 0) {
+    return "0 B/s";
+  }
+  return `${formatBytes(bytes)}/s`;
+}
+
 function formatDate(value: unknown) {
   if (!value) {
     return "-";
@@ -1395,4 +1847,16 @@ function toDateInput(value: unknown) {
   return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(
     date.getMinutes()
   )}`;
+}
+
+function parseSystem(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "string") {
+    return null;
+  }
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return parsed && typeof parsed === "object" ? (parsed as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
 }

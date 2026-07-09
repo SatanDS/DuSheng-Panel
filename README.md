@@ -50,12 +50,31 @@ pnpm.cmd dev:web
 
 - `http://127.0.0.1:5173`
 
+Docker Compose 生产部署时，面板默认 HTTP 访问端口为：
+
+- `http://服务器IP:7070`
+
+如需改回 80 或改成其他端口，请在 `.env` 中设置：
+
+```env
+HTTP_PORT=7070
+HTTPS_PORT=443
+```
+
 默认管理员账号：
 
 - 用户名：`admin_user`
 - 密码：`admin_user`
 
 请在非本地开发环境中立即修改默认密码。
+
+## 关键配置
+
+- `DUSHENG_ENV`：本地开发使用 `development`，生产使用 `production`。
+- `DUSHENG_JWT_SECRET`：生产环境必须设置为至少 32 个字符，不能使用默认值。
+- `DUSHENG_ADMIN_USERNAME` / `DUSHENG_ADMIN_PASSWORD`：生产环境不能同时保留默认管理员账号和密码。
+- `DUSHENG_CORS_ORIGINS`：逗号分隔的允许来源；本地可用 `*`，生产建议设置为面板域名。
+- `DUSHENG_GOST_PATH` / `DUSHENG_GOST_BIN`：节点端 `gost` 二进制路径，安装脚本会同时写入两者以兼容旧配置。
 
 ## 生产部署目标
 

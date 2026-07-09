@@ -10,7 +10,7 @@ AGENT_USER="${DUSHENG_AGENT_USER:-dusheng-agent}"
 RELEASE_BASE="${DUSHENG_RELEASE_BASE:-https://github.com/SatanDS/DuSheng-Panel/releases/latest/download}"
 AGENT_URL="${DUSHENG_AGENT_URL:-}"
 GOST_URL="${DUSHENG_GOST_URL:-}"
-GOST_BIN="${DUSHENG_GOST_BIN:-/usr/local/bin/gost}"
+GOST_BIN="${DUSHENG_GOST_PATH:-${DUSHENG_GOST_BIN:-/usr/local/bin/gost}}"
 
 need_root() {
   if [ "$(id -u)" -ne 0 ]; then
@@ -157,6 +157,7 @@ write_env_file() {
 DUSHENG_API_URL=${DUSHENG_API_URL}
 DUSHENG_INSTALL_TOKEN=${DUSHENG_INSTALL_TOKEN}
 DUSHENG_DATA_DIR=${DATA_DIR}
+DUSHENG_GOST_PATH=${GOST_BIN}
 DUSHENG_GOST_BIN=${GOST_BIN}
 EOF
   chown root:"$AGENT_USER" "$CONFIG_DIR/agent.env"
@@ -176,9 +177,10 @@ User=${AGENT_USER}
 Group=${AGENT_USER}
 WorkingDirectory=${INSTALL_DIR}
 Environment=DUSHENG_DATA_DIR=${DATA_DIR}
+Environment=DUSHENG_GOST_PATH=${GOST_BIN}
 Environment=DUSHENG_GOST_BIN=${GOST_BIN}
 EnvironmentFile=-${CONFIG_DIR}/agent.env
-ExecStart=${INSTALL_DIR}/dusheng-agent -base-url \${DUSHENG_API_URL} -install-token \${DUSHENG_INSTALL_TOKEN} -data-dir \${DUSHENG_DATA_DIR}
+ExecStart=${INSTALL_DIR}/dusheng-agent -base-url \${DUSHENG_API_URL} -install-token \${DUSHENG_INSTALL_TOKEN} -data-dir \${DUSHENG_DATA_DIR} -gost-path \${DUSHENG_GOST_PATH}
 Restart=always
 RestartSec=3
 LimitNOFILE=1048576

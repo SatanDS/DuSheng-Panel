@@ -24,6 +24,10 @@ type Supervisor interface {
 	Running() bool
 }
 
+type statusReporter interface {
+	Status() string
+}
+
 type Syncer struct {
 	api        *client.Client
 	renderer   *Renderer
@@ -86,6 +90,19 @@ func (s *Syncer) SupervisorActive() bool {
 		return false
 	}
 	return s.supervisor.Running()
+}
+
+func (s *Syncer) SupervisorStatus() string {
+	if s.supervisor == nil {
+		return "not_configured"
+	}
+	if reporter, ok := s.supervisor.(statusReporter); ok {
+		return reporter.Status()
+	}
+	if s.supervisor.Running() {
+		return "running"
+	}
+	return "unknown"
 }
 
 type Renderer struct {

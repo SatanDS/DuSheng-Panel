@@ -159,6 +159,41 @@ type SpeedLimit struct {
 	MaxIPs      int    `json:"maxIps"`
 }
 
+type TrafficSample struct {
+	RuleID   uint  `json:"ruleId"`
+	InBytes  int64 `json:"inBytes,omitempty"`
+	OutBytes int64 `json:"outBytes,omitempty"`
+}
+
+type TrafficReport struct {
+	Samples []TrafficSample `json:"samples"`
+}
+
+type AcceptedResponse struct {
+	Accepted int `json:"accepted"`
+}
+
+type ViolationReport struct {
+	RuleID   uint   `json:"ruleId"`
+	PolicyID uint   `json:"policyId"`
+	Protocol string `json:"protocol"`
+	SourceIP string `json:"sourceIp,omitempty"`
+	Action   string `json:"action,omitempty"`
+	Detail   string `json:"detail,omitempty"`
+}
+
+type ProtocolViolation struct {
+	ID         uint      `json:"id"`
+	RuleID     uint      `json:"ruleId"`
+	NodeID     uint      `json:"nodeId"`
+	PolicyID   uint      `json:"policyId"`
+	Protocol   string    `json:"protocol"`
+	SourceIP   string    `json:"sourceIp"`
+	Action     string    `json:"action"`
+	Detail     string    `json:"detail"`
+	OccurredAt time.Time `json:"occurredAt"`
+}
+
 func LoadCredentials(dataDir string) (Credentials, bool, error) {
 	path := filepath.Join(dataDir, credentialsFile)
 	content, err := os.ReadFile(path)
@@ -208,6 +243,22 @@ func (c *Client) GetConfig(ctx context.Context) (AgentConfig, error) {
 	var resp AgentConfig
 	if err := c.doJSON(ctx, http.MethodGet, "/agent/config", nil, &resp, true); err != nil {
 		return AgentConfig{}, err
+	}
+	return resp, nil
+}
+
+func (c *Client) ReportTraffic(ctx context.Context, req TrafficReport) (AcceptedResponse, error) {
+	var resp AcceptedResponse
+	if err := c.doJSON(ctx, http.MethodPost, "/agent/traffic", req, &resp, true); err != nil {
+		return AcceptedResponse{}, err
+	}
+	return resp, nil
+}
+
+func (c *Client) ReportViolation(ctx context.Context, req ViolationReport) (ProtocolViolation, error) {
+	var resp ProtocolViolation
+	if err := c.doJSON(ctx, http.MethodPost, "/agent/violations", req, &resp, true); err != nil {
+		return ProtocolViolation{}, err
 	}
 	return resp, nil
 }

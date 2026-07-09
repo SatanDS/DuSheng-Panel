@@ -47,6 +47,15 @@ export interface ProtocolViolation extends Entity {
   occurredAt: string;
 }
 
+export interface AuditLog extends Entity {
+  id: number;
+  actorId: number | null;
+  action: string;
+  resourceType: string;
+  resourceId: string;
+  metadataJson: string;
+}
+
 export interface DashboardPayload {
   users: number;
   nodes: number;

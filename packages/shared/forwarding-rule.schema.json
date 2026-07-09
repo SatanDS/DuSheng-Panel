@@ -102,7 +102,7 @@
         },
         "mode": {
           "type": "string",
-          "enum": ["observe", "block", "reject"],
+          "enum": ["observe", "alert", "block"],
           "default": "block"
         },
         "blockTls": {
@@ -221,7 +221,7 @@
         },
         "strategy": {
           "type": "string",
-          "enum": ["least_conn", "round_robin", "random", "hash"],
+          "enum": ["least_conn", "round_robin", "random", "source_hash"],
           "default": "least_conn"
         },
         "protocolPolicyId": {

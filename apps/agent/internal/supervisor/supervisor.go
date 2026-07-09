@@ -76,6 +76,24 @@ func (s *Supervisor) Running() bool {
 	return s.running
 }
 
+func (s *Supervisor) Status() string {
+	s.mu.Lock()
+	running := s.running
+	gostPath := s.gostPath
+	s.mu.Unlock()
+
+	if running {
+		return "running"
+	}
+	if strings.TrimSpace(gostPath) == "" {
+		return "not_configured"
+	}
+	if _, ok := s.resolveGostPath(); !ok {
+		return "missing"
+	}
+	return "stopped"
+}
+
 func (s *Supervisor) wait(cmd *exec.Cmd, done chan<- error) {
 	err := cmd.Wait()
 	done <- err
