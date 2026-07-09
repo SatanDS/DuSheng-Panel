@@ -1046,37 +1046,16 @@ set -euo pipefail
 : "${DUSHENG_API_URL:?DUSHENG_API_URL is required}"
 : "${DUSHENG_INSTALL_TOKEN:?DUSHENG_INSTALL_TOKEN is required}"
 
-INSTALL_DIR="${DUSHENG_INSTALL_DIR:-/opt/dusheng-agent}"
-SERVICE_NAME="${DUSHENG_SERVICE_NAME:-dusheng-agent}"
+INSTALLER_URL="${DUSHENG_INSTALLER_URL:-https://raw.githubusercontent.com/SatanDS/DuSheng-Panel/main/deploy/scripts/install-agent.sh}"
 
 if ! command -v curl >/dev/null 2>&1; then
   apt-get update && apt-get install -y curl ca-certificates
 fi
 
-mkdir -p "$INSTALL_DIR"
-echo "Place the dusheng-agent binary at $INSTALL_DIR/dusheng-agent before starting the service."
-cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<EOF
-[Unit]
-Description=DuSheng Panel node agent
-After=network-online.target
-Wants=network-online.target
-
-[Service]
-Type=simple
-WorkingDirectory=${INSTALL_DIR}
-Environment=DUSHENG_API_URL=${DUSHENG_API_URL}
-Environment=DUSHENG_INSTALL_TOKEN=${DUSHENG_INSTALL_TOKEN}
-ExecStart=${INSTALL_DIR}/dusheng-agent -base-url ${DUSHENG_API_URL} -install-token ${DUSHENG_INSTALL_TOKEN} -data-dir ${INSTALL_DIR}/data
-Restart=always
-RestartSec=3
-LimitNOFILE=1048576
-
-[Install]
-WantedBy=multi-user.target
-EOF
-systemctl daemon-reload
-systemctl enable "${SERVICE_NAME}"
-echo "Service ${SERVICE_NAME} installed. Copy the binary, then run: systemctl start ${SERVICE_NAME}"
+tmp="$(mktemp)"
+trap 'rm -f "$tmp"' EXIT
+curl -fsSL "$INSTALLER_URL" -o "$tmp"
+exec bash "$tmp" "$@"
 `)
 }
 
