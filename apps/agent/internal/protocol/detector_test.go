@@ -113,6 +113,19 @@ func TestDPIBlockedGroup(t *testing.T) {
 	}
 }
 
+func TestDPIRespectsAuthorizedSSHOperations(t *testing.T) {
+	result := Detect([]byte("SSH-2.0-OpenSSH_9.6\r\n"), Policy{Purpose: "ssh_ops", Network: "tcp", Mode: ActionBlock})
+	result = ApplyDPI(result, Policy{Purpose: "ssh_ops", Network: "tcp", Mode: ActionBlock, BlockedProtocolGroups: "proxy,p2p,vpn"}, DPIResult{
+		Protocol:   "ssh",
+		Category:   "remote_access",
+		Confidence: 100,
+		RiskScore:  60,
+	})
+	if result.Action != ActionAllow {
+		t.Fatalf("Action = %q, want allow: %#v", result.Action, result)
+	}
+}
+
 func TestDetectAllowsNonViolations(t *testing.T) {
 	result := Detect([]byte("GET / HTTP/1.1\r\n\r\n"), Policy{Mode: ActionBlock, BlockTLS: true})
 	if result.Action != ActionAllow {

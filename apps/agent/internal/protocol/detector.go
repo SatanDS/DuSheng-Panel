@@ -164,11 +164,16 @@ func ApplyDPI(result Result, policy Policy, dpi DPIResult) Result {
 	if blockedGroup := matchedBlockedGroup(policy.BlockedProtocolGroups, result.NDPIProtocol, result.NDPICategory, result.Tags); blockedGroup != "" {
 		return markViolation(result, actionOrMode(policy.Mode, ActionBlock), "ndpi matched blocked protocol group", "ndpi_group:"+blockedGroup)
 	}
+	if dpiAllowedByPurpose(policy, result) {
+		result.MatchedRule = defaultString(result.MatchedRule, "authorized purpose")
+		result.Reason = defaultString(result.Reason, "dpi result is allowed by policy purpose")
+		return result
+	}
 	if result.RiskScore >= 80 {
 		return markViolation(result, actionOrMode(policy.Mode, ActionBlock), "ndpi high risk protocol", "ndpi_high_risk")
 	}
 	if result.RiskScore >= 50 {
-		return markViolation(result, actionOrMode(policy.Mode, ActionAlert), "ndpi medium risk protocol", "ndpi_medium_risk")
+		return markViolation(result, ActionAlert, "ndpi medium risk protocol", "ndpi_medium_risk")
 	}
 	return result
 }
@@ -616,6 +621,21 @@ func matchedBlockedGroup(groups, protocolName, category string, tags []string) s
 		}
 	}
 	return ""
+}
+
+func dpiAllowedByPurpose(policy Policy, result Result) bool {
+	protocolName := normalizeToken(result.NDPIProtocol)
+	category := normalizeToken(result.NDPICategory)
+	switch policyPurpose(policy) {
+	case "ssh_ops":
+		return result.Protocol == NameSSH || protocolName == "ssh"
+	case "authorized_ss":
+		return result.Protocol == NameUnknown && (protocolName == "unknown" || protocolName == "unknown_encrypted" || category == "encrypted_tunnel")
+	case "gaming", "daily":
+		return protocolName == "tls" || protocolName == "quic" || protocolName == "http" || category == "web"
+	default:
+		return false
+	}
 }
 
 func containsAnyToken(list string, needles ...string) bool {
