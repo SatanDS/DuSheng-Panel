@@ -141,8 +141,8 @@ const valueLabels: Record<string, string> = {
   nodes: "节点",
   device_group: "设备组",
   device_groups: "设备组",
-  tunnel: "隧道",
-  tunnels: "隧道",
+  tunnel: "线路",
+  tunnels: "线路",
   protocol_policy: "协议策略",
   protocol_policies: "协议策略",
   speed_limit: "限速策略",
@@ -156,7 +156,7 @@ const navItems: { key: PageKey; label: string; icon: LucideIcon }[] = [
   { key: "forward-rules", label: "转发规则", icon: Route },
   { key: "nodes", label: "节点", icon: Server },
   { key: "device-groups", label: "设备组", icon: Boxes },
-  { key: "tunnels", label: "隧道", icon: Network },
+  { key: "tunnels", label: "线路", icon: Network },
   { key: "protocol-policies", label: "协议策略", icon: ShieldCheck },
   { key: "speed-limits", label: "限速策略", icon: SlidersHorizontal },
   { key: "violations", label: "违规事件", icon: AlertTriangle },
@@ -188,7 +188,7 @@ const resourceConfigs: Record<Exclude<PageKey, "dashboard" | "violations" | "aud
     fields: [
       { key: "name", label: "名称", required: true },
       { key: "userId", label: "用户", type: "number", optional: true, min: 1, reference: "users" },
-      { key: "tunnelId", label: "隧道", type: "number", required: true, min: 1, reference: "tunnels" },
+      { key: "tunnelId", label: "线路", type: "number", required: true, min: 1, reference: "tunnels" },
       { key: "protocol", label: "协议", type: "select", options: protocolOptions, required: true },
       { key: "listenPort", label: "监听端口", type: "number", min: 0, max: 65535 },
       { key: "remoteHost", label: "上游地址", required: true },
@@ -331,10 +331,10 @@ const resourceConfigs: Record<Exclude<PageKey, "dashboard" | "violations" | "aud
   },
   tunnels: {
     key: "tunnels",
-    title: "隧道",
+    title: "线路",
     eyebrow: "链路路径与计费控制",
     endpoint: "/tunnels",
-    createLabel: "新建隧道",
+    createLabel: "新建线路",
     fields: [
       { key: "name", label: "名称", required: true },
       {
@@ -421,7 +421,7 @@ const resourceConfigs: Record<Exclude<PageKey, "dashboard" | "violations" | "aud
       { key: "allowPlainTcpOnly", label: "仅允许明文 TCP", type: "checkbox" },
       { key: "allowHttpOnly", label: "仅允许 HTTP", type: "checkbox" },
       { key: "blockProxyLike", label: "阻断代理特征", type: "checkbox" },
-      { key: "blockEncryptedTunnel", label: "阻断加密隧道", type: "checkbox" },
+      { key: "blockEncryptedTunnel", label: "阻断加密线路", type: "checkbox" },
       { key: "description", label: "说明", type: "textarea", rows: 5, fullWidth: true }
     ],
     columns: [
@@ -442,7 +442,7 @@ const resourceConfigs: Record<Exclude<PageKey, "dashboard" | "violations" | "aud
     fields: [
       { key: "name", label: "名称", required: true },
       { key: "userId", label: "用户", type: "number", optional: true, min: 1, reference: "users" },
-      { key: "tunnelId", label: "隧道", type: "number", optional: true, min: 1, reference: "tunnels" },
+      { key: "tunnelId", label: "线路", type: "number", optional: true, min: 1, reference: "tunnels" },
       { key: "ruleId", label: "转发规则", type: "number", optional: true, min: 1, reference: "forward-rules" },
       { key: "uploadBps", label: "上传 Bps", type: "number", min: 0 },
       { key: "downloadBps", label: "下载 Bps", type: "number", min: 0 },
@@ -453,7 +453,7 @@ const resourceConfigs: Record<Exclude<PageKey, "dashboard" | "violations" | "aud
       { key: "id", label: "ID", className: "mono" },
       { key: "name", label: "名称" },
       { key: "userId", label: "用户" },
-      { key: "tunnelId", label: "隧道" },
+      { key: "tunnelId", label: "线路" },
       { key: "ruleId", label: "规则" },
       { key: "uploadBps", label: "上行", render: (row) => formatBps(row.uploadBps) },
       { key: "downloadBps", label: "下行", render: (row) => formatBps(row.downloadBps) },
@@ -1678,7 +1678,7 @@ function FieldControl({
     );
   }
 
-  if (field.type === "number" && field.reference && referenced.length > 0) {
+  if (field.type === "number" && field.reference) {
     return (
       <label className={className} htmlFor={id}>
         <span>{field.label}</span>
@@ -1689,7 +1689,7 @@ function FieldControl({
           disabled={disabled}
           onChange={(event) => onChange(event.target.value)}
         >
-          <option value="">{field.optional ? "未设置" : "请选择"}</option>
+          <option value="">{field.optional ? "未设置" : referenced.length > 0 ? "请选择" : `暂无可选${field.label}`}</option>
           {referenced.map((option) => (
             <option key={option.value} value={option.value}>
               {option.label}
@@ -1803,7 +1803,7 @@ function renderPolicyFlags(row: Entity) {
     ["仅明文 TCP", row.allowPlainTcpOnly],
     ["仅 HTTP", row.allowHttpOnly],
     ["代理特征", row.blockProxyLike],
-    ["加密隧道", row.blockEncryptedTunnel]
+    ["加密线路", row.blockEncryptedTunnel]
   ].filter(([, enabled]) => Boolean(enabled));
 
   if (flags.length === 0) {
