@@ -5,7 +5,7 @@ ENV PNPM_HOME=/pnpm
 ENV PATH=$PNPM_HOME:$PATH
 WORKDIR /src
 
-RUN corepack enable
+RUN corepack enable && corepack prepare pnpm@10.6.2 --activate
 
 COPY package.json pnpm-workspace.yaml ./
 COPY apps/web/package.json ./apps/web/package.json

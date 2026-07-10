@@ -2,6 +2,7 @@
   "name": "dusheng-panel",
   "private": true,
   "version": "0.1.0",
+  "packageManager": "pnpm@10.6.2",
   "description": "DuSheng Panel monorepo: forwarding panel, API server, and Linux node agent.",
   "scripts": {
     "dev:web": "pnpm --dir apps/web dev",
