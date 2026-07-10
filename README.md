@@ -58,7 +58,7 @@ Docker Compose 生产部署时，面板默认 HTTP 访问端口为：
 
 ```env
 HTTP_PORT=7070
-HTTPS_PORT=443
+HTTPS_PORT=7443
 ```
 
 默认管理员账号：
@@ -172,7 +172,7 @@ DUSHENG_AGENT_RELEASE_BASE=https://github.com/SatanDS/DuSheng-Panel/releases/lat
 
 DUSHENG_SITE_ADDRESS=:80
 HTTP_PORT=7070
-HTTPS_PORT=443
+HTTPS_PORT=7443
 TZ=Asia/Taipei
 EOF
 ```
@@ -186,6 +186,8 @@ DUSHENG_SITE_ADDRESS=panel.example.com
 HTTP_PORT=80
 HTTPS_PORT=443
 ```
+
+注意：IP + `7070` 部署模式下默认不占用宿主机 `443`，避免和已有 Nginx、宝塔、1Panel、其他 HTTPS 服务冲突。只有域名 HTTPS 部署时才需要把 `HTTPS_PORT` 设为 `443`。
 
 ### 4. 启动面板
 

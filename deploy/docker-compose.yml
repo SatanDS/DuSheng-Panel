@@ -57,7 +57,7 @@ services:
       DUSHENG_SITE_ADDRESS: ${DUSHENG_SITE_ADDRESS:-:80}
     ports:
       - "${HTTP_PORT:-7070}:80"
-      - "${HTTPS_PORT:-443}:443"
+      - "${HTTPS_PORT:-7443}:443"
     volumes:
       - ./Caddyfile.example:/etc/caddy/Caddyfile:ro
       - caddy-data:/data
