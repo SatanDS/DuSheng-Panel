@@ -30,6 +30,7 @@ func main() {
 	dataDir := flag.String("data-dir", firstEnvDefault("data", "DUSHENG_DATA_DIR", "DATA_DIR"), "agent state directory")
 	name := flag.String("name", firstEnvDefault("DuSheng Node", "DUSHENG_NODE_NAME", "DUSHENG_NAME", "NAME"), "node name used during registration")
 	gostPath := flag.String("gost-path", firstEnv("DUSHENG_GOST_PATH", "DUSHENG_GOST_BIN", "GOST_PATH", "GOST_BIN"), "path to gost binary")
+	dpiAddr := flag.String("dpi-addr", firstEnv("DUSHENG_DPI_ADDR", "DPI_ADDR"), "local dusheng-dpi endpoint, e.g. unix:/run/dusheng-dpi.sock")
 	flag.Parse()
 
 	if strings.TrimSpace(*baseURL) == "" {
@@ -71,13 +72,13 @@ func main() {
 	}
 
 	gost := supervisor.New(*gostPath, logger)
-	rt := agentruntime.New(api, logger, agentruntime.Options{})
+	rt := agentruntime.New(api, logger, agentruntime.Options{DPIAddress: strings.TrimSpace(*dpiAddr)})
 	syncer := configsync.New(api, *dataDir, rt, logger)
 
 	if err := syncer.SyncOnce(ctx); err != nil {
 		logger.Printf("initial config sync failed: %v", err)
 	}
-	if command, err := sendHeartbeat(ctx, api, syncer, gost, strings.TrimSpace(*gostPath), logger); err != nil {
+	if command, err := sendHeartbeat(ctx, api, syncer, gost, strings.TrimSpace(*gostPath), strings.TrimSpace(*dpiAddr), logger); err != nil {
 		logger.Printf("initial heartbeat failed: %v", err)
 	} else if shouldExit, err := handleCommand(ctx, api, command, *dataDir, logger); err != nil {
 		logger.Printf("handle command failed: %v", err)
@@ -101,7 +102,7 @@ func main() {
 				logger.Printf("config sync failed: %v", err)
 			}
 		case <-heartbeatTicker.C:
-			command, err := sendHeartbeat(ctx, api, syncer, gost, strings.TrimSpace(*gostPath), logger)
+			command, err := sendHeartbeat(ctx, api, syncer, gost, strings.TrimSpace(*gostPath), strings.TrimSpace(*dpiAddr), logger)
 			if err != nil {
 				logger.Printf("heartbeat failed: %v", err)
 				continue
@@ -119,7 +120,7 @@ func main() {
 	}
 }
 
-func sendHeartbeat(ctx context.Context, api *client.Client, syncer *configsync.Syncer, gost *supervisor.Supervisor, gostPath string, logger *log.Logger) (*client.Command, error) {
+func sendHeartbeat(ctx context.Context, api *client.Client, syncer *configsync.Syncer, gost *supervisor.Supervisor, gostPath, dpiAddr string, logger *log.Logger) (*client.Command, error) {
 	host, _ := os.Hostname()
 	runtimeStatus := syncer.RuntimeStatus()
 	resp, err := api.Heartbeat(ctx, client.HeartbeatRequest{
@@ -135,8 +136,10 @@ func sendHeartbeat(ctx context.Context, api *client.Client, syncer *configsync.S
 			"gostActive":        gost.Running(),
 			"gostStatus":        gost.Status(),
 			"gostPath":          gostPath,
+			"dpiAddr":           dpiAddr,
+			"dpiEnabled":        dpiAddr != "",
 			"trafficReporting":  "tcp_udp_runtime",
-			"protocolDetection": "tcp_udp_runtime",
+			"protocolDetection": "tcp_udp_runtime_ndpi",
 		},
 	})
 	if err != nil {

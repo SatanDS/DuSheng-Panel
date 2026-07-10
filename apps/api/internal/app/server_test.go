@@ -113,6 +113,56 @@ func adminToken(t *testing.T, s *Server) string {
 	return token
 }
 
+func TestCreateGamingProtocolPolicyAppliesSafeDefaults(t *testing.T) {
+	s := testServer(t)
+	router := testRouter(t, s)
+	token := adminToken(t, s)
+
+	rec := jsonRequest(t, router, http.MethodPost, "/api/v1/protocol-policies", map[string]any{
+		"name":     "game safe",
+		"template": "game_acceleration",
+		"mode":     "block",
+	}, token)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var row models.ProtocolPolicy
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &row))
+	require.Equal(t, "gaming", row.Purpose)
+	require.True(t, row.BlockProxyLike)
+	require.Equal(t, "allow", row.QUICAction)
+	require.Equal(t, "block", row.SSHAction)
+	require.Contains(t, row.BlockedProtocolGroups, "vpn")
+}
+
+func TestEvaluateProtocolPolicyBlocksNDPIVPNGroup(t *testing.T) {
+	s := testServer(t)
+	router := testRouter(t, s)
+	token := adminToken(t, s)
+	policy := models.ProtocolPolicy{
+		Name:                  "game dpi",
+		Template:              "game_acceleration",
+		Purpose:               "gaming",
+		InspectionLevel:       "advanced",
+		Mode:                  "block",
+		BlockedProtocolGroups: "vpn,p2p",
+	}
+	require.NoError(t, s.db.Create(&policy).Error)
+
+	rec := jsonRequest(t, router, http.MethodPost, "/api/v1/protocol-policies/evaluate", map[string]any{
+		"policyId":     policy.ID,
+		"network":      "udp",
+		"protocol":     "unknown",
+		"ndpiProtocol": "wireguard",
+		"ndpiCategory": "vpn",
+		"confidence":   90,
+		"riskScore":    85,
+	}, token)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var payload map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
+	require.Equal(t, "block", payload["action"])
+	require.Contains(t, payload["matchedRule"], "ndpi_group:vpn")
+}
+
 func TestPrepareForwardRuleAllocatesFirstFreePort(t *testing.T) {
 	s := testServer(t)
 	user, _, tunnel, _ := seedForwardFixture(t, s)

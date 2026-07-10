@@ -27,6 +27,7 @@ foreach ($target in $targets) {
   $arch = $target.Arch
   $workDir = Join-Path $outputPath "dusheng-agent-$os-$arch"
   $binaryPath = Join-Path $workDir "dusheng-agent"
+  $dpiBinaryPath = Join-Path $workDir "dusheng-dpi"
   $archiveName = "dusheng-agent-$os-$arch.tar.gz"
   $archivePath = Join-Path $outputPath $archiveName
 
@@ -40,6 +41,7 @@ foreach ($target in $targets) {
   $env:GOARCH = $arch
   $env:CGO_ENABLED = "0"
   go build -trimpath -ldflags "-s -w -X main.version=$Version" -o $binaryPath ./apps/agent/cmd/agent
+  go build -trimpath -ldflags "-s -w -X main.version=$Version" -o $dpiBinaryPath ./apps/dpi/cmd/dpi
 
   if (Test-Path -LiteralPath $archivePath) {
     Remove-Item -LiteralPath $archivePath -Force
@@ -47,7 +49,7 @@ foreach ($target in $targets) {
 
   Push-Location $workDir
   try {
-    tar -czf $archivePath dusheng-agent
+    tar -czf $archivePath dusheng-agent dusheng-dpi
   } finally {
     Pop-Location
   }

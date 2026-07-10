@@ -97,12 +97,26 @@
             "plain_tcp_only",
             "http_only",
             "block_proxy_like",
+            "game_acceleration",
+            "authorized_ss",
+            "ssh_ops",
+            "daily_browsing",
+            "normal_forward",
+            "strict_compliance",
             "custom"
           ]
         },
+        "purpose": {
+          "type": "string",
+          "enum": ["gaming", "authorized_ss", "ssh_ops", "daily", "normal", "strict", "custom"]
+        },
+        "inspectionLevel": {
+          "type": "string",
+          "enum": ["off", "light", "advanced", "deep", "ndpi"]
+        },
         "mode": {
           "type": "string",
-          "enum": ["observe", "alert", "block"],
+          "enum": ["observe", "alert", "limit", "block"],
           "default": "block"
         },
         "blockTls": {
@@ -129,10 +143,64 @@
           "type": "boolean",
           "default": false
         },
+        "observationMinutes": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "authorizedProtocols": {
+          "type": "string"
+        },
+        "blockedProtocolGroups": {
+          "type": "string"
+        },
+        "hostAllowlist": {
+          "type": "string"
+        },
+        "hostBlocklist": {
+          "type": "string"
+        },
+        "sniAllowlist": {
+          "type": "string"
+        },
+        "sniBlocklist": {
+          "type": "string"
+        },
+        "alpnAllowlist": {
+          "type": "string"
+        },
+        "alpnBlocklist": {
+          "type": "string"
+        },
+        "tlsNoSniAction": {
+          "$ref": "#/$defs/protocolAction"
+        },
+        "quicAction": {
+          "$ref": "#/$defs/protocolAction"
+        },
+        "sshAction": {
+          "$ref": "#/$defs/protocolAction"
+        },
+        "unknownTcpAction": {
+          "$ref": "#/$defs/protocolAction"
+        },
+        "unknownUdpAction": {
+          "$ref": "#/$defs/protocolAction"
+        },
+        "ndpiLowConfidenceAction": {
+          "$ref": "#/$defs/protocolAction"
+        },
+        "dpiTimeoutMs": {
+          "type": "integer",
+          "minimum": 0
+        },
         "description": {
           "type": "string"
         }
       }
+    },
+    "protocolAction": {
+      "type": "string",
+      "enum": ["allow", "observe", "alert", "limit", "block"]
     },
     "tunnelRef": {
       "type": "object",

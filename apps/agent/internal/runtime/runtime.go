@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"dusheng-panel/apps/agent/internal/client"
+	"dusheng-panel/apps/agent/internal/dpi"
 	"dusheng-panel/apps/agent/internal/protocol"
 )
 
@@ -28,6 +29,7 @@ const (
 	defaultMaxTrafficBytes       = int64(1 << 40)
 	defaultMaxTrafficFailures    = 5
 	defaultMaxUDPSessionsPerRule = 4096
+	defaultDPITimeout            = 300 * time.Millisecond
 	maxUDPPacketBytes            = 64 * 1024
 )
 
@@ -46,6 +48,8 @@ type Options struct {
 	MaxTrafficBytes       int64
 	MaxTrafficFailures    int
 	MaxUDPSessionsPerRule int
+	DPIAddress            string
+	DPITimeout            time.Duration
 }
 
 type Runtime struct {
@@ -53,6 +57,7 @@ type Runtime struct {
 	logger   *log.Logger
 	options  Options
 	traffic  *trafficBuffer
+	dpi      *dpi.Client
 
 	mu           sync.Mutex
 	listeners    map[listenerKey]managedListener
@@ -69,6 +74,7 @@ type Runtime struct {
 	udpRejectedSessions int64
 	upstreamWriteErrors int64
 	udpCleanedSessions  int64
+	dpiErrors           int64
 }
 
 type listenerKey struct {
@@ -111,11 +117,15 @@ func New(reporter Reporter, logger *log.Logger, options Options) *Runtime {
 	if options.MaxUDPSessionsPerRule <= 0 {
 		options.MaxUDPSessionsPerRule = defaultMaxUDPSessionsPerRule
 	}
+	if options.DPITimeout <= 0 {
+		options.DPITimeout = defaultDPITimeout
+	}
 	rt := &Runtime{
 		reporter:  reporter,
 		logger:    logger,
 		options:   options,
 		traffic:   newTrafficBuffer(reporter, logger, options),
+		dpi:       dpi.New(options.DPIAddress, options.DPITimeout),
 		listeners: map[listenerKey]managedListener{},
 		trackers:  map[uint]*limitTracker{},
 		stopFlush: make(chan struct{}),
@@ -226,7 +236,9 @@ func (r *Runtime) Status() map[string]any {
 			"udpRejectedSessions": atomic.LoadInt64(&r.udpRejectedSessions),
 			"upstreamWrite":       atomic.LoadInt64(&r.upstreamWriteErrors),
 			"udpCleanedSessions":  atomic.LoadInt64(&r.udpCleanedSessions),
+			"dpi":                 atomic.LoadInt64(&r.dpiErrors),
 		},
+		"dpiEnabled": r.dpi != nil && r.dpi.Enabled(),
 	}
 }
 
@@ -427,7 +439,7 @@ func (l *ruleListener) handle(conn net.Conn) {
 		return
 	}
 
-	result := protocol.Detect(firstPacket, policyFromClient(l.cfg.policy))
+	result := l.runtime.detectProtocol(context.Background(), firstPacket, l.cfg, "tcp")
 	if result.Action != protocol.ActionAllow {
 		if result.Action == protocol.ActionBlock {
 			l.reportViolation(context.Background(), result, sourceIP)
@@ -540,12 +552,20 @@ func (l *ruleListener) reportViolation(ctx context.Context, result protocol.Resu
 		return
 	}
 	detail, _ := json.Marshal(map[string]any{
-		"reason":   result.Reason,
-		"host":     result.Host,
-		"alpn":     result.ALPN,
-		"ruleId":   l.cfg.rule.ID,
-		"tunnelId": l.cfg.tunnel.ID,
-		"source":   "tcp_runtime",
+		"reason":       result.Reason,
+		"host":         result.Host,
+		"alpn":         result.ALPN,
+		"ruleId":       l.cfg.rule.ID,
+		"tunnelId":     l.cfg.tunnel.ID,
+		"source":       "tcp_runtime",
+		"detector":     result.Source,
+		"matchedRule":  result.MatchedRule,
+		"confidence":   result.Confidence,
+		"riskScore":    result.RiskScore,
+		"riskLevel":    result.RiskLevel,
+		"tags":         result.Tags,
+		"ndpiProtocol": result.NDPIProtocol,
+		"ndpiCategory": result.NDPICategory,
 	})
 	_, err := l.runtime.reporter.ReportViolation(ctx, client.ViolationReport{
 		RuleID:   l.cfg.rule.ID,
@@ -660,7 +680,7 @@ func (l *udpListener) handleDatagram(clientAddr net.Addr, packet []byte) {
 	}
 
 	sourceIP := remoteIP(clientAddr)
-	result := protocol.Detect(packet, policyFromClient(l.cfg.policy))
+	result := l.runtime.detectProtocol(context.Background(), packet, l.cfg, "udp")
 	if result.Action != protocol.ActionAllow {
 		if result.Action == protocol.ActionBlock {
 			l.reportViolation(context.Background(), result, sourceIP, clientAddr.String())
@@ -763,14 +783,22 @@ func (l *udpListener) reportViolation(ctx context.Context, result protocol.Resul
 		return
 	}
 	detail, _ := json.Marshal(map[string]any{
-		"reason":     result.Reason,
-		"host":       result.Host,
-		"alpn":       result.ALPN,
-		"protocol":   result.Protocol,
-		"ruleId":     l.cfg.rule.ID,
-		"tunnelId":   l.cfg.tunnel.ID,
-		"clientAddr": clientAddr,
-		"source":     "udp_runtime",
+		"reason":       result.Reason,
+		"host":         result.Host,
+		"alpn":         result.ALPN,
+		"protocol":     result.Protocol,
+		"ruleId":       l.cfg.rule.ID,
+		"tunnelId":     l.cfg.tunnel.ID,
+		"clientAddr":   clientAddr,
+		"source":       "udp_runtime",
+		"detector":     result.Source,
+		"matchedRule":  result.MatchedRule,
+		"confidence":   result.Confidence,
+		"riskScore":    result.RiskScore,
+		"riskLevel":    result.RiskLevel,
+		"tags":         result.Tags,
+		"ndpiProtocol": result.NDPIProtocol,
+		"ndpiCategory": result.NDPICategory,
 	})
 	_, err := l.runtime.reporter.ReportViolation(ctx, client.ViolationReport{
 		RuleID:   l.cfg.rule.ID,
@@ -883,6 +911,60 @@ func (s *udpSession) close() {
 	s.closeOnce.Do(func() {
 		_ = s.upstream.Close()
 	})
+}
+
+func (r *Runtime) detectProtocol(ctx context.Context, packet []byte, cfg ruleRuntimeConfig, network string) protocol.Result {
+	policy := policyFromClient(cfg.policy, network)
+	result := protocol.Detect(packet, policy)
+	if !shouldUseDPI(cfg.policy, result) || r.dpi == nil || !r.dpi.Enabled() {
+		return result
+	}
+	timeout := r.options.DPITimeout
+	if cfg.policy != nil && cfg.policy.DPITimeoutMs > 0 {
+		timeout = time.Duration(cfg.policy.DPITimeoutMs) * time.Millisecond
+	}
+	if timeout <= 0 {
+		timeout = defaultDPITimeout
+	}
+	dpiCtx, cancel := context.WithTimeout(ctx, timeout)
+	defer cancel()
+	verdict, err := r.dpi.Classify(dpiCtx, dpi.ClassifyRequest{
+		Network:         network,
+		Payload:         packet,
+		BuiltinProtocol: result.Protocol,
+		Host:            result.Host,
+		ALPN:            result.ALPN,
+		RuleID:          cfg.rule.ID,
+	})
+	if err != nil {
+		atomic.AddInt64(&r.dpiErrors, 1)
+		return result
+	}
+	return protocol.ApplyDPI(result, policy, protocol.DPIResult{
+		Protocol:   verdict.Protocol,
+		Category:   verdict.Category,
+		Confidence: verdict.Confidence,
+		RiskScore:  verdict.RiskScore,
+		RiskLevel:  verdict.RiskLevel,
+		Tags:       verdict.Tags,
+	})
+}
+
+func shouldUseDPI(policy *client.ProtocolPolicy, result protocol.Result) bool {
+	if policy == nil {
+		return false
+	}
+	switch strings.ToLower(strings.TrimSpace(policy.InspectionLevel)) {
+	case "deep", "advanced", "ndpi", "full":
+		return true
+	}
+	if strings.TrimSpace(policy.BlockedProtocolGroups) != "" {
+		return true
+	}
+	if strings.TrimSpace(policy.NDPILowConfidenceAction) != "" {
+		return true
+	}
+	return result.Protocol == protocol.NameUnknown && strings.TrimSpace(policy.AuthorizedProtocols) == ""
 }
 
 type trafficBuffer struct {
@@ -1272,18 +1354,38 @@ func effectivePolicy(rule client.ForwardRule, tunnel client.Tunnel, group client
 	return &policy
 }
 
-func policyFromClient(policy *client.ProtocolPolicy) protocol.Policy {
+func policyFromClient(policy *client.ProtocolPolicy, network string) protocol.Policy {
 	if policy == nil {
-		return protocol.Policy{}
+		return protocol.Policy{Network: network}
 	}
 	return protocol.Policy{
-		Mode:                 policy.Mode,
-		BlockTLS:             policy.BlockTLS,
-		BlockQUIC:            policy.BlockQUIC,
-		AllowPlainTCPOnly:    policy.AllowPlainTCPOnly,
-		AllowHTTPOnly:        policy.AllowHTTPOnly,
-		BlockProxyLike:       policy.BlockProxyLike,
-		BlockEncryptedTunnel: policy.BlockEncryptedTunnel,
+		Template:                policy.Template,
+		Purpose:                 policy.Purpose,
+		InspectionLevel:         policy.InspectionLevel,
+		Network:                 network,
+		Mode:                    policy.Mode,
+		BlockTLS:                policy.BlockTLS,
+		BlockQUIC:               policy.BlockQUIC,
+		AllowPlainTCPOnly:       policy.AllowPlainTCPOnly,
+		AllowHTTPOnly:           policy.AllowHTTPOnly,
+		BlockProxyLike:          policy.BlockProxyLike,
+		BlockEncryptedTunnel:    policy.BlockEncryptedTunnel,
+		ObservationMinutes:      policy.ObservationMinutes,
+		AuthorizedProtocols:     policy.AuthorizedProtocols,
+		BlockedProtocolGroups:   policy.BlockedProtocolGroups,
+		HostAllowlist:           policy.HostAllowlist,
+		HostBlocklist:           policy.HostBlocklist,
+		SNIAllowlist:            policy.SNIAllowlist,
+		SNIBlocklist:            policy.SNIBlocklist,
+		ALPNAllowlist:           policy.ALPNAllowlist,
+		ALPNBlocklist:           policy.ALPNBlocklist,
+		TLSNoSNIAction:          policy.TLSNoSNIAction,
+		QUICAction:              policy.QUICAction,
+		SSHAction:               policy.SSHAction,
+		UnknownTCPAction:        policy.UnknownTCPAction,
+		UnknownUDPAction:        policy.UnknownUDPAction,
+		NDPILowConfidenceAction: policy.NDPILowConfidenceAction,
+		DPITimeoutMs:            policy.DPITimeoutMs,
 	}
 }
 

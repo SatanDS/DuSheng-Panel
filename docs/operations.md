@@ -13,7 +13,7 @@ docker compose --env-file .env -f deploy/docker-compose.yml up -d --build
 docker compose --env-file .env -f deploy/docker-compose.yml ps
 ```
 
-每次 agent 代码变化后，都必须同步发布 Linux agent 二进制，否则节点安装脚本会继续下载旧版本：
+每次 agent 或 DPI sidecar 代码变化后，都必须同步发布 Linux agent 二进制包，否则节点安装脚本会继续下载旧版本：
 
 ```powershell
 cd "D:\DuSheng Panel"
@@ -97,4 +97,3 @@ passwd
 ```bash
 docker compose --env-file .env -f deploy/docker-compose.yml up -d
 ```
-

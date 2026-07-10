@@ -51,7 +51,7 @@ func TestIdentify(t *testing.T) {
 
 func TestDetectPolicyModes(t *testing.T) {
 	packet := []byte{0x16, 0x03, 0x01, 0x00, 0x2f, 0x01, 0x00, 0x00, 0x2b}
-	for _, mode := range []string{ActionObserve, ActionAlert, ActionBlock} {
+	for _, mode := range []string{ActionObserve, ActionAlert, ActionLimit, ActionBlock} {
 		t.Run(mode, func(t *testing.T) {
 			result := Detect(packet, Policy{Mode: mode, BlockTLS: true})
 			if result.Protocol != NameTLS {
@@ -64,6 +64,52 @@ func TestDetectPolicyModes(t *testing.T) {
 				t.Fatal("Reason is empty")
 			}
 		})
+	}
+}
+
+func TestAuthorizedSSAllowsUnknownEncryptedEntry(t *testing.T) {
+	result := Detect([]byte{0x13, 0x37, 0x00, 0xff, 0x42, 0x99}, Policy{
+		Purpose:             "authorized_ss",
+		Network:             "tcp",
+		AuthorizedProtocols: "ss,shadowsocks,ss2022",
+		UnknownTCPAction:    ActionBlock,
+	})
+	if result.Action != ActionAllow {
+		t.Fatalf("Action = %q, want allow: %#v", result.Action, result)
+	}
+}
+
+func TestGamingPolicyBlocksSSHButAllowsUDPUnknown(t *testing.T) {
+	ssh := Detect([]byte("SSH-2.0-OpenSSH_9.6\r\n"), Policy{Purpose: "gaming", Network: "tcp"})
+	if ssh.Action != ActionBlock {
+		t.Fatalf("SSH action = %q, want block", ssh.Action)
+	}
+	udp := Detect([]byte{0x01, 0x02, 0x03, 0x04}, Policy{Purpose: "gaming", Network: "udp"})
+	if udp.Action != ActionAllow {
+		t.Fatalf("UDP unknown action = %q, want allow", udp.Action)
+	}
+}
+
+func TestSSHOpsAllowsSSH(t *testing.T) {
+	result := Detect([]byte("SSH-2.0-OpenSSH_9.6\r\n"), Policy{Purpose: "ssh_ops", Network: "tcp"})
+	if result.Action != ActionAllow {
+		t.Fatalf("Action = %q, want allow", result.Action)
+	}
+}
+
+func TestDPIBlockedGroup(t *testing.T) {
+	result := Detect([]byte{0x01, 0x02, 0x03}, Policy{Purpose: "gaming", Network: "udp"})
+	result = ApplyDPI(result, Policy{Purpose: "gaming", BlockedProtocolGroups: "vpn,p2p"}, DPIResult{
+		Protocol:   "wireguard",
+		Category:   "vpn",
+		Confidence: 90,
+		RiskScore:  85,
+	})
+	if result.Action != ActionBlock {
+		t.Fatalf("Action = %q, want block", result.Action)
+	}
+	if result.NDPIProtocol != "wireguard" || result.NDPICategory != "vpn" {
+		t.Fatalf("DPI fields not populated: %#v", result)
 	}
 }
 

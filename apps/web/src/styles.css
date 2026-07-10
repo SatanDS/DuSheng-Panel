@@ -744,6 +744,21 @@ code {
   align-items: end;
 }
 
+.policy-evaluator {
+  grid-template-columns: repeat(auto-fit, minmax(140px, 1fr));
+  padding: 14px;
+}
+
+.policy-result {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  align-items: center;
+  padding: 0 14px 14px;
+  color: var(--muted);
+  font-size: 13px;
+}
+
 .inline-form label,
 .login-panel label {
   display: grid;

@@ -180,15 +180,34 @@ type RenderedLimit struct {
 }
 
 type RenderedPolicy struct {
-	ID                   uint   `json:"id"`
-	Name                 string `json:"name"`
-	Mode                 string `json:"mode"`
-	BlockTLS             bool   `json:"blockTls"`
-	BlockQUIC            bool   `json:"blockQuic"`
-	AllowPlainTCPOnly    bool   `json:"allowPlainTcpOnly"`
-	AllowHTTPOnly        bool   `json:"allowHttpOnly"`
-	BlockProxyLike       bool   `json:"blockProxyLike"`
-	BlockEncryptedTunnel bool   `json:"blockEncryptedTunnel"`
+	ID                      uint   `json:"id"`
+	Name                    string `json:"name"`
+	Template                string `json:"template"`
+	Purpose                 string `json:"purpose"`
+	InspectionLevel         string `json:"inspectionLevel"`
+	Mode                    string `json:"mode"`
+	BlockTLS                bool   `json:"blockTls"`
+	BlockQUIC               bool   `json:"blockQuic"`
+	AllowPlainTCPOnly       bool   `json:"allowPlainTcpOnly"`
+	AllowHTTPOnly           bool   `json:"allowHttpOnly"`
+	BlockProxyLike          bool   `json:"blockProxyLike"`
+	BlockEncryptedTunnel    bool   `json:"blockEncryptedTunnel"`
+	ObservationMinutes      int    `json:"observationMinutes"`
+	AuthorizedProtocols     string `json:"authorizedProtocols"`
+	BlockedProtocolGroups   string `json:"blockedProtocolGroups"`
+	HostAllowlist           string `json:"hostAllowlist"`
+	HostBlocklist           string `json:"hostBlocklist"`
+	SNIAllowlist            string `json:"sniAllowlist"`
+	SNIBlocklist            string `json:"sniBlocklist"`
+	ALPNAllowlist           string `json:"alpnAllowlist"`
+	ALPNBlocklist           string `json:"alpnBlocklist"`
+	TLSNoSNIAction          string `json:"tlsNoSniAction"`
+	QUICAction              string `json:"quicAction"`
+	SSHAction               string `json:"sshAction"`
+	UnknownTCPAction        string `json:"unknownTcpAction"`
+	UnknownUDPAction        string `json:"unknownUdpAction"`
+	NDPILowConfidenceAction string `json:"ndpiLowConfidenceAction"`
+	DPITimeoutMs            int    `json:"dpiTimeoutMs"`
 }
 
 func (r *Renderer) Render(cfg client.AgentConfig) (RenderResult, error) {
@@ -254,15 +273,34 @@ func buildGostConfig(cfg client.AgentConfig) GostConfig {
 	policies := make([]RenderedPolicy, 0, len(cfg.ProtocolPolicies))
 	for _, policy := range cfg.ProtocolPolicies {
 		policies = append(policies, RenderedPolicy{
-			ID:                   policy.ID,
-			Name:                 policy.Name,
-			Mode:                 policy.Mode,
-			BlockTLS:             policy.BlockTLS,
-			BlockQUIC:            policy.BlockQUIC,
-			AllowPlainTCPOnly:    policy.AllowPlainTCPOnly,
-			AllowHTTPOnly:        policy.AllowHTTPOnly,
-			BlockProxyLike:       policy.BlockProxyLike,
-			BlockEncryptedTunnel: policy.BlockEncryptedTunnel,
+			ID:                      policy.ID,
+			Name:                    policy.Name,
+			Template:                policy.Template,
+			Purpose:                 policy.Purpose,
+			InspectionLevel:         policy.InspectionLevel,
+			Mode:                    policy.Mode,
+			BlockTLS:                policy.BlockTLS,
+			BlockQUIC:               policy.BlockQUIC,
+			AllowPlainTCPOnly:       policy.AllowPlainTCPOnly,
+			AllowHTTPOnly:           policy.AllowHTTPOnly,
+			BlockProxyLike:          policy.BlockProxyLike,
+			BlockEncryptedTunnel:    policy.BlockEncryptedTunnel,
+			ObservationMinutes:      policy.ObservationMinutes,
+			AuthorizedProtocols:     policy.AuthorizedProtocols,
+			BlockedProtocolGroups:   policy.BlockedProtocolGroups,
+			HostAllowlist:           policy.HostAllowlist,
+			HostBlocklist:           policy.HostBlocklist,
+			SNIAllowlist:            policy.SNIAllowlist,
+			SNIBlocklist:            policy.SNIBlocklist,
+			ALPNAllowlist:           policy.ALPNAllowlist,
+			ALPNBlocklist:           policy.ALPNBlocklist,
+			TLSNoSNIAction:          policy.TLSNoSNIAction,
+			QUICAction:              policy.QUICAction,
+			SSHAction:               policy.SSHAction,
+			UnknownTCPAction:        policy.UnknownTCPAction,
+			UnknownUDPAction:        policy.UnknownUDPAction,
+			NDPILowConfidenceAction: policy.NDPILowConfidenceAction,
+			DPITimeoutMs:            policy.DPITimeoutMs,
 		})
 	}
 

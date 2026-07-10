@@ -3,4 +3,5 @@ go 1.25.0
 use (
 	./apps/api
 	./apps/agent
+	./apps/dpi
 )

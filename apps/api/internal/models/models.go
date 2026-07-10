@@ -93,16 +93,34 @@ type ForwardRule struct {
 
 type ProtocolPolicy struct {
 	BaseModel
-	Name                 string `gorm:"size:120;uniqueIndex;not null" json:"name"`
-	Template             string `gorm:"size:60;not null" json:"template"`
-	Mode                 string `gorm:"size:20;not null;default:block" json:"mode"`
-	BlockTLS             bool   `json:"blockTls"`
-	BlockQUIC            bool   `json:"blockQuic"`
-	AllowPlainTCPOnly    bool   `json:"allowPlainTcpOnly"`
-	AllowHTTPOnly        bool   `json:"allowHttpOnly"`
-	BlockProxyLike       bool   `json:"blockProxyLike"`
-	BlockEncryptedTunnel bool   `json:"blockEncryptedTunnel"`
-	Description          string `gorm:"type:text" json:"description"`
+	Name                    string `gorm:"size:120;uniqueIndex;not null" json:"name"`
+	Template                string `gorm:"size:60;not null" json:"template"`
+	Purpose                 string `gorm:"size:40;not null;default:custom" json:"purpose"`
+	InspectionLevel         string `gorm:"size:20;not null;default:light" json:"inspectionLevel"`
+	Mode                    string `gorm:"size:20;not null;default:block" json:"mode"`
+	BlockTLS                bool   `json:"blockTls"`
+	BlockQUIC               bool   `json:"blockQuic"`
+	AllowPlainTCPOnly       bool   `json:"allowPlainTcpOnly"`
+	AllowHTTPOnly           bool   `json:"allowHttpOnly"`
+	BlockProxyLike          bool   `json:"blockProxyLike"`
+	BlockEncryptedTunnel    bool   `json:"blockEncryptedTunnel"`
+	ObservationMinutes      int    `json:"observationMinutes"`
+	AuthorizedProtocols     string `gorm:"type:text" json:"authorizedProtocols"`
+	BlockedProtocolGroups   string `gorm:"type:text" json:"blockedProtocolGroups"`
+	HostAllowlist           string `gorm:"type:text" json:"hostAllowlist"`
+	HostBlocklist           string `gorm:"type:text" json:"hostBlocklist"`
+	SNIAllowlist            string `gorm:"type:text" json:"sniAllowlist"`
+	SNIBlocklist            string `gorm:"type:text" json:"sniBlocklist"`
+	ALPNAllowlist           string `gorm:"type:text" json:"alpnAllowlist"`
+	ALPNBlocklist           string `gorm:"type:text" json:"alpnBlocklist"`
+	TLSNoSNIAction          string `gorm:"size:20" json:"tlsNoSniAction"`
+	QUICAction              string `gorm:"size:20" json:"quicAction"`
+	SSHAction               string `gorm:"size:20" json:"sshAction"`
+	UnknownTCPAction        string `gorm:"size:20" json:"unknownTcpAction"`
+	UnknownUDPAction        string `gorm:"size:20" json:"unknownUdpAction"`
+	NDPILowConfidenceAction string `gorm:"size:20" json:"ndpiLowConfidenceAction"`
+	DPITimeoutMs            int    `json:"dpiTimeoutMs"`
+	Description             string `gorm:"type:text" json:"description"`
 }
 
 type SpeedLimit struct {

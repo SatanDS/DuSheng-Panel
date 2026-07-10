@@ -116,7 +116,23 @@ const valueLabels: Record<string, string> = {
   block: "阻断",
   alert: "告警",
   observe: "观察",
+  limit: "限速",
   allow: "允许",
+  gaming: "游戏加速",
+  authorized_ss: "授权 SS",
+  ssh_ops: "SSH 运维",
+  daily: "日常上网",
+  normal: "普通转发",
+  strict: "严格合规",
+  custom: "自定义",
+  light: "轻量首包",
+  advanced: "高级 DPI",
+  deep: "深度 DPI",
+  ndpi: "nDPI",
+  game_acceleration: "游戏加速",
+  daily_browsing: "日常上网",
+  normal_forward: "普通转发",
+  strict_compliance: "严格合规",
   synced: "已同步",
   unsynced: "未同步",
   quota_exhausted: "流量用尽",
@@ -128,7 +144,6 @@ const valueLabels: Record<string, string> = {
   plain_tcp_only: "仅允许明文 TCP",
   http_only: "仅允许 HTTP",
   block_proxy_like: "阻断代理特征",
-  custom: "自定义",
   admin: "管理员",
   user: "普通用户",
   create: "创建",
@@ -171,11 +186,43 @@ const protocolOptions = [
 ];
 
 const policyOptions = [
+  { value: "game_acceleration", label: "游戏加速" },
+  { value: "authorized_ss", label: "授权 SS 代理" },
+  { value: "ssh_ops", label: "SSH 运维加速" },
+  { value: "daily_browsing", label: "日常上网" },
+  { value: "normal_forward", label: "普通转发" },
+  { value: "strict_compliance", label: "严格合规" },
   { value: "iepl_iplc_no_tls", label: "IEPL/IPLC 禁止 TLS/QUIC" },
   { value: "plain_tcp_only", label: "仅允许明文 TCP" },
   { value: "http_only", label: "仅允许 HTTP" },
   { value: "block_proxy_like", label: "阻断代理特征" },
   { value: "custom", label: "自定义" }
+];
+
+const policyPurposeOptions = [
+  { value: "gaming", label: "游戏加速" },
+  { value: "authorized_ss", label: "授权 SS" },
+  { value: "ssh_ops", label: "SSH 运维" },
+  { value: "daily", label: "日常上网" },
+  { value: "normal", label: "普通转发" },
+  { value: "strict", label: "严格合规" },
+  { value: "custom", label: "自定义" }
+];
+
+const inspectionOptions = [
+  { value: "off", label: "关闭" },
+  { value: "light", label: "轻量首包" },
+  { value: "advanced", label: "高级 DPI" },
+  { value: "deep", label: "深度 DPI" },
+  { value: "ndpi", label: "nDPI" }
+];
+
+const policyActionOptions = [
+  { value: "allow", label: "允许" },
+  { value: "observe", label: "观察" },
+  { value: "alert", label: "告警" },
+  { value: "limit", label: "限速" },
+  { value: "block", label: "阻断" }
 ];
 
 const resourceConfigs: Record<Exclude<PageKey, "dashboard" | "violations" | "audit-logs">, ResourceConfig> = {
@@ -406,15 +453,13 @@ const resourceConfigs: Record<Exclude<PageKey, "dashboard" | "violations" | "aud
     fields: [
       { key: "name", label: "名称", required: true },
       { key: "template", label: "模板", type: "select", options: policyOptions, required: true },
+      { key: "purpose", label: "用途", type: "select", options: policyPurposeOptions },
+      { key: "inspectionLevel", label: "检测级别", type: "select", options: inspectionOptions },
       {
         key: "mode",
         label: "动作",
         type: "select",
-        options: [
-          { value: "block", label: "阻断" },
-          { value: "alert", label: "告警" },
-          { value: "observe", label: "观察" }
-        ]
+        options: policyActionOptions.filter((item) => item.value !== "allow")
       },
       { key: "blockTls", label: "阻断 TLS", type: "checkbox" },
       { key: "blockQuic", label: "阻断 QUIC", type: "checkbox" },
@@ -422,12 +467,30 @@ const resourceConfigs: Record<Exclude<PageKey, "dashboard" | "violations" | "aud
       { key: "allowHttpOnly", label: "仅允许 HTTP", type: "checkbox" },
       { key: "blockProxyLike", label: "阻断代理特征", type: "checkbox" },
       { key: "blockEncryptedTunnel", label: "阻断加密线路", type: "checkbox" },
+      { key: "observationMinutes", label: "观察期分钟", type: "number", min: 0 },
+      { key: "tlsNoSniAction", label: "TLS 无 SNI", type: "select", options: policyActionOptions, optional: true },
+      { key: "quicAction", label: "QUIC 动作", type: "select", options: policyActionOptions, optional: true },
+      { key: "sshAction", label: "SSH 动作", type: "select", options: policyActionOptions, optional: true },
+      { key: "unknownTcpAction", label: "未知 TCP", type: "select", options: policyActionOptions, optional: true },
+      { key: "unknownUdpAction", label: "未知 UDP", type: "select", options: policyActionOptions, optional: true },
+      { key: "ndpiLowConfidenceAction", label: "DPI 低置信度", type: "select", options: policyActionOptions, optional: true },
+      { key: "dpiTimeoutMs", label: "DPI 超时 ms", type: "number", min: 0 },
+      { key: "authorizedProtocols", label: "授权协议", type: "textarea", rows: 3, fullWidth: true, placeholder: "ss, shadowsocks, ss2022" },
+      { key: "blockedProtocolGroups", label: "阻断协议组", type: "textarea", rows: 3, fullWidth: true, placeholder: "proxy, p2p, vpn, remote_access" },
+      { key: "hostAllowlist", label: "Host 白名单", type: "textarea", rows: 3, fullWidth: true },
+      { key: "hostBlocklist", label: "Host 黑名单", type: "textarea", rows: 3, fullWidth: true },
+      { key: "sniAllowlist", label: "SNI 白名单", type: "textarea", rows: 3, fullWidth: true },
+      { key: "sniBlocklist", label: "SNI 黑名单", type: "textarea", rows: 3, fullWidth: true },
+      { key: "alpnAllowlist", label: "ALPN 白名单", type: "textarea", rows: 2, fullWidth: true, placeholder: "h2, http/1.1, h3" },
+      { key: "alpnBlocklist", label: "ALPN 黑名单", type: "textarea", rows: 2, fullWidth: true },
       { key: "description", label: "说明", type: "textarea", rows: 5, fullWidth: true }
     ],
     columns: [
       { key: "id", label: "ID", className: "mono" },
       { key: "name", label: "名称" },
       { key: "template", label: "模板", render: (row) => <Badge>{displayValue(row.template)}</Badge> },
+      { key: "purpose", label: "用途", render: (row) => <Badge>{displayValue(row.purpose)}</Badge> },
+      { key: "inspectionLevel", label: "检测", render: (row) => displayValue(row.inspectionLevel) },
       { key: "mode", label: "动作", render: (row) => <StatusPill value={text(row.mode)} /> },
       { key: "flags", label: "控制项", render: renderPolicyFlags },
       { key: "updatedAt", label: "更新于", render: (row) => formatDate(row.updatedAt) }
@@ -986,6 +1049,7 @@ function ResourcePage({ config, refreshSeed }: { config: ResourceConfig; refresh
 
       {error ? <div className="notice error">{error}</div> : null}
       {notice ? <div className="notice success">{notice}</div> : null}
+      {config.key === "protocol-policies" ? <PolicyEvaluator policies={rows} /> : null}
 
       <div className="resource-grid">
         <section className="panel table-panel">
@@ -1051,6 +1115,100 @@ function ResourcePage({ config, refreshSeed }: { config: ResourceConfig; refresh
         </section>
       </div>
     </div>
+  );
+}
+
+function PolicyEvaluator({ policies }: { policies: Entity[] }) {
+  const [policyId, setPolicyId] = useState("");
+  const [network, setNetwork] = useState("tcp");
+  const [protocol, setProtocol] = useState("unknown");
+  const [host, setHost] = useState("");
+  const [alpn, setAlpn] = useState("");
+  const [ndpiProtocol, setNdpiProtocol] = useState("");
+  const [ndpiCategory, setNdpiCategory] = useState("");
+  const [confidence, setConfidence] = useState("0");
+  const [riskScore, setRiskScore] = useState("0");
+  const [result, setResult] = useState<Entity | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [loading, setLoading] = useState(false);
+
+  async function submit(event: FormEvent) {
+    event.preventDefault();
+    if (!policyId) {
+      setError("请选择要测试的策略");
+      return;
+    }
+    setLoading(true);
+    setError(null);
+    setResult(null);
+    try {
+      const payload = await api.post<Entity>("/protocol-policies/evaluate", {
+        policyId: Number(policyId),
+        network,
+        protocol,
+        host,
+        alpn: alpn
+          .split(/[,\s]+/)
+          .map((item) => item.trim())
+          .filter(Boolean),
+        ndpiProtocol,
+        ndpiCategory,
+        confidence: Number(confidence || 0),
+        riskScore: Number(riskScore || 0)
+      });
+      setResult(payload);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "策略测试失败");
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  return (
+    <section className="panel">
+      <PanelHeader title="策略测试" icon={ShieldCheck} meta="模拟协议命中结果" />
+      <form className="inline-form policy-evaluator" onSubmit={submit}>
+        <select value={policyId} onChange={(event) => setPolicyId(event.target.value)}>
+          <option value="">选择策略</option>
+          {policies.map((policy) => (
+            <option key={String(policy.id)} value={String(policy.id ?? "")}>
+              #{String(policy.id)} {text(policy.name)}
+            </option>
+          ))}
+        </select>
+        <select value={network} onChange={(event) => setNetwork(event.target.value)}>
+          <option value="tcp">TCP</option>
+          <option value="udp">UDP</option>
+        </select>
+        <select value={protocol} onChange={(event) => setProtocol(event.target.value)}>
+          <option value="unknown">unknown</option>
+          <option value="tls">TLS</option>
+          <option value="quic">QUIC</option>
+          <option value="http">HTTP</option>
+          <option value="http_connect">HTTP CONNECT</option>
+          <option value="socks">SOCKS</option>
+          <option value="ssh">SSH</option>
+        </select>
+        <input placeholder="Host/SNI" value={host} onChange={(event) => setHost(event.target.value)} />
+        <input placeholder="ALPN: h2,http/1.1" value={alpn} onChange={(event) => setAlpn(event.target.value)} />
+        <input placeholder="nDPI 协议" value={ndpiProtocol} onChange={(event) => setNdpiProtocol(event.target.value)} />
+        <input placeholder="nDPI 分类" value={ndpiCategory} onChange={(event) => setNdpiCategory(event.target.value)} />
+        <input type="number" min={0} max={100} placeholder="置信度" value={confidence} onChange={(event) => setConfidence(event.target.value)} />
+        <input type="number" min={0} max={100} placeholder="风险分" value={riskScore} onChange={(event) => setRiskScore(event.target.value)} />
+        <button className="primary-action" type="submit" disabled={loading}>
+          <ShieldCheck size={15} />
+          测试
+        </button>
+      </form>
+      {error ? <div className="notice error">{error}</div> : null}
+      {result ? (
+        <div className="policy-result">
+          <StatusPill value={text(result.action)} />
+          <span>{text(result.reason)}</span>
+          {result.matchedRule ? <Badge>{text(result.matchedRule)}</Badge> : null}
+        </div>
+      ) : null}
+    </section>
   );
 }
 
@@ -1803,7 +1961,10 @@ function renderPolicyFlags(row: Entity) {
     ["仅明文 TCP", row.allowPlainTcpOnly],
     ["仅 HTTP", row.allowHttpOnly],
     ["代理特征", row.blockProxyLike],
-    ["加密线路", row.blockEncryptedTunnel]
+    ["加密线路", row.blockEncryptedTunnel],
+    ["DPI", Boolean(row.inspectionLevel && row.inspectionLevel !== "off" && row.inspectionLevel !== "light")],
+    ["协议组", Boolean(row.blockedProtocolGroups)],
+    ["授权协议", Boolean(row.authorizedProtocols)]
   ].filter(([, enabled]) => Boolean(enabled));
 
   if (flags.length === 0) {

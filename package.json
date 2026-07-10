@@ -8,9 +8,10 @@
     "dev:web": "pnpm --dir apps/web dev",
     "build:web": "pnpm --dir apps/web build",
     "lint:web": "pnpm --dir apps/web lint",
-    "test:go": "go test ./apps/api/... ./apps/agent/...",
+    "test:go": "go test ./apps/api/... ./apps/agent/... ./apps/dpi/...",
     "build:api": "node -e \"require('fs').mkdirSync('dist',{recursive:true})\" && go build -o dist/dusheng-api ./apps/api/cmd/api",
-    "build:agent": "node -e \"require('fs').mkdirSync('dist',{recursive:true})\" && go build -o dist/dusheng-agent ./apps/agent/cmd/agent"
+    "build:agent": "node -e \"require('fs').mkdirSync('dist',{recursive:true})\" && go build -o dist/dusheng-agent ./apps/agent/cmd/agent",
+    "build:dpi": "node -e \"require('fs').mkdirSync('dist',{recursive:true})\" && go build -o dist/dusheng-dpi ./apps/dpi/cmd/dpi"
   },
   "engines": {
     "node": ">=20",

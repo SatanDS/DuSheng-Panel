@@ -2,6 +2,7 @@
 set -euo pipefail
 
 SERVICE_NAME="${DUSHENG_SERVICE_NAME:-dusheng-agent}"
+DPI_SERVICE_NAME="${DUSHENG_DPI_SERVICE_NAME:-dusheng-dpi}"
 INSTALL_DIR="${DUSHENG_INSTALL_DIR:-/opt/dusheng-agent}"
 CONFIG_DIR="${DUSHENG_CONFIG_DIR:-/etc/dusheng}"
 DATA_DIR="${DUSHENG_DATA_DIR:-/var/lib/dusheng-agent}"
@@ -11,6 +12,8 @@ RELEASE_BASE="${DUSHENG_RELEASE_BASE:-https://github.com/SatanDS/DuSheng-Panel/r
 AGENT_URL="${DUSHENG_AGENT_URL:-}"
 GOST_URL="${DUSHENG_GOST_URL:-}"
 GOST_BIN="${DUSHENG_GOST_PATH:-${DUSHENG_GOST_BIN:-/usr/local/bin/gost}}"
+DPI_ENABLED="${DUSHENG_DPI_ENABLED:-1}"
+DPI_ADDR="${DUSHENG_DPI_ADDR:-unix:/run/dusheng-dpi/dpi.sock}"
 
 need_root() {
   if [ "$(id -u)" -ne 0 ]; then
@@ -100,8 +103,14 @@ install_agent_binary() {
 
   if [ -n "${DUSHENG_AGENT_BINARY:-}" ]; then
     install -m 0755 "$DUSHENG_AGENT_BINARY" "$INSTALL_DIR/dusheng-agent"
+    if [ "$DPI_ENABLED" != "0" ] && [ -n "${DUSHENG_DPI_BINARY:-}" ]; then
+      install -m 0755 "$DUSHENG_DPI_BINARY" "$INSTALL_DIR/dusheng-dpi"
+    fi
   elif [ -x ./dusheng-agent ]; then
     install -m 0755 ./dusheng-agent "$INSTALL_DIR/dusheng-agent"
+    if [ "$DPI_ENABLED" != "0" ] && [ -x ./dusheng-dpi ]; then
+      install -m 0755 ./dusheng-dpi "$INSTALL_DIR/dusheng-dpi"
+    fi
   else
     if [ -z "$AGENT_URL" ]; then
       AGENT_URL="$RELEASE_BASE/dusheng-agent-linux-$arch.tar.gz"
@@ -117,12 +126,24 @@ install_agent_binary() {
         exit 1
       fi
       install -m 0755 "$found" "$INSTALL_DIR/dusheng-agent"
+      if [ "$DPI_ENABLED" != "0" ]; then
+        local dpi_found
+        dpi_found="$(find "$tmp" -type f -name dusheng-dpi | head -n 1)"
+        if [ -n "$dpi_found" ]; then
+          install -m 0755 "$dpi_found" "$INSTALL_DIR/dusheng-dpi"
+        else
+          echo "Archive does not contain dusheng-dpi; DPI sidecar will be disabled." >&2
+        fi
+      fi
     else
       install -m 0755 "$tmp/agent" "$INSTALL_DIR/dusheng-agent"
     fi
   fi
 
   chown root:root "$INSTALL_DIR/dusheng-agent"
+  if [ -x "$INSTALL_DIR/dusheng-dpi" ]; then
+    chown root:root "$INSTALL_DIR/dusheng-dpi"
+  fi
   rm -rf "$tmp"
 }
 
@@ -156,6 +177,10 @@ install_gost_binary() {
 }
 
 write_env_file() {
+  local dpi_env=""
+  if [ "$DPI_ENABLED" != "0" ] && [ -x "$INSTALL_DIR/dusheng-dpi" ]; then
+    dpi_env="$DPI_ADDR"
+  fi
   umask 077
   cat > "$CONFIG_DIR/agent.env" <<EOF
 DUSHENG_API_URL=${DUSHENG_API_URL}
@@ -163,6 +188,7 @@ DUSHENG_INSTALL_TOKEN=${DUSHENG_INSTALL_TOKEN}
 DUSHENG_DATA_DIR=${DATA_DIR}
 DUSHENG_GOST_PATH=${GOST_BIN}
 DUSHENG_GOST_BIN=${GOST_BIN}
+DUSHENG_DPI_ADDR=${dpi_env}
 EOF
   chown root:"$AGENT_USER" "$CONFIG_DIR/agent.env"
 }
@@ -184,7 +210,9 @@ cat > "\$CLEANUP" <<'CLEANUP_EOF'
 set -u
 
 systemctl disable "${SERVICE_NAME}" >/dev/null 2>&1 || true
+systemctl disable "${DPI_SERVICE_NAME}" >/dev/null 2>&1 || true
 rm -f "/etc/systemd/system/${SERVICE_NAME}.service"
+rm -f "/etc/systemd/system/${DPI_SERVICE_NAME}.service"
 rm -f "${CONFIG_DIR}/agent.env"
 rmdir "${CONFIG_DIR}" >/dev/null 2>&1 || true
 rm -rf "${DATA_DIR}" "${LOG_DIR}" "${INSTALL_DIR}" >/dev/null 2>&1 || true
@@ -222,8 +250,9 @@ WorkingDirectory=${INSTALL_DIR}
 Environment=DUSHENG_DATA_DIR=${DATA_DIR}
 Environment=DUSHENG_GOST_PATH=${GOST_BIN}
 Environment=DUSHENG_GOST_BIN=${GOST_BIN}
+Environment=DUSHENG_DPI_ADDR=${DPI_ADDR}
 EnvironmentFile=-${CONFIG_DIR}/agent.env
-ExecStart=${INSTALL_DIR}/dusheng-agent -base-url \${DUSHENG_API_URL} -install-token \${DUSHENG_INSTALL_TOKEN} -data-dir \${DUSHENG_DATA_DIR} -gost-path \${DUSHENG_GOST_PATH}
+ExecStart=${INSTALL_DIR}/dusheng-agent -base-url \${DUSHENG_API_URL} -install-token \${DUSHENG_INSTALL_TOKEN} -data-dir \${DUSHENG_DATA_DIR} -gost-path \${DUSHENG_GOST_PATH} -dpi-addr \${DUSHENG_DPI_ADDR}
 ExecStopPost=+/bin/bash ${INSTALL_DIR}/uninstall-agent.sh
 Restart=on-failure
 RestartSec=3
@@ -235,6 +264,38 @@ PrivateTmp=true
 ProtectSystem=full
 ProtectHome=true
 ReadWritePaths=${DATA_DIR} ${LOG_DIR} ${INSTALL_DIR} ${CONFIG_DIR} /etc/systemd/system
+
+[Install]
+WantedBy=multi-user.target
+EOF
+}
+
+write_dpi_service() {
+  if [ "$DPI_ENABLED" = "0" ] || [ ! -x "$INSTALL_DIR/dusheng-dpi" ]; then
+    return
+  fi
+  cat > "/etc/systemd/system/${DPI_SERVICE_NAME}.service" <<EOF
+[Unit]
+Description=DuSheng Panel DPI sidecar
+Documentation=https://github.com/SatanDS/DuSheng-Panel
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=${AGENT_USER}
+Group=${AGENT_USER}
+WorkingDirectory=${INSTALL_DIR}
+RuntimeDirectory=dusheng-dpi
+RuntimeDirectoryMode=0750
+ExecStart=${INSTALL_DIR}/dusheng-dpi -listen ${DPI_ADDR}
+Restart=on-failure
+RestartSec=3
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+ProtectHome=true
+ReadWritePaths=/run/dusheng-dpi
 
 [Install]
 WantedBy=multi-user.target
@@ -255,9 +316,14 @@ main() {
   install_gost_binary
   write_env_file
   write_uninstall_helper
+  write_dpi_service
   write_service
 
   systemctl daemon-reload
+  if [ "$DPI_ENABLED" != "0" ] && [ -x "$INSTALL_DIR/dusheng-dpi" ]; then
+    systemctl enable "$DPI_SERVICE_NAME"
+    systemctl restart "$DPI_SERVICE_NAME"
+  fi
   systemctl enable "$SERVICE_NAME"
   if [ "${DUSHENG_NO_START:-0}" = "1" ]; then
     echo "Installed ${SERVICE_NAME}. Start it with: systemctl start ${SERVICE_NAME}"

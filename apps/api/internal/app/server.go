@@ -103,6 +103,7 @@ func NewServer(cfg config.Config, db *gorm.DB) *gin.Engine {
 	admin.DELETE("/tunnels/:id", s.deleteTunnel)
 	admin.GET("/protocol-policies", s.listProtocolPolicies)
 	admin.POST("/protocol-policies", s.createProtocolPolicy)
+	admin.POST("/protocol-policies/evaluate", s.evaluateProtocolPolicy)
 	admin.PUT("/protocol-policies/:id", s.updateProtocolPolicy)
 	admin.DELETE("/protocol-policies/:id", s.deleteProtocolPolicy)
 	admin.GET("/speed-limits", s.listSpeedLimits)
@@ -926,22 +927,42 @@ func (s *Server) applyTunnelPayload(row *models.Tunnel, req tunnelPayload) error
 }
 
 type protocolPolicyPayload struct {
-	Name                 string `json:"name"`
-	Template             string `json:"template"`
-	Mode                 string `json:"mode"`
-	BlockTLS             bool   `json:"blockTls"`
-	BlockQUIC            bool   `json:"blockQuic"`
-	AllowPlainTCPOnly    bool   `json:"allowPlainTcpOnly"`
-	AllowHTTPOnly        bool   `json:"allowHttpOnly"`
-	BlockProxyLike       bool   `json:"blockProxyLike"`
-	BlockEncryptedTunnel bool   `json:"blockEncryptedTunnel"`
-	Description          string `json:"description"`
+	Name                    string `json:"name"`
+	Template                string `json:"template"`
+	Purpose                 string `json:"purpose"`
+	InspectionLevel         string `json:"inspectionLevel"`
+	Mode                    string `json:"mode"`
+	BlockTLS                bool   `json:"blockTls"`
+	BlockQUIC               bool   `json:"blockQuic"`
+	AllowPlainTCPOnly       bool   `json:"allowPlainTcpOnly"`
+	AllowHTTPOnly           bool   `json:"allowHttpOnly"`
+	BlockProxyLike          bool   `json:"blockProxyLike"`
+	BlockEncryptedTunnel    bool   `json:"blockEncryptedTunnel"`
+	ObservationMinutes      int    `json:"observationMinutes"`
+	AuthorizedProtocols     string `json:"authorizedProtocols"`
+	BlockedProtocolGroups   string `json:"blockedProtocolGroups"`
+	HostAllowlist           string `json:"hostAllowlist"`
+	HostBlocklist           string `json:"hostBlocklist"`
+	SNIAllowlist            string `json:"sniAllowlist"`
+	SNIBlocklist            string `json:"sniBlocklist"`
+	ALPNAllowlist           string `json:"alpnAllowlist"`
+	ALPNBlocklist           string `json:"alpnBlocklist"`
+	TLSNoSNIAction          string `json:"tlsNoSniAction"`
+	QUICAction              string `json:"quicAction"`
+	SSHAction               string `json:"sshAction"`
+	UnknownTCPAction        string `json:"unknownTcpAction"`
+	UnknownUDPAction        string `json:"unknownUdpAction"`
+	NDPILowConfidenceAction string `json:"ndpiLowConfidenceAction"`
+	DPITimeoutMs            int    `json:"dpiTimeoutMs"`
+	Description             string `json:"description"`
 }
 
 func (s *Server) listProtocolPolicies(c *gin.Context) {
 	query := s.db.Model(&models.ProtocolPolicy{})
-	query = applySearch(query, c, "name", "template", "mode", "description")
+	query = applySearch(query, c, "name", "template", "purpose", "mode", "inspection_level", "description")
 	query = filterString(query, c, "mode", "mode")
+	query = filterString(query, c, "purpose", "purpose")
+	query = filterString(query, c, "inspection_level", "inspectionLevel")
 	respondPage[models.ProtocolPolicy](c, query, "id desc")
 }
 
@@ -1009,17 +1030,50 @@ func applyProtocolPolicyPayload(row *models.ProtocolPolicy, req protocolPolicyPa
 	if req.Template == "" {
 		req.Template = "custom"
 	}
-	if !contains([]string{"none", "iepl_iplc_no_tls", "plain_tcp_only", "http_only", "block_proxy_like", "custom"}, req.Template) {
+	if !contains([]string{"none", "iepl_iplc_no_tls", "plain_tcp_only", "http_only", "block_proxy_like", "game_acceleration", "authorized_ss", "ssh_ops", "daily_browsing", "normal_forward", "strict_compliance", "custom"}, req.Template) {
 		return errors.New("unsupported protocol policy template")
+	}
+	if req.Purpose == "" {
+		req.Purpose = purposeFromTemplate(req.Template)
+	}
+	if !contains([]string{"gaming", "authorized_ss", "ssh_ops", "daily", "normal", "strict", "custom"}, req.Purpose) {
+		return errors.New("unsupported protocol policy purpose")
+	}
+	if req.InspectionLevel == "" {
+		req.InspectionLevel = "light"
+	}
+	if !contains([]string{"off", "light", "advanced", "deep", "ndpi"}, req.InspectionLevel) {
+		return errors.New("inspectionLevel must be off, light, advanced, deep, or ndpi")
 	}
 	if req.Mode == "" {
 		req.Mode = "block"
 	}
-	if !contains([]string{"observe", "alert", "block"}, req.Mode) {
-		return errors.New("mode must be observe, alert, or block")
+	if !validPolicyAction(req.Mode, false) {
+		return errors.New("mode must be observe, alert, limit, or block")
 	}
+	for name, action := range map[string]string{
+		"tlsNoSniAction":          req.TLSNoSNIAction,
+		"quicAction":              req.QUICAction,
+		"sshAction":               req.SSHAction,
+		"unknownTcpAction":        req.UnknownTCPAction,
+		"unknownUdpAction":        req.UnknownUDPAction,
+		"ndpiLowConfidenceAction": req.NDPILowConfidenceAction,
+	} {
+		if !validPolicyAction(action, true) {
+			return fmt.Errorf("%s must be allow, observe, alert, limit, or block", name)
+		}
+	}
+	if req.ObservationMinutes < 0 {
+		return errors.New("observationMinutes must be non-negative")
+	}
+	if req.DPITimeoutMs < 0 {
+		return errors.New("dpiTimeoutMs must be non-negative")
+	}
+	applyPolicyTemplateDefaults(&req)
 	row.Name = req.Name
 	row.Template = req.Template
+	row.Purpose = req.Purpose
+	row.InspectionLevel = req.InspectionLevel
 	row.Mode = req.Mode
 	row.BlockTLS = req.BlockTLS
 	row.BlockQUIC = req.BlockQUIC
@@ -1027,8 +1081,348 @@ func applyProtocolPolicyPayload(row *models.ProtocolPolicy, req protocolPolicyPa
 	row.AllowHTTPOnly = req.AllowHTTPOnly
 	row.BlockProxyLike = req.BlockProxyLike
 	row.BlockEncryptedTunnel = req.BlockEncryptedTunnel
+	row.ObservationMinutes = req.ObservationMinutes
+	row.AuthorizedProtocols = normalizeTextList(req.AuthorizedProtocols)
+	row.BlockedProtocolGroups = normalizeTextList(req.BlockedProtocolGroups)
+	row.HostAllowlist = normalizeTextList(req.HostAllowlist)
+	row.HostBlocklist = normalizeTextList(req.HostBlocklist)
+	row.SNIAllowlist = normalizeTextList(req.SNIAllowlist)
+	row.SNIBlocklist = normalizeTextList(req.SNIBlocklist)
+	row.ALPNAllowlist = normalizeTextList(req.ALPNAllowlist)
+	row.ALPNBlocklist = normalizeTextList(req.ALPNBlocklist)
+	row.TLSNoSNIAction = req.TLSNoSNIAction
+	row.QUICAction = req.QUICAction
+	row.SSHAction = req.SSHAction
+	row.UnknownTCPAction = req.UnknownTCPAction
+	row.UnknownUDPAction = req.UnknownUDPAction
+	row.NDPILowConfidenceAction = req.NDPILowConfidenceAction
+	row.DPITimeoutMs = req.DPITimeoutMs
 	row.Description = req.Description
 	return nil
+}
+
+func purposeFromTemplate(template string) string {
+	switch strings.TrimSpace(template) {
+	case "game_acceleration":
+		return "gaming"
+	case "authorized_ss":
+		return "authorized_ss"
+	case "ssh_ops":
+		return "ssh_ops"
+	case "daily_browsing":
+		return "daily"
+	case "normal_forward", "plain_tcp_only", "http_only", "block_proxy_like":
+		return "normal"
+	case "strict_compliance", "iepl_iplc_no_tls":
+		return "strict"
+	default:
+		return "custom"
+	}
+}
+
+func applyPolicyTemplateDefaults(req *protocolPolicyPayload) {
+	if req.Mode == "" {
+		req.Mode = "block"
+	}
+	switch req.Purpose {
+	case "gaming":
+		req.BlockProxyLike = true
+		req.QUICAction = defaultString(req.QUICAction, "allow")
+		req.SSHAction = defaultString(req.SSHAction, "block")
+		req.UnknownTCPAction = defaultString(req.UnknownTCPAction, "allow")
+		req.UnknownUDPAction = defaultString(req.UnknownUDPAction, "allow")
+		req.NDPILowConfidenceAction = defaultString(req.NDPILowConfidenceAction, "allow")
+		req.BlockedProtocolGroups = defaultString(req.BlockedProtocolGroups, "proxy,p2p,vpn,remote_access")
+	case "authorized_ss":
+		req.BlockProxyLike = true
+		req.AuthorizedProtocols = defaultString(req.AuthorizedProtocols, "ss,shadowsocks,ss2022,2022-blake3-aes-256-gcm")
+		req.QUICAction = defaultString(req.QUICAction, "allow")
+		req.SSHAction = defaultString(req.SSHAction, "block")
+		req.UnknownTCPAction = defaultString(req.UnknownTCPAction, "allow")
+		req.UnknownUDPAction = defaultString(req.UnknownUDPAction, "allow")
+		req.NDPILowConfidenceAction = defaultString(req.NDPILowConfidenceAction, "allow")
+		req.BlockedProtocolGroups = defaultString(req.BlockedProtocolGroups, "p2p,vpn,remote_access")
+	case "ssh_ops":
+		req.BlockProxyLike = true
+		req.SSHAction = defaultString(req.SSHAction, "allow")
+		req.UnknownTCPAction = defaultString(req.UnknownTCPAction, "alert")
+		req.UnknownUDPAction = defaultString(req.UnknownUDPAction, "block")
+		req.NDPILowConfidenceAction = defaultString(req.NDPILowConfidenceAction, "alert")
+		req.BlockedProtocolGroups = defaultString(req.BlockedProtocolGroups, "proxy,p2p,vpn")
+	case "daily":
+		req.BlockProxyLike = true
+		req.QUICAction = defaultString(req.QUICAction, "allow")
+		req.SSHAction = defaultString(req.SSHAction, "block")
+		req.UnknownTCPAction = defaultString(req.UnknownTCPAction, "allow")
+		req.UnknownUDPAction = defaultString(req.UnknownUDPAction, "allow")
+		req.NDPILowConfidenceAction = defaultString(req.NDPILowConfidenceAction, "allow")
+		req.BlockedProtocolGroups = defaultString(req.BlockedProtocolGroups, "proxy,p2p,vpn,remote_access")
+	case "normal":
+		req.BlockProxyLike = true
+		req.SSHAction = defaultString(req.SSHAction, "block")
+		req.UnknownTCPAction = defaultString(req.UnknownTCPAction, "alert")
+		req.UnknownUDPAction = defaultString(req.UnknownUDPAction, "allow")
+		req.NDPILowConfidenceAction = defaultString(req.NDPILowConfidenceAction, "alert")
+		req.BlockedProtocolGroups = defaultString(req.BlockedProtocolGroups, "proxy,p2p,vpn,remote_access")
+	case "strict":
+		req.BlockProxyLike = true
+		req.BlockEncryptedTunnel = true
+		req.TLSNoSNIAction = defaultString(req.TLSNoSNIAction, "alert")
+		req.QUICAction = defaultString(req.QUICAction, "alert")
+		req.SSHAction = defaultString(req.SSHAction, "block")
+		req.UnknownTCPAction = defaultString(req.UnknownTCPAction, "alert")
+		req.UnknownUDPAction = defaultString(req.UnknownUDPAction, "alert")
+		req.NDPILowConfidenceAction = defaultString(req.NDPILowConfidenceAction, "alert")
+		req.BlockedProtocolGroups = defaultString(req.BlockedProtocolGroups, "proxy,p2p,vpn,remote_access,encrypted_tunnel")
+	}
+}
+
+func validPolicyAction(action string, allowEmpty bool) bool {
+	action = strings.TrimSpace(action)
+	if action == "" {
+		return allowEmpty
+	}
+	return contains([]string{"allow", "observe", "alert", "limit", "block"}, action)
+}
+
+func normalizeTextList(value string) string {
+	parts := splitPolicyList(value)
+	if len(parts) == 0 {
+		return ""
+	}
+	seen := map[string]bool{}
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		key := strings.ToLower(part)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		out = append(out, part)
+	}
+	return strings.Join(out, "\n")
+}
+
+func splitPolicyList(value string) []string {
+	parts := strings.FieldsFunc(value, func(r rune) bool {
+		return r == ',' || r == '\n' || r == '\r' || r == ';' || r == '\t'
+	})
+	out := make([]string, 0, len(parts))
+	for _, part := range parts {
+		part = strings.TrimSpace(part)
+		if part != "" {
+			out = append(out, part)
+		}
+	}
+	return out
+}
+
+func (s *Server) evaluateProtocolPolicy(c *gin.Context) {
+	var req struct {
+		PolicyID     uint                  `json:"policyId"`
+		Policy       protocolPolicyPayload `json:"policy"`
+		Protocol     string                `json:"protocol"`
+		Network      string                `json:"network"`
+		Host         string                `json:"host"`
+		ALPN         []string              `json:"alpn"`
+		NDPIProtocol string                `json:"ndpiProtocol"`
+		NDPICategory string                `json:"ndpiCategory"`
+		Confidence   int                   `json:"confidence"`
+		RiskScore    int                   `json:"riskScore"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		bad(c, err)
+		return
+	}
+	var policy models.ProtocolPolicy
+	if req.PolicyID > 0 {
+		if err := s.db.First(&policy, req.PolicyID).Error; err != nil {
+			notFound(c)
+			return
+		}
+	} else {
+		if err := applyProtocolPolicyPayload(&policy, req.Policy); err != nil {
+			bad(c, err)
+			return
+		}
+	}
+	action, reason, matched := evaluatePolicyPreview(policy, req.Protocol, req.Network, req.Host, req.ALPN, req.NDPIProtocol, req.NDPICategory, req.Confidence, req.RiskScore)
+	c.JSON(http.StatusOK, gin.H{
+		"action":      action,
+		"reason":      reason,
+		"matchedRule": matched,
+		"policy":      policy,
+	})
+}
+
+func evaluatePolicyPreview(policy models.ProtocolPolicy, protocolName, network, host string, alpn []string, ndpiProtocol, ndpiCategory string, confidence, riskScore int) (string, string, string) {
+	protocolName = normalizePolicyToken(protocolName)
+	network = normalizePolicyToken(network)
+	if protocolName == "" {
+		protocolName = "unknown"
+	}
+	if matched := firstPolicyHostMatch(host, policy.HostAllowlist, policy.SNIAllowlist); matched != "" {
+		return "allow", "host is allowlisted", "host allowlist: " + matched
+	}
+	if matched := firstPolicyHostMatch(host, policy.HostBlocklist, policy.SNIBlocklist); matched != "" {
+		return policyAction(policy.Mode, "block"), "host is blocklisted", "host blocklist: " + matched
+	}
+	if matched := firstPolicyALPNMatch(alpn, policy.ALPNAllowlist); matched != "" {
+		return "allow", "alpn is allowlisted", "alpn allowlist: " + matched
+	}
+	if matched := firstPolicyALPNMatch(alpn, policy.ALPNBlocklist); matched != "" {
+		return policyAction(policy.Mode, "block"), "alpn is blocklisted", "alpn blocklist: " + matched
+	}
+	switch {
+	case policy.BlockTLS && protocolName == "tls":
+		return policyAction(policy.Mode, "block"), "tls is blocked", "blockTls"
+	case policy.BlockQUIC && protocolName == "quic":
+		return policyAction(policy.Mode, "block"), "quic is blocked", "blockQuic"
+	case policy.BlockProxyLike && (protocolName == "socks" || protocolName == "http_connect"):
+		return policyAction(policy.Mode, "block"), "proxy-like protocol is blocked", "blockProxyLike"
+	case policy.BlockEncryptedTunnel && (protocolName == "tls" || protocolName == "quic" || protocolName == "ssh"):
+		return policyAction(policy.Mode, "block"), "encrypted tunnel protocol is blocked", "blockEncryptedTunnel"
+	case policy.AllowHTTPOnly && protocolName != "http":
+		return policyAction(policy.Mode, "block"), "only http is allowed", "allowHttpOnly"
+	case policy.AllowPlainTCPOnly && protocolName != "unknown":
+		return policyAction(policy.Mode, "block"), "only plain tcp is allowed", "allowPlainTcpOnly"
+	}
+	if protocolName == "tls" && strings.TrimSpace(host) == "" && policy.TLSNoSNIAction != "" && policy.TLSNoSNIAction != "allow" {
+		return policyAction(policy.TLSNoSNIAction, "block"), "tls has no sni", "tls_no_sni"
+	}
+	if protocolName == "quic" && policy.QUICAction != "" && policy.QUICAction != "allow" {
+		return policyAction(policy.QUICAction, "alert"), "quic matched policy action", "quic_action"
+	}
+	if protocolName == "ssh" && policy.SSHAction != "" && policy.SSHAction != "allow" {
+		return policyAction(policy.SSHAction, "block"), "ssh matched policy action", "ssh_action"
+	}
+	if protocolName == "unknown" {
+		if containsPolicyToken(policy.AuthorizedProtocols, "ss", "shadowsocks", "ss2022") || policy.Purpose == "authorized_ss" {
+			return "allow", "unknown first packet is allowed for authorized protocol entry", "authorized encrypted entry"
+		}
+		action := policy.UnknownTCPAction
+		if network == "udp" {
+			action = policy.UnknownUDPAction
+		}
+		if action != "" && action != "allow" {
+			return policyAction(action, "alert"), "unknown protocol matched policy action", "unknown_action"
+		}
+	}
+	if confidence > 0 && confidence < 50 && policy.NDPILowConfidenceAction != "" && policy.NDPILowConfidenceAction != "allow" {
+		return policyAction(policy.NDPILowConfidenceAction, "alert"), "ndpi confidence is low", "ndpi_low_confidence"
+	}
+	if matched := matchedPolicyBlockedGroup(policy.BlockedProtocolGroups, ndpiProtocol, ndpiCategory); matched != "" {
+		return policyAction(policy.Mode, "block"), "ndpi matched blocked protocol group", "ndpi_group:" + matched
+	}
+	if riskScore >= 80 {
+		return policyAction(policy.Mode, "block"), "ndpi high risk protocol", "ndpi_high_risk"
+	}
+	if riskScore >= 50 {
+		return policyAction(policy.Mode, "alert"), "ndpi medium risk protocol", "ndpi_medium_risk"
+	}
+	return "allow", "policy would allow this flow", ""
+}
+
+func policyAction(action, fallback string) string {
+	action = strings.TrimSpace(action)
+	if contains([]string{"allow", "observe", "alert", "limit", "block"}, action) {
+		return action
+	}
+	if contains([]string{"allow", "observe", "alert", "limit", "block"}, fallback) {
+		return fallback
+	}
+	return "block"
+}
+
+func firstPolicyHostMatch(host string, lists ...string) string {
+	host = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(host), "."))
+	if host == "" {
+		return ""
+	}
+	if withoutPort, _, ok := strings.Cut(host, ":"); ok {
+		host = strings.TrimSuffix(withoutPort, ".")
+	}
+	for _, list := range lists {
+		for _, pattern := range splitPolicyList(list) {
+			if matchPolicyHost(host, pattern) {
+				return pattern
+			}
+		}
+	}
+	return ""
+}
+
+func matchPolicyHost(host, pattern string) bool {
+	pattern = strings.ToLower(strings.TrimSuffix(strings.TrimSpace(pattern), "."))
+	if strings.HasPrefix(pattern, "*.") {
+		suffix := strings.TrimPrefix(pattern, "*")
+		return strings.HasSuffix(host, suffix) && host != strings.TrimPrefix(suffix, ".")
+	}
+	return host == pattern
+}
+
+func firstPolicyALPNMatch(values []string, list string) string {
+	for _, value := range values {
+		value = normalizePolicyToken(value)
+		for _, pattern := range splitPolicyList(list) {
+			if value == normalizePolicyToken(pattern) {
+				return pattern
+			}
+		}
+	}
+	return ""
+}
+
+func containsPolicyToken(list string, needles ...string) bool {
+	for _, value := range splitPolicyList(list) {
+		value = normalizePolicyToken(value)
+		for _, needle := range needles {
+			if value == normalizePolicyToken(needle) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+func matchedPolicyBlockedGroup(groups, protocolName, category string) string {
+	protocolName = normalizePolicyToken(protocolName)
+	category = normalizePolicyToken(category)
+	for _, group := range splitPolicyList(groups) {
+		group = normalizePolicyToken(group)
+		if group == "" {
+			continue
+		}
+		if group == protocolName || group == category {
+			return group
+		}
+		switch group {
+		case "proxy":
+			if strings.Contains(protocolName, "socks") || strings.Contains(protocolName, "shadowsocks") || strings.Contains(protocolName, "v2ray") || strings.Contains(protocolName, "trojan") {
+				return group
+			}
+		case "vpn", "encrypted_tunnel":
+			if strings.Contains(protocolName, "wireguard") || strings.Contains(protocolName, "openvpn") || strings.Contains(protocolName, "hysteria") || strings.Contains(protocolName, "tuic") || strings.Contains(category, "vpn") || strings.Contains(category, "tunnel") {
+				return group
+			}
+		case "p2p", "bt", "bittorrent":
+			if strings.Contains(protocolName, "bittorrent") || strings.Contains(category, "p2p") {
+				return group
+			}
+		case "remote_access":
+			if strings.Contains(protocolName, "ssh") || strings.Contains(protocolName, "rdp") || strings.Contains(category, "remote") {
+				return group
+			}
+		}
+	}
+	return ""
+}
+
+func normalizePolicyToken(value string) string {
+	value = strings.ToLower(strings.TrimSpace(value))
+	value = strings.ReplaceAll(value, "-", "_")
+	value = strings.ReplaceAll(value, " ", "_")
+	return value
 }
 
 type speedLimitPayload struct {
@@ -1824,8 +2218,8 @@ func (s *Server) agentViolation(c *gin.Context) {
 		bad(c, errors.New("ruleId, policyId, and protocol are required"))
 		return
 	}
-	if !contains([]string{"observe", "alert", "block"}, req.Action) {
-		bad(c, errors.New("action must be observe, alert, or block"))
+	if !contains([]string{"observe", "alert", "limit", "block"}, req.Action) {
+		bad(c, errors.New("action must be observe, alert, limit, or block"))
 		return
 	}
 	if _, err := s.findNodeRule(s.db, node, req.RuleID); err != nil {

@@ -18,7 +18,7 @@ DuSheng Panel 是一个原创转发面板项目，参考了 flux-panel 和 nyanp
 - 设备组、节点、隧道、转发规则、限速、流量采样、审计日志、安装令牌、协议策略。
 - 节点端注册、心跳、配置拉取、流量上报、协议违规上报。
 - TCP/UDP 转发规则模型，支持基于 revision 的节点同步。
-- 协议限制检测，适用于 IEPL/IPLC 等不允许 TLS、QUIC 或加密隧道协议的线路。
+- 协议治理检测，适用于 IEPL/IPLC 场景：允许授权 SS/SSH/游戏加速入口，阻断未经授权的代理、VPN、BT、远控和高风险隧道。
 - Docker Compose 和 systemd 部署模板。
 
 第一版暂不包含商城、支付、余额、自动续费等商业功能。
@@ -83,6 +83,14 @@ HTTPS_PORT=7443
 
 TCP/UDP 转发链路由 agent 直接计量流量，并定时批量上报 `/agent/traffic`。限速、最大连接数和最大 IP 数也在 agent runtime 内执行；UDP v1 按 clientAddr 维护 session，支持 QUIC 首包检测、阻断/告警、计量、限速和空闲清理。`gost` transport adapter 会在后续阶段补齐。
 
+## 协议治理与 DPI
+
+协议策略现在按“业务用途”治理，而不是简单禁止所有加密流量。推荐模板包括游戏加速、授权 SS 代理、SSH 运维加速、日常上网、普通转发、严格合规和自定义。PUBG、APEX 这类动态匹配游戏不要求固定服务器 IP/端口，建议使用游戏加速或授权 SS/TUN 入口，再配合连接数、IP 数、速率和流量配额控制。
+
+agent 会先执行轻量首包检测；当策略启用高级/深度/nDPI 检测或配置了阻断协议组时，会调用本机 `dusheng-dpi` sidecar。sidecar 第一版提供稳定 `/classify` 接口和 BT、WireGuard、OpenVPN、SSH、SOCKS、HTTP CONNECT 等高风险特征分类；后续可以替换为 libnDPI 后端而不改变面板和 agent 协议。nDPI/sidecar 超时或低置信度时，游戏和授权 SS 模板默认降级放行或告警，严格合规模板可配置为告警/阻断。
+
+授权 SS 规则不会尝试解密 SS 2022 内部流量；它按“授权入口”处理，重点绑定用户、端口、源 IP 数、连接数、速率和配额。SSH 运维加速应单独建策略，限制目标服务器和来源，避免和游戏/日常上网规则混用。
+
 ## 节点卸载
 
 在面板「节点」页删除节点时，API 会先把节点标记为 `uninstalling`，并通过下一次 agent 心跳下发 `uninstall` 命令。新版 agent 收到命令后会写入本机卸载标记、回执 API，然后退出；systemd 的 root 权限 `ExecStopPost` 清理器会禁用服务并删除 `/opt/dusheng-agent`、`/etc/dusheng/agent.env`、`/var/lib/dusheng-agent`、`/var/log/dusheng-agent` 等本机文件。API 收到回执后会删除面板里的节点记录。
@@ -93,7 +101,7 @@ TCP/UDP 转发链路由 agent 直接计量流量，并定时批量上报 `/agent
 
 ## 本地生成 Agent Release 二进制
 
-节点安装脚本默认会从 GitHub Release 下载以下文件：
+节点安装脚本默认会从 GitHub Release 下载以下文件；每个压缩包内包含 `dusheng-agent` 和可选 `dusheng-dpi` sidecar：
 
 - `dusheng-agent-linux-amd64.tar.gz`
 - `dusheng-agent-linux-arm64.tar.gz`
@@ -128,7 +136,7 @@ cd "D:\DuSheng Panel"
 powershell -ExecutionPolicy Bypass -File .\deploy\scripts\publish-agent-release.ps1 -Version v0.1.1
 ```
 
-发布脚本会生成 Linux `amd64` / `arm64` agent 压缩包，创建或更新 GitHub Release，并上传：
+发布脚本会生成 Linux `amd64` / `arm64` agent + DPI sidecar 压缩包，创建或更新 GitHub Release，并上传：
 
 ```text
 dusheng-agent-linux-amd64.tar.gz

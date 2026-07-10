@@ -496,6 +496,29 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
 
+  /api/v1/protocol-policies/evaluate:
+    post:
+      tags: [Admin]
+      operationId: evaluateProtocolPolicy
+      summary: Preview protocol policy decision
+      security:
+        - BearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProtocolPolicyEvaluateRequest"
+      responses:
+        "200":
+          description: Policy evaluation result.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProtocolPolicyEvaluateResponse"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
   /api/v1/protocol-policies/{id}:
     put:
       tags: [Admin]
@@ -1618,10 +1641,17 @@ components:
           maxLength: 120
         template:
           type: string
-          enum: [none, iepl_iplc_no_tls, plain_tcp_only, http_only, block_proxy_like, custom]
+          enum: [none, iepl_iplc_no_tls, plain_tcp_only, http_only, block_proxy_like, game_acceleration, authorized_ss, ssh_ops, daily_browsing, normal_forward, strict_compliance, custom]
+        purpose:
+          type: string
+          enum: [gaming, authorized_ss, ssh_ops, daily, normal, strict, custom]
+        inspectionLevel:
+          type: string
+          enum: [off, light, advanced, deep, ndpi]
+          default: light
         mode:
           type: string
-          enum: [observe, alert, block]
+          enum: [observe, alert, limit, block]
           default: block
         blockTls:
           type: boolean
@@ -1641,8 +1671,90 @@ components:
         blockEncryptedTunnel:
           type: boolean
           default: false
+        observationMinutes:
+          type: integer
+          minimum: 0
+        authorizedProtocols:
+          type: string
+          description: Comma or newline separated authorized protocol names, such as ss or shadowsocks.
+        blockedProtocolGroups:
+          type: string
+          description: Comma or newline separated groups such as proxy, p2p, vpn, remote_access.
+        hostAllowlist:
+          type: string
+        hostBlocklist:
+          type: string
+        sniAllowlist:
+          type: string
+        sniBlocklist:
+          type: string
+        alpnAllowlist:
+          type: string
+        alpnBlocklist:
+          type: string
+        tlsNoSniAction:
+          $ref: "#/components/schemas/ProtocolAction"
+        quicAction:
+          $ref: "#/components/schemas/ProtocolAction"
+        sshAction:
+          $ref: "#/components/schemas/ProtocolAction"
+        unknownTcpAction:
+          $ref: "#/components/schemas/ProtocolAction"
+        unknownUdpAction:
+          $ref: "#/components/schemas/ProtocolAction"
+        ndpiLowConfidenceAction:
+          $ref: "#/components/schemas/ProtocolAction"
+        dpiTimeoutMs:
+          type: integer
+          minimum: 0
         description:
           type: string
+
+    ProtocolAction:
+      type: string
+      enum: [allow, observe, alert, limit, block]
+
+    ProtocolPolicyEvaluateRequest:
+      type: object
+      properties:
+        policyId:
+          type: integer
+          minimum: 1
+        policy:
+          $ref: "#/components/schemas/ProtocolPolicyWrite"
+        protocol:
+          type: string
+        network:
+          type: string
+          enum: [tcp, udp]
+        host:
+          type: string
+        alpn:
+          type: array
+          items:
+            type: string
+        ndpiProtocol:
+          type: string
+        ndpiCategory:
+          type: string
+        confidence:
+          type: integer
+        riskScore:
+          type: integer
+
+    ProtocolPolicyEvaluateResponse:
+      type: object
+      required: [action, reason, matchedRule]
+      properties:
+        action:
+          type: string
+          enum: [allow, observe, alert, limit, block]
+        reason:
+          type: string
+        matchedRule:
+          type: string
+        policy:
+          $ref: "#/components/schemas/ProtocolPolicy"
 
     SpeedLimit:
       allOf:
@@ -1798,10 +1910,10 @@ components:
               maxLength: 120
             action:
               type: string
-              enum: [observe, alert, block]
+              enum: [observe, alert, limit, block]
             detail:
               type: string
-              description: JSON text with runtime protocol metadata such as reason, host, alpn, protocol, ruleId, tunnelId, clientAddr, and source (tcp_runtime or udp_runtime).
+              description: JSON text with runtime protocol metadata such as reason, host, alpn, detector, confidence, riskScore, ndpiProtocol, ndpiCategory, ruleId, tunnelId, clientAddr, and source (tcp_runtime or udp_runtime).
             occurredAt:
               type: string
               format: date-time
@@ -1824,11 +1936,11 @@ components:
           maxLength: 120
         action:
           type: string
-          enum: [observe, alert, block]
+          enum: [observe, alert, limit, block]
           default: block
         detail:
           type: string
-          description: JSON text with runtime protocol metadata such as reason, host, alpn, protocol, ruleId, tunnelId, clientAddr, and source (tcp_runtime or udp_runtime).
+          description: JSON text with runtime protocol metadata such as reason, host, alpn, detector, confidence, riskScore, ndpiProtocol, ndpiCategory, ruleId, tunnelId, clientAddr, and source (tcp_runtime or udp_runtime).
 
     Dashboard:
       type: object

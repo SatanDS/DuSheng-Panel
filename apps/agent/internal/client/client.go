@@ -147,17 +147,35 @@ type ForwardRule struct {
 }
 
 type ProtocolPolicy struct {
-	ID                   uint   `json:"id"`
-	Name                 string `json:"name"`
-	Template             string `json:"template"`
-	Mode                 string `json:"mode"`
-	BlockTLS             bool   `json:"blockTls"`
-	BlockQUIC            bool   `json:"blockQuic"`
-	AllowPlainTCPOnly    bool   `json:"allowPlainTcpOnly"`
-	AllowHTTPOnly        bool   `json:"allowHttpOnly"`
-	BlockProxyLike       bool   `json:"blockProxyLike"`
-	BlockEncryptedTunnel bool   `json:"blockEncryptedTunnel"`
-	Description          string `json:"description"`
+	ID                      uint   `json:"id"`
+	Name                    string `json:"name"`
+	Template                string `json:"template"`
+	Purpose                 string `json:"purpose"`
+	InspectionLevel         string `json:"inspectionLevel"`
+	Mode                    string `json:"mode"`
+	BlockTLS                bool   `json:"blockTls"`
+	BlockQUIC               bool   `json:"blockQuic"`
+	AllowPlainTCPOnly       bool   `json:"allowPlainTcpOnly"`
+	AllowHTTPOnly           bool   `json:"allowHttpOnly"`
+	BlockProxyLike          bool   `json:"blockProxyLike"`
+	BlockEncryptedTunnel    bool   `json:"blockEncryptedTunnel"`
+	ObservationMinutes      int    `json:"observationMinutes"`
+	AuthorizedProtocols     string `json:"authorizedProtocols"`
+	BlockedProtocolGroups   string `json:"blockedProtocolGroups"`
+	HostAllowlist           string `json:"hostAllowlist"`
+	HostBlocklist           string `json:"hostBlocklist"`
+	SNIAllowlist            string `json:"sniAllowlist"`
+	SNIBlocklist            string `json:"sniBlocklist"`
+	ALPNAllowlist           string `json:"alpnAllowlist"`
+	ALPNBlocklist           string `json:"alpnBlocklist"`
+	TLSNoSNIAction          string `json:"tlsNoSniAction"`
+	QUICAction              string `json:"quicAction"`
+	SSHAction               string `json:"sshAction"`
+	UnknownTCPAction        string `json:"unknownTcpAction"`
+	UnknownUDPAction        string `json:"unknownUdpAction"`
+	NDPILowConfidenceAction string `json:"ndpiLowConfidenceAction"`
+	DPITimeoutMs            int    `json:"dpiTimeoutMs"`
+	Description             string `json:"description"`
 }
 
 type SpeedLimit struct {
