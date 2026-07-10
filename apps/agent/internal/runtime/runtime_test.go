@@ -2,7 +2,9 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"io"
+	"log"
 	"net"
 	"strconv"
 	"strings"
@@ -58,6 +60,48 @@ func (m *mockReporter) lastViolation() client.ViolationReport {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.violations[len(m.violations)-1]
+}
+
+type failingTrafficReporter struct{}
+
+func (f failingTrafficReporter) ReportTraffic(ctx context.Context, req client.TrafficReport) (client.AcceptedResponse, error) {
+	return client.AcceptedResponse{}, errors.New("api unavailable")
+}
+
+func (f failingTrafficReporter) ReportViolation(ctx context.Context, req client.ViolationReport) (client.ProtocolViolation, error) {
+	return client.ProtocolViolation{}, nil
+}
+
+func TestTrafficBufferCapsSamplesAndDropsOverflow(t *testing.T) {
+	buffer := newTrafficBuffer(
+		failingTrafficReporter{},
+		log.New(io.Discard, "", 0),
+		Options{MaxTrafficSamples: 1, MaxTrafficBytes: 1024, MaxTrafficFailures: 2},
+	)
+	buffer.add(1, 10, 0)
+	buffer.add(2, 10, 0)
+	status := buffer.status()
+	if status["pendingSamples"] != 1 || status["droppedSamples"] != int64(1) {
+		t.Fatalf("status = %#v, want one pending and one dropped sample", status)
+	}
+}
+
+func TestTrafficBufferDropsAfterFlushFailures(t *testing.T) {
+	buffer := newTrafficBuffer(
+		failingTrafficReporter{},
+		log.New(io.Discard, "", 0),
+		Options{MaxTrafficSamples: 10, MaxTrafficBytes: 1024, MaxTrafficFailures: 2},
+	)
+	buffer.add(1, 10, 0)
+	buffer.flush(context.Background())
+	if status := buffer.status(); status["pendingSamples"] != 1 {
+		t.Fatalf("after first failure status = %#v, want requeued sample", status)
+	}
+	buffer.flush(context.Background())
+	status := buffer.status()
+	if status["pendingSamples"] != 0 || status["droppedSamples"] != int64(1) || status["flushFailures"] != 2 {
+		t.Fatalf("after second failure status = %#v, want dropped sample", status)
+	}
 }
 
 func TestRuntimeApplyStartsAndStopsListeners(t *testing.T) {
@@ -394,6 +438,43 @@ func TestUDPSessionIdleReleasesLimits(t *testing.T) {
 	})
 	if got, err := udpRoundTripConn(second, []byte("after"), time.Second); err != nil || string(got) != "after" {
 		t.Fatalf("second after idle got %q err %v, want echo", got, err)
+	}
+}
+
+func TestUDPMaxSessionsPerRuleRejectsOverflow(t *testing.T) {
+	reporter := &mockReporter{}
+	rt := New(reporter, nil, Options{ListenHost: "127.0.0.1", UDPIdleTimeout: time.Second, MaxUDPSessionsPerRule: 1})
+	defer rt.Stop(context.Background())
+
+	_, upstreamPort, stopUpstream := startUDPEchoServer(t)
+	defer stopUpstream()
+	listenPort := freeUDPPort(t)
+	cfg := testConfig(listenPort, upstreamPort)
+	cfg.ForwardRules[0].Protocol = "udp"
+	if err := rt.Apply(context.Background(), cfg); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+
+	first, err := net.Dial("udp", net.JoinHostPort("127.0.0.1", itoa(listenPort)))
+	if err != nil {
+		t.Fatalf("Dial(first) error = %v", err)
+	}
+	defer first.Close()
+	if got, err := udpRoundTripConn(first, []byte("first"), time.Second); err != nil || string(got) != "first" {
+		t.Fatalf("first got %q err %v, want echo", got, err)
+	}
+
+	second, err := net.Dial("udp", net.JoinHostPort("127.0.0.1", itoa(listenPort)))
+	if err != nil {
+		t.Fatalf("Dial(second) error = %v", err)
+	}
+	defer second.Close()
+	if _, err := udpRoundTripConn(second, []byte("blocked"), 150*time.Millisecond); err == nil {
+		t.Fatal("second session succeeded while runtime session cap was occupied")
+	}
+	errorsMap, ok := rt.Status()["listenerErrors"].(map[string]int64)
+	if !ok || errorsMap["udpRejectedSessions"] == 0 {
+		t.Fatalf("listenerErrors = %#v, want rejected UDP session count", rt.Status()["listenerErrors"])
 	}
 }
 

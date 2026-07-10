@@ -4,6 +4,13 @@ export type Entity = Record<string, unknown> & {
   updatedAt?: string;
 };
 
+export interface Page<T> {
+  items: T[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
 export interface User extends Entity {
   id: number;
   username: string;

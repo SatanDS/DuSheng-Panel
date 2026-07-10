@@ -128,15 +128,21 @@ paths:
       summary: List forwarding rules visible to the current user
       security:
         - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - $ref: "#/components/parameters/Search"
+        - $ref: "#/components/parameters/Status"
+        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/TunnelId"
+        - $ref: "#/components/parameters/RuleId"
       responses:
         "200":
           description: Forwarding rules.
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/ForwardRule"
+                $ref: "#/components/schemas/ForwardRulePage"
         "401":
           $ref: "#/components/responses/Unauthorized"
     post:
@@ -218,15 +224,18 @@ paths:
       summary: List users
       security:
         - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - $ref: "#/components/parameters/Search"
+        - $ref: "#/components/parameters/Status"
       responses:
         "200":
           description: Users.
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/User"
+                $ref: "#/components/schemas/UserPage"
         "403":
           $ref: "#/components/responses/Forbidden"
     post:
@@ -302,15 +311,17 @@ paths:
       summary: List device groups
       security:
         - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - $ref: "#/components/parameters/Search"
       responses:
         "200":
           description: Device groups.
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/DeviceGroup"
+                $ref: "#/components/schemas/DeviceGroupPage"
         "403":
           $ref: "#/components/responses/Forbidden"
     post:
@@ -378,15 +389,17 @@ paths:
       summary: List tunnels
       security:
         - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - $ref: "#/components/parameters/Search"
       responses:
         "200":
           description: Tunnels.
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/Tunnel"
+                $ref: "#/components/schemas/TunnelPage"
         "403":
           $ref: "#/components/responses/Forbidden"
     post:
@@ -452,15 +465,17 @@ paths:
       summary: List protocol policies
       security:
         - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - $ref: "#/components/parameters/Search"
       responses:
         "200":
           description: Protocol policies.
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/ProtocolPolicy"
+                $ref: "#/components/schemas/ProtocolPolicyPage"
         "403":
           $ref: "#/components/responses/Forbidden"
     post:
@@ -526,15 +541,20 @@ paths:
       summary: List speed limits
       security:
         - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - $ref: "#/components/parameters/Search"
+        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/TunnelId"
+        - $ref: "#/components/parameters/RuleId"
       responses:
         "200":
           description: Speed limits.
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/SpeedLimit"
+                $ref: "#/components/schemas/SpeedLimitPage"
         "403":
           $ref: "#/components/responses/Forbidden"
     post:
@@ -600,15 +620,19 @@ paths:
       summary: List registered nodes
       security:
         - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - $ref: "#/components/parameters/Search"
+        - $ref: "#/components/parameters/Status"
+        - $ref: "#/components/parameters/DeviceGroupId"
       responses:
         "200":
           description: Nodes.
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/Node"
+                $ref: "#/components/schemas/NodePage"
         "403":
           $ref: "#/components/responses/Forbidden"
 
@@ -665,15 +689,18 @@ paths:
       summary: List node install tokens
       security:
         - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - $ref: "#/components/parameters/Search"
+        - $ref: "#/components/parameters/DeviceGroupId"
       responses:
         "200":
           description: Install tokens.
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/InstallToken"
+                $ref: "#/components/schemas/InstallTokenPage"
         "403":
           $ref: "#/components/responses/Forbidden"
     post:
@@ -706,16 +733,18 @@ paths:
       security:
         - BearerAuth: []
       parameters:
-        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - $ref: "#/components/parameters/Search"
+        - $ref: "#/components/parameters/DateFrom"
+        - $ref: "#/components/parameters/DateTo"
       responses:
         "200":
           description: Audit logs.
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/AuditLog"
+                $ref: "#/components/schemas/AuditLogPage"
         "403":
           $ref: "#/components/responses/Forbidden"
 
@@ -727,16 +756,20 @@ paths:
       security:
         - BearerAuth: []
       parameters:
-        - $ref: "#/components/parameters/Limit"
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - $ref: "#/components/parameters/Search"
+        - $ref: "#/components/parameters/NodeId"
+        - $ref: "#/components/parameters/RuleId"
+        - $ref: "#/components/parameters/DateFrom"
+        - $ref: "#/components/parameters/DateTo"
       responses:
         "200":
           description: Protocol violations.
           content:
             application/json:
               schema:
-                type: array
-                items:
-                  $ref: "#/components/schemas/ProtocolViolation"
+                $ref: "#/components/schemas/ProtocolViolationPage"
         "403":
           $ref: "#/components/responses/Forbidden"
 
@@ -895,6 +928,84 @@ components:
       schema:
         type: integer
         minimum: 1
+    Page:
+      name: page
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        default: 1
+    PageSize:
+      name: pageSize
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+        maximum: 200
+        default: 25
+    Search:
+      name: q
+      in: query
+      required: false
+      schema:
+        type: string
+    Status:
+      name: status
+      in: query
+      required: false
+      schema:
+        type: string
+    UserId:
+      name: userId
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+    TunnelId:
+      name: tunnelId
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+    DeviceGroupId:
+      name: deviceGroupId
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+    NodeId:
+      name: nodeId
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+    RuleId:
+      name: ruleId
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
+    DateFrom:
+      name: dateFrom
+      in: query
+      required: false
+      schema:
+        type: string
+        format: date-time
+    DateTo:
+      name: dateTo
+      in: query
+      required: false
+      schema:
+        type: string
+        format: date-time
     Limit:
       name: limit
       in: query
@@ -991,6 +1102,121 @@ components:
         updatedAt:
           type: string
           format: date-time
+
+    PageMeta:
+      type: object
+      required: [items, total, page, pageSize]
+      properties:
+        total:
+          type: integer
+          minimum: 0
+        page:
+          type: integer
+          minimum: 1
+        pageSize:
+          type: integer
+          minimum: 1
+          maximum: 200
+
+    UserPage:
+      allOf:
+        - $ref: "#/components/schemas/PageMeta"
+        - type: object
+          properties:
+            items:
+              type: array
+              items:
+                $ref: "#/components/schemas/User"
+
+    ForwardRulePage:
+      allOf:
+        - $ref: "#/components/schemas/PageMeta"
+        - type: object
+          properties:
+            items:
+              type: array
+              items:
+                $ref: "#/components/schemas/ForwardRule"
+
+    DeviceGroupPage:
+      allOf:
+        - $ref: "#/components/schemas/PageMeta"
+        - type: object
+          properties:
+            items:
+              type: array
+              items:
+                $ref: "#/components/schemas/DeviceGroup"
+
+    TunnelPage:
+      allOf:
+        - $ref: "#/components/schemas/PageMeta"
+        - type: object
+          properties:
+            items:
+              type: array
+              items:
+                $ref: "#/components/schemas/Tunnel"
+
+    ProtocolPolicyPage:
+      allOf:
+        - $ref: "#/components/schemas/PageMeta"
+        - type: object
+          properties:
+            items:
+              type: array
+              items:
+                $ref: "#/components/schemas/ProtocolPolicy"
+
+    SpeedLimitPage:
+      allOf:
+        - $ref: "#/components/schemas/PageMeta"
+        - type: object
+          properties:
+            items:
+              type: array
+              items:
+                $ref: "#/components/schemas/SpeedLimit"
+
+    NodePage:
+      allOf:
+        - $ref: "#/components/schemas/PageMeta"
+        - type: object
+          properties:
+            items:
+              type: array
+              items:
+                $ref: "#/components/schemas/Node"
+
+    InstallTokenPage:
+      allOf:
+        - $ref: "#/components/schemas/PageMeta"
+        - type: object
+          properties:
+            items:
+              type: array
+              items:
+                $ref: "#/components/schemas/InstallToken"
+
+    AuditLogPage:
+      allOf:
+        - $ref: "#/components/schemas/PageMeta"
+        - type: object
+          properties:
+            items:
+              type: array
+              items:
+                $ref: "#/components/schemas/AuditLog"
+
+    ProtocolViolationPage:
+      allOf:
+        - $ref: "#/components/schemas/PageMeta"
+        - type: object
+          properties:
+            items:
+              type: array
+              items:
+                $ref: "#/components/schemas/ProtocolViolation"
 
     LoginRequest:
       type: object

@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import {
   Activity,
@@ -771,28 +771,37 @@ function ResourcePage({ config, refreshSeed }: { config: ResourceConfig; refresh
   const [notice, setNotice] = useState<string | null>(null);
   const [reloadSeed, setReloadSeed] = useState(0);
   const [query, setQuery] = useState("");
+  const [statusFilter, setStatusFilter] = useState("");
   const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
   const [references, setReferences] = useState<Record<string, { value: string; label: string }[]>>({});
+  const hasStatusFilter = config.fields.some((field) => field.key === "status");
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const data = await api.get<Entity[]>(config.endpoint);
-      setRows(Array.isArray(data) ? data : []);
-      setPage(1);
+      const data = await api.page<Entity>(config.endpoint, {
+        page,
+        pageSize,
+        q: query,
+        status: statusFilter || undefined
+      });
+      setRows(data.items);
+      setTotal(data.total);
     } catch (err) {
       setError(err instanceof Error ? err.message : `${config.title}请求失败`);
     } finally {
       setLoading(false);
     }
-  }, [config.endpoint, config.title]);
+  }, [config.endpoint, config.title, page, query, statusFilter]);
 
   useEffect(() => {
     setDraft(emptyDraft(config.fields));
     setEditingId(null);
     setNotice(null);
     setQuery("");
+    setStatusFilter("");
     setPage(1);
   }, [config.key, config.fields]);
 
@@ -809,8 +818,8 @@ function ResourcePage({ config, refreshSeed }: { config: ResourceConfig; refresh
       await Promise.all(
         keys.map(async (key) => {
           try {
-            const rows = await api.get<Entity[]>(referenceEndpoint(key));
-            next[key] = rows.map((row) => ({
+            const page = await api.page<Entity>(referenceEndpoint(key), { pageSize: 200 });
+            next[key] = page.items.map((row) => ({
               value: String(row.id ?? ""),
               label: referenceLabel(key, row)
             }));
@@ -830,10 +839,9 @@ function ResourcePage({ config, refreshSeed }: { config: ResourceConfig; refresh
     };
   }, [config.fields]);
 
-  const filteredRows = useMemo(() => filterRows(rows, query), [rows, query]);
-  const pageCount = Math.max(1, Math.ceil(filteredRows.length / pageSize));
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
   const currentPage = Math.min(page, pageCount);
-  const visibleRows = filteredRows.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  const visibleRows = rows;
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -928,6 +936,25 @@ function ResourcePage({ config, refreshSeed }: { config: ResourceConfig; refresh
             setPage(1);
           }}
         />
+        {hasStatusFilter ? (
+          <select
+            aria-label="按状态筛选"
+            value={statusFilter}
+            onChange={(event) => {
+              setStatusFilter(event.target.value);
+              setPage(1);
+            }}
+          >
+            <option value="">全部状态</option>
+            {config.fields
+              .find((field) => field.key === "status")
+              ?.options?.map((option) => (
+                <option key={option.value} value={option.value}>
+                  {option.label}
+                </option>
+              ))}
+          </select>
+        ) : null}
         <PaginationControls page={currentPage} pageCount={pageCount} onPage={setPage} />
       </section>
 
@@ -936,7 +963,7 @@ function ResourcePage({ config, refreshSeed }: { config: ResourceConfig; refresh
 
       <div className="resource-grid">
         <section className="panel table-panel">
-          <PanelHeader title="记录列表" icon={Activity} meta={`${filteredRows.length}/${rows.length} 条`} />
+          <PanelHeader title="记录列表" icon={Activity} meta={`${rows.length}/${total} 条`} />
           {loading ? (
             <StateBlock tone="loading" title="正在加载记录" />
           ) : (
@@ -1010,13 +1037,15 @@ function InstallTokensPanel({ refreshSeed }: { refreshSeed: number }) {
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [total, setTotal] = useState(0);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const data = await api.get<InstallToken[]>("/install-tokens");
-      setTokens(Array.isArray(data) ? data : []);
+      const data = await api.page<InstallToken>("/install-tokens", { pageSize: 50 });
+      setTokens(data.items);
+      setTotal(data.total);
     } catch (err) {
       setError(err instanceof Error ? err.message : "安装令牌请求失败");
     } finally {
@@ -1058,7 +1087,7 @@ function InstallTokensPanel({ refreshSeed }: { refreshSeed: number }) {
 
   return (
     <section className="panel">
-      <PanelHeader title="安装令牌" icon={KeyRound} meta={`已签发 ${tokens.length} 个`} />
+      <PanelHeader title="安装令牌" icon={KeyRound} meta={`显示 ${tokens.length}/${total} 个`} />
       {error ? <div className="notice error">{error}</div> : null}
       {created ? (
         <div className="token-output">
@@ -1137,26 +1166,27 @@ function ViolationsPage({ refreshSeed }: { refreshSeed: number }) {
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const data = await api.get<ProtocolViolation[]>("/protocol-violations");
-      setRows(Array.isArray(data) ? data : []);
-      setPage(1);
+      const data = await api.page<ProtocolViolation>("/protocol-violations", { page, pageSize, q: query });
+      setRows(data.items);
+      setTotal(data.total);
       setSelected((current) => {
         if (!current) {
-          return data[0] ?? null;
+          return data.items[0] ?? null;
         }
-        return data.find((row) => row.id === current.id) ?? data[0] ?? null;
+        return data.items.find((row) => row.id === current.id) ?? data.items[0] ?? null;
       });
     } catch (err) {
       setError(err instanceof Error ? err.message : "协议违规请求失败");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [page, query]);
 
   useEffect(() => {
     void load();
@@ -1164,10 +1194,9 @@ function ViolationsPage({ refreshSeed }: { refreshSeed: number }) {
 
   const blocked = rows.filter((row) => row.action === "block").length;
   const uniqueProtocols = new Set(rows.map((row) => row.protocol).filter(Boolean)).size;
-  const filteredRows = useMemo(() => filterRows(rows, query), [rows, query]);
-  const pageCount = Math.max(1, Math.ceil(filteredRows.length / pageSize));
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
   const currentPage = Math.min(page, pageCount);
-  const visibleRows = filteredRows.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  const visibleRows = rows;
 
   return (
     <div className="stack">
@@ -1199,8 +1228,8 @@ function ViolationsPage({ refreshSeed }: { refreshSeed: number }) {
 
       <div className="metric-grid compact">
         <div className="metric">
-          <span>总数</span>
-          <strong>{rows.length}</strong>
+          <span>匹配总数</span>
+          <strong>{total}</strong>
         </div>
         <div className="metric">
           <span>已阻断</span>
@@ -1214,7 +1243,7 @@ function ViolationsPage({ refreshSeed }: { refreshSeed: number }) {
 
       <div className="resource-grid">
         <section className="panel table-panel">
-          <PanelHeader title="事件列表" icon={AlertTriangle} meta={`${filteredRows.length}/${rows.length} 条`} />
+          <PanelHeader title="事件列表" icon={AlertTriangle} meta={`${rows.length}/${total} 条`} />
           {loading ? (
             <StateBlock tone="loading" title="正在加载违规事件" />
           ) : (
@@ -1287,29 +1316,29 @@ function AuditLogsPage({ refreshSeed }: { refreshSeed: number }) {
   const [error, setError] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [page, setPage] = useState(1);
+  const [total, setTotal] = useState(0);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const data = await api.get<AuditLog[]>("/audit-logs?limit=1000");
-      setRows(Array.isArray(data) ? data : []);
-      setPage(1);
+      const data = await api.page<AuditLog>("/audit-logs", { page, pageSize, q: query });
+      setRows(data.items);
+      setTotal(data.total);
     } catch (err) {
       setError(err instanceof Error ? err.message : "审计日志请求失败");
     } finally {
       setLoading(false);
     }
-  }, []);
+  }, [page, query]);
 
   useEffect(() => {
     void load();
   }, [load, refreshSeed]);
 
-  const filteredRows = useMemo(() => filterRows(rows, query), [rows, query]);
-  const pageCount = Math.max(1, Math.ceil(filteredRows.length / pageSize));
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
   const currentPage = Math.min(page, pageCount);
-  const visibleRows = filteredRows.slice((currentPage - 1) * pageSize, currentPage * pageSize);
+  const visibleRows = rows;
 
   return (
     <div className="stack">
@@ -1340,7 +1369,7 @@ function AuditLogsPage({ refreshSeed }: { refreshSeed: number }) {
       {error ? <div className="notice error">{error}</div> : null}
 
       <section className="panel table-panel">
-        <PanelHeader title="事件列表" icon={ScrollText} meta={`${filteredRows.length}/${rows.length} 条`} />
+        <PanelHeader title="事件列表" icon={ScrollText} meta={`${rows.length}/${total} 条`} />
         {loading ? (
           <StateBlock tone="loading" title="正在加载审计日志" />
         ) : (
@@ -1371,7 +1400,16 @@ function ForwardRuleTools() {
     setNotice(null);
     setError(null);
     try {
-      const rules = await api.get<ForwardRule[]>("/forward-rules");
+      const rules: ForwardRule[] = [];
+      let current = 1;
+      for (;;) {
+        const page = await api.page<ForwardRule>("/forward-rules", { page: current, pageSize: 200 });
+        rules.push(...page.items);
+        if (rules.length >= page.total || page.items.length === 0) {
+          break;
+        }
+        current += 1;
+      }
       const bundle = {
         schemaVersion: "dusheng.forwarding-rules.v1",
         exportedAt: new Date().toISOString(),
@@ -1735,10 +1773,30 @@ function renderNodeSync(row: Entity) {
 function renderNodeHealth(row: Entity) {
   const system = parseSystem(row.systemJson);
   const runtimeStatus = system?.runtime && typeof system.runtime === "object" ? (system.runtime as Record<string, unknown>) : null;
-  const status = runtimeStatus?.running
-    ? `运行中 ${runtimeStatus.listeners ?? 0}/${runtimeStatus.activeConnections ?? 0}`
-    : text(system?.gostStatus ?? (system?.gostActive ? "running" : "unknown"));
-  return <StatusPill value={status} />;
+  if (runtimeStatus?.running) {
+    const errors =
+      runtimeStatus.listenerErrors && typeof runtimeStatus.listenerErrors === "object"
+        ? Object.values(runtimeStatus.listenerErrors as Record<string, unknown>).reduce<number>(
+            (sum, value) => sum + Number(value ?? 0),
+            0
+          )
+        : 0;
+    const applyError = text(runtimeStatus.lastApplyError);
+    const parts = [
+      `TCP ${runtimeStatus.tcpListeners ?? 0}`,
+      `UDP ${runtimeStatus.udpListeners ?? 0}`,
+      `连接 ${runtimeStatus.activeConnections ?? 0}`,
+      `UDP会话 ${runtimeStatus.activeUDPSessions ?? 0}`
+    ];
+    if (errors > 0) {
+      parts.push(`错误 ${errors}`);
+    }
+    if (applyError !== "-") {
+      parts.push(`同步异常 ${applyError}`);
+    }
+    return <StatusPill value={`runtime ${parts.join(" / ")}`} />;
+  }
+  return <StatusPill value={text(system?.gostStatus ?? (system?.gostActive ? "running" : "unknown"))} />;
 }
 
 function pageTitle(activePage: PageKey) {
@@ -1765,21 +1823,6 @@ function referenceLabel(key: ReferenceKey, row: Entity) {
   const id = typeof row.id === "number" ? `#${row.id}` : "";
   const primary = key === "users" ? row.username : row.name;
   return [id, text(primary)].filter((part) => part && part !== "-").join(" ");
-}
-
-function filterRows<T extends Entity>(rows: T[], query: string) {
-  const needle = query.trim().toLowerCase();
-  if (!needle) {
-    return rows;
-  }
-  return rows.filter((row) =>
-    Object.values(row).some((value) => {
-      if (value === null || typeof value === "undefined") {
-        return false;
-      }
-      return String(value).toLowerCase().includes(needle);
-    })
-  );
 }
 
 function importRulePayload(row: Entity) {

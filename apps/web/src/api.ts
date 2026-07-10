@@ -1,4 +1,4 @@
-import type { LoginResponse, Session } from "./types";
+import type { LoginResponse, Page, Session } from "./types";
 
 const ACCESS_TOKEN_KEY = "dusheng.accessToken";
 const REFRESH_TOKEN_KEY = "dusheng.refreshToken";
@@ -98,6 +98,8 @@ type RequestOptions = Omit<RequestInit, "body"> & {
   body?: unknown;
 };
 
+type QueryParams = Record<string, string | number | boolean | null | undefined>;
+
 async function refreshAccessToken() {
   const refreshToken = localStorage.getItem(REFRESH_TOKEN_KEY);
   if (!refreshToken) {
@@ -169,8 +171,45 @@ async function request<T>(path: string, options: RequestOptions = {}, retry = tr
   return payload as T;
 }
 
+function withQuery(path: string, params: QueryParams = {}) {
+  const query = new URLSearchParams();
+  Object.entries(params).forEach(([key, value]) => {
+    if (value === null || typeof value === "undefined" || value === "") {
+      return;
+    }
+    query.set(key, String(value));
+  });
+  const text = query.toString();
+  if (!text) {
+    return path;
+  }
+  return `${path}${path.includes("?") ? "&" : "?"}${text}`;
+}
+
+function normalizePage<T>(payload: unknown, params: QueryParams): Page<T> {
+  if (payload && typeof payload === "object" && "items" in payload) {
+    const page = payload as Partial<Page<T>>;
+    return {
+      items: Array.isArray(page.items) ? page.items : [],
+      total: Number(page.total ?? 0),
+      page: Number(page.page ?? params.page ?? 1),
+      pageSize: Number(page.pageSize ?? params.pageSize ?? page.items?.length ?? 0)
+    };
+  }
+
+  const items = Array.isArray(payload) ? (payload as T[]) : [];
+  return {
+    items,
+    total: items.length,
+    page: Number(params.page ?? 1),
+    pageSize: Number(params.pageSize ?? items.length)
+  };
+}
+
 export const api = {
   get: <T>(path: string) => request<T>(path, { method: "GET" }),
+  page: async <T>(path: string, params: QueryParams = {}) =>
+    normalizePage<T>(await request<unknown>(withQuery(path, params), { method: "GET" }), params),
   post: <T>(path: string, body: unknown) => request<T>(path, { method: "POST", body }),
   put: <T>(path: string, body: unknown) => request<T>(path, { method: "PUT", body }),
   delete: <T>(path: string) => request<T>(path, { method: "DELETE" })

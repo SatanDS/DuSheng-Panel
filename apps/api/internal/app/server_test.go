@@ -343,3 +343,109 @@ func TestDashboardScopesNonAdminUser(t *testing.T) {
 	require.Equal(t, float64(100), payload["todayBytes"])
 	require.Equal(t, float64(0), payload["violations24h"])
 }
+
+func TestListUsersPaginationAndSearch(t *testing.T) {
+	s := testServer(t)
+	token := adminToken(t, s)
+	hash, err := auth.HashPassword("secret")
+	require.NoError(t, err)
+	for i := 0; i < 5; i++ {
+		user := models.User{
+			Username:     fmt.Sprintf("alice-%d", i),
+			PasswordHash: hash,
+			Role:         "user",
+			Status:       "active",
+		}
+		require.NoError(t, s.db.Create(&user).Error)
+	}
+
+	rec := jsonRequest(t, testRouter(t, s), http.MethodGet, "/api/v1/users?page=1&pageSize=2&q=alice", map[string]any{}, token)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var page struct {
+		Items    []models.User `json:"items"`
+		Total    int64         `json:"total"`
+		Page     int           `json:"page"`
+		PageSize int           `json:"pageSize"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &page))
+	require.Len(t, page.Items, 2)
+	require.Equal(t, int64(5), page.Total)
+	require.Equal(t, 1, page.Page)
+	require.Equal(t, 2, page.PageSize)
+}
+
+func TestUserAuthRejectsDisabledUserAfterTokenIssued(t *testing.T) {
+	s := testServer(t)
+	hash, err := auth.HashPassword("secret")
+	require.NoError(t, err)
+	user := models.User{Username: "carol", PasswordHash: hash, Role: "admin", Status: "active"}
+	require.NoError(t, s.db.Create(&user).Error)
+	token, err := auth.GenerateToken(user.ID, user.Role, auth.TokenTypeAccess, "test-secret-for-unit-tests", time.Hour)
+	require.NoError(t, err)
+	require.NoError(t, s.db.Model(&user).Update("status", "disabled").Error)
+
+	rec := jsonRequest(t, testRouter(t, s), http.MethodGet, "/api/v1/me", map[string]any{}, token)
+	require.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+func TestLoginRateLimiterBlocksRepeatedFailures(t *testing.T) {
+	s := testServer(t)
+	hash, err := auth.HashPassword("secret")
+	require.NoError(t, err)
+	user := models.User{Username: "dave", PasswordHash: hash, Role: "admin", Status: "active"}
+	require.NoError(t, s.db.Create(&user).Error)
+	router := testRouter(t, s)
+
+	for i := 0; i < 8; i++ {
+		rec := jsonRequest(t, router, http.MethodPost, "/api/v1/auth/login", map[string]any{
+			"username": "dave",
+			"password": "wrong",
+		}, "")
+		require.Equal(t, http.StatusUnauthorized, rec.Code)
+	}
+	rec := jsonRequest(t, router, http.MethodPost, "/api/v1/auth/login", map[string]any{
+		"username": "dave",
+		"password": "wrong",
+	}, "")
+	require.Equal(t, http.StatusTooManyRequests, rec.Code)
+}
+
+func TestDeviceGroupUpdateIgnoresSystemFields(t *testing.T) {
+	s := testServer(t)
+	token := adminToken(t, s)
+	group := models.DeviceGroup{Name: "entry", Role: "entry", PortStart: 20000, PortEnd: 30000, TrafficRatio: 1}
+	require.NoError(t, s.db.Create(&group).Error)
+
+	rec := jsonRequest(t, testRouter(t, s), http.MethodPut, fmt.Sprintf("/api/v1/device-groups/%d", group.ID), map[string]any{
+		"id":           999,
+		"createdAt":    "2000-01-01T00:00:00Z",
+		"name":         "entry-updated",
+		"role":         "entry",
+		"portStart":    20000,
+		"portEnd":      30000,
+		"trafficRatio": 1,
+	}, token)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	var updated models.DeviceGroup
+	require.NoError(t, s.db.First(&updated, group.ID).Error)
+	require.Equal(t, group.ID, updated.ID)
+	require.Equal(t, "entry-updated", updated.Name)
+	require.ErrorIs(t, s.db.First(&models.DeviceGroup{}, 999).Error, gorm.ErrRecordNotFound)
+}
+
+func TestProductionConfigRejectsUnsafeDefaults(t *testing.T) {
+	cfg := config.Config{
+		Environment:   "production",
+		JWTSecret:     "0123456789abcdef0123456789abcdef",
+		AdminUsername: "admin",
+		AdminPassword: "strong-password",
+		CORSOrigins:   []string{"*"},
+		DatabaseURL:   "postgres://dusheng:strong@db:5432/dusheng",
+	}
+	require.ErrorContains(t, cfg.Validate(), "CORS")
+
+	cfg.CORSOrigins = []string{"https://panel.example.com"}
+	cfg.DatabaseURL = "postgres://dusheng:change-me-dusheng@db:5432/dusheng"
+	require.ErrorContains(t, cfg.Validate(), "database password")
+}

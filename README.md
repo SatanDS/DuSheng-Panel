@@ -73,7 +73,7 @@ HTTPS_PORT=7443
 - `DUSHENG_ENV`：本地开发使用 `development`，生产使用 `production`。
 - `DUSHENG_JWT_SECRET`：生产环境必须设置为至少 32 个字符，不能使用默认值。
 - `DUSHENG_ADMIN_USERNAME` / `DUSHENG_ADMIN_PASSWORD`：生产环境不能同时保留默认管理员账号和密码。
-- `DUSHENG_CORS_ORIGINS`：逗号分隔的允许来源；本地可用 `*`，生产建议设置为面板域名。
+- `DUSHENG_CORS_ORIGINS`：逗号分隔的允许来源；本地可用 `*`，生产必须设置为面板域名或明确的来源 allowlist。
 - `DUSHENG_AGENT_RELEASE_BASE`：节点安装脚本下载 agent 二进制的 GitHub Release 地址，默认是 `https://github.com/SatanDS/DuSheng-Panel/releases/latest/download`。
 - `DUSHENG_GOST_PATH` / `DUSHENG_GOST_BIN`：节点端 `gost` 二进制路径，安装脚本会同时写入两者以兼容旧配置。当前第一版入口监听默认由 `dusheng-agent` TCP/UDP runtime 承担，`gost` 保留给后续复杂 tunnel/relay transport。
 

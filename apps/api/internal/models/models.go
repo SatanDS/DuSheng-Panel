@@ -18,8 +18,8 @@ type User struct {
 	Username       string     `gorm:"uniqueIndex;size:80;not null" json:"username"`
 	DisplayName    string     `gorm:"size:120" json:"displayName"`
 	PasswordHash   string     `gorm:"size:255;not null" json:"-"`
-	Role           string     `gorm:"size:20;not null;default:user" json:"role"`
-	Status         string     `gorm:"size:20;not null;default:active" json:"status"`
+	Role           string     `gorm:"index;size:20;not null;default:user" json:"role"`
+	Status         string     `gorm:"index;size:20;not null;default:active" json:"status"`
 	FlowLimitBytes int64      `json:"flowLimitBytes"`
 	UsedBytes      int64      `json:"usedBytes"`
 	ForwardLimit   int        `json:"forwardLimit"`
@@ -45,17 +45,17 @@ type Node struct {
 	Name                 string     `gorm:"size:120;not null" json:"name"`
 	UUID                 string     `gorm:"uniqueIndex;size:80;not null" json:"uuid"`
 	TokenHash            string     `gorm:"index;size:128;not null" json:"-"`
-	Status               string     `gorm:"size:20;not null;default:offline" json:"status"`
+	Status               string     `gorm:"index;size:20;not null;default:offline" json:"status"`
 	Version              string     `gorm:"size:80" json:"version"`
 	PublicIP             string     `gorm:"size:80" json:"publicIp"`
 	ConnectHost          string     `gorm:"size:160" json:"connectHost"`
-	LastSeenAt           *time.Time `json:"lastSeenAt"`
+	LastSeenAt           *time.Time `gorm:"index" json:"lastSeenAt"`
 	SystemJSON           string     `gorm:"type:text" json:"systemJson"`
 	AppliedRevision      int64      `json:"appliedRevision"`
 	DesiredRevision      int64      `json:"desiredRevision"`
 	UninstallRequestedAt *time.Time `json:"uninstallRequestedAt"`
 	UninstallConfirmedAt *time.Time `json:"uninstallConfirmedAt"`
-	UninstallCommandID   string     `gorm:"size:120" json:"uninstallCommandId"`
+	UninstallCommandID   string     `gorm:"index;size:120" json:"uninstallCommandId"`
 }
 
 type Tunnel struct {
@@ -81,7 +81,7 @@ type ForwardRule struct {
 	ListenPort       int    `gorm:"index;uniqueIndex:idx_forward_rules_tunnel_listen;not null" json:"listenPort"`
 	RemoteHost       string `gorm:"size:255;not null" json:"remoteHost"`
 	RemotePort       int    `gorm:"not null" json:"remotePort"`
-	Status           string `gorm:"size:30;not null;default:unsynced" json:"status"`
+	Status           string `gorm:"index;size:30;not null;default:unsynced" json:"status"`
 	Strategy         string `gorm:"size:40;not null;default:least_conn" json:"strategy"`
 	ProtocolPolicyID *uint  `json:"protocolPolicyId"`
 	InBytes          int64  `json:"inBytes"`
@@ -119,20 +119,20 @@ type SpeedLimit struct {
 
 type TrafficSample struct {
 	BaseModel
-	UserID    uint      `gorm:"index" json:"userId"`
-	RuleID    uint      `gorm:"index" json:"ruleId"`
-	NodeID    uint      `gorm:"index" json:"nodeId"`
+	UserID    uint      `gorm:"index;index:idx_traffic_user_sampled" json:"userId"`
+	RuleID    uint      `gorm:"index;index:idx_traffic_rule_sampled" json:"ruleId"`
+	NodeID    uint      `gorm:"index;index:idx_traffic_node_sampled" json:"nodeId"`
 	Direction string    `gorm:"size:10" json:"direction"`
 	Bytes     int64     `json:"bytes"`
-	SampledAt time.Time `gorm:"index" json:"sampledAt"`
+	SampledAt time.Time `gorm:"index;index:idx_traffic_user_sampled;index:idx_traffic_rule_sampled;index:idx_traffic_node_sampled" json:"sampledAt"`
 }
 
 type AuditLog struct {
 	BaseModel
 	ActorID      *uint  `gorm:"index" json:"actorId"`
-	Action       string `gorm:"size:100;not null" json:"action"`
-	ResourceType string `gorm:"size:80;not null" json:"resourceType"`
-	ResourceID   string `gorm:"size:80" json:"resourceId"`
+	Action       string `gorm:"index;size:100;not null" json:"action"`
+	ResourceType string `gorm:"index;size:80;not null" json:"resourceType"`
+	ResourceID   string `gorm:"index;size:80" json:"resourceId"`
 	MetadataJSON string `gorm:"type:text" json:"metadataJson"`
 }
 
@@ -150,9 +150,9 @@ type ProtocolViolation struct {
 	RuleID     uint      `gorm:"index" json:"ruleId"`
 	NodeID     uint      `gorm:"index" json:"nodeId"`
 	PolicyID   uint      `gorm:"index" json:"policyId"`
-	Protocol   string    `gorm:"size:60" json:"protocol"`
+	Protocol   string    `gorm:"index;size:60" json:"protocol"`
 	SourceIP   string    `gorm:"size:120" json:"sourceIp"`
-	Action     string    `gorm:"size:20" json:"action"`
+	Action     string    `gorm:"index;size:20" json:"action"`
 	Detail     string    `gorm:"type:text" json:"detail"`
 	OccurredAt time.Time `gorm:"index" json:"occurredAt"`
 }

@@ -5,9 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
-	"reflect"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"dusheng-panel/apps/api/internal/auth"
@@ -19,20 +19,47 @@ import (
 )
 
 type Server struct {
-	cfg config.Config
-	db  *gorm.DB
+	cfg          config.Config
+	db           *gorm.DB
+	loginLimiter *loginLimiter
 }
 
 const nodeOfflineAfter = 90 * time.Second
+const (
+	defaultPageSize = 25
+	maxPageSize     = 200
+)
 
 var (
 	errAgentPayload   = errors.New("invalid agent payload")
 	errAgentForbidden = errors.New("agent is not allowed to report this rule")
 )
 
+type pageResponse[T any] struct {
+	Items    []T   `json:"items"`
+	Total    int64 `json:"total"`
+	Page     int   `json:"page"`
+	PageSize int   `json:"pageSize"`
+}
+
+type loginLimiter struct {
+	mu       sync.Mutex
+	attempts map[string]loginAttempt
+}
+
+type loginAttempt struct {
+	Count     int
+	FirstSeen time.Time
+	BlockedAt time.Time
+}
+
+func newLoginLimiter() *loginLimiter {
+	return &loginLimiter{attempts: map[string]loginAttempt{}}
+}
+
 func NewServer(cfg config.Config, db *gorm.DB) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
-	s := &Server{cfg: cfg, db: db}
+	s := &Server{cfg: cfg, db: db, loginLimiter: newLoginLimiter()}
 	router := gin.New()
 	router.Use(gin.Logger(), gin.Recovery(), cors(cfg.CORSOrigins))
 
@@ -66,10 +93,22 @@ func NewServer(cfg config.Config, db *gorm.DB) *gin.Engine {
 	admin.POST("/users", s.createUser)
 	admin.PUT("/users/:id", s.updateUser)
 	admin.DELETE("/users/:id", s.deleteByID(&models.User{}))
-	registerCRUD[models.DeviceGroup](admin, "/device-groups", s.db, s.afterDeviceGroupChange)
-	registerCRUD[models.Tunnel](admin, "/tunnels", s.db, s.afterTunnelChange)
-	registerCRUD[models.ProtocolPolicy](admin, "/protocol-policies", s.db, s.afterProtocolPolicyChange)
-	registerCRUD[models.SpeedLimit](admin, "/speed-limits", s.db, s.afterSpeedLimitChange)
+	admin.GET("/device-groups", s.listDeviceGroups)
+	admin.POST("/device-groups", s.createDeviceGroup)
+	admin.PUT("/device-groups/:id", s.updateDeviceGroup)
+	admin.DELETE("/device-groups/:id", s.deleteDeviceGroup)
+	admin.GET("/tunnels", s.listTunnels)
+	admin.POST("/tunnels", s.createTunnel)
+	admin.PUT("/tunnels/:id", s.updateTunnel)
+	admin.DELETE("/tunnels/:id", s.deleteTunnel)
+	admin.GET("/protocol-policies", s.listProtocolPolicies)
+	admin.POST("/protocol-policies", s.createProtocolPolicy)
+	admin.PUT("/protocol-policies/:id", s.updateProtocolPolicy)
+	admin.DELETE("/protocol-policies/:id", s.deleteProtocolPolicy)
+	admin.GET("/speed-limits", s.listSpeedLimits)
+	admin.POST("/speed-limits", s.createSpeedLimit)
+	admin.PUT("/speed-limits/:id", s.updateSpeedLimit)
+	admin.DELETE("/speed-limits/:id", s.deleteSpeedLimit)
 	admin.GET("/nodes", s.listNodes)
 	admin.PUT("/nodes/:id", s.updateNode)
 	admin.DELETE("/nodes/:id", s.requestNodeUninstall)
@@ -109,6 +148,44 @@ func cors(origins []string) gin.HandlerFunc {
 	}
 }
 
+func (s *Server) limiter() *loginLimiter {
+	if s.loginLimiter == nil {
+		s.loginLimiter = newLoginLimiter()
+	}
+	return s.loginLimiter
+}
+
+func (l *loginLimiter) allow(key string, now time.Time) bool {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	attempt := l.attempts[key]
+	if now.Sub(attempt.FirstSeen) > 10*time.Minute {
+		delete(l.attempts, key)
+		return true
+	}
+	return attempt.Count < 8
+}
+
+func (l *loginLimiter) fail(key string, now time.Time) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	attempt := l.attempts[key]
+	if attempt.FirstSeen.IsZero() || now.Sub(attempt.FirstSeen) > 10*time.Minute {
+		attempt = loginAttempt{FirstSeen: now}
+	}
+	attempt.Count++
+	if attempt.Count >= 8 {
+		attempt.BlockedAt = now
+	}
+	l.attempts[key] = attempt
+}
+
+func (l *loginLimiter) success(key string) {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	delete(l.attempts, key)
+}
+
 func (s *Server) login(c *gin.Context) {
 	var req struct {
 		Username string `json:"username" binding:"required"`
@@ -118,15 +195,28 @@ func (s *Server) login(c *gin.Context) {
 		bad(c, err)
 		return
 	}
+	req.Username = strings.TrimSpace(req.Username)
+	key := strings.ToLower(c.ClientIP() + "|" + req.Username)
+	now := time.Now()
+	if !s.limiter().allow(key, now) {
+		s.audit(c, nil, "auth.login.rate_limited", "user", req.Username, "{}")
+		c.AbortWithStatusJSON(http.StatusTooManyRequests, gin.H{"error": "too many failed login attempts"})
+		return
+	}
 	var user models.User
 	if err := s.db.Where("username = ?", req.Username).First(&user).Error; err != nil {
+		s.limiter().fail(key, now)
+		s.audit(c, nil, "auth.login.failed", "user", req.Username, "{}")
 		unauthorized(c)
 		return
 	}
 	if user.Status != "active" || !auth.CheckPassword(user.PasswordHash, req.Password) {
+		s.limiter().fail(key, now)
+		s.audit(c, &user.ID, "auth.login.failed", "user", fmt.Sprint(user.ID), "{}")
 		unauthorized(c)
 		return
 	}
+	s.limiter().success(key)
 	access, err := auth.GenerateToken(user.ID, user.Role, auth.TokenTypeAccess, s.cfg.JWTSecret, 8*time.Hour)
 	if err != nil {
 		fail(c, err)
@@ -241,8 +331,13 @@ func (s *Server) userAuth() gin.HandlerFunc {
 			unauthorized(c)
 			return
 		}
-		c.Set("userID", claims.UserID)
-		c.Set("role", claims.Role)
+		var user models.User
+		if err := s.db.First(&user, claims.UserID).Error; err != nil || user.Status != "active" {
+			unauthorized(c)
+			return
+		}
+		c.Set("userID", user.ID)
+		c.Set("role", user.Role)
 		c.Next()
 	}
 }
@@ -310,10 +405,95 @@ func ctxNode(c *gin.Context) models.Node {
 	return models.Node{}
 }
 
+func pageParams(c *gin.Context) (int, int) {
+	page, err := strconv.Atoi(c.DefaultQuery("page", "1"))
+	if err != nil || page < 1 {
+		page = 1
+	}
+	pageSize, err := strconv.Atoi(c.DefaultQuery("pageSize", fmt.Sprint(defaultPageSize)))
+	if err != nil || pageSize < 1 {
+		pageSize = defaultPageSize
+	}
+	if pageSize > maxPageSize {
+		pageSize = maxPageSize
+	}
+	return page, pageSize
+}
+
+func respondPage[T any](c *gin.Context, query *gorm.DB, order string) {
+	page, pageSize := pageParams(c)
+	var total int64
+	if err := query.Count(&total).Error; err != nil {
+		fail(c, err)
+		return
+	}
+	var rows []T
+	if err := query.Order(order).Limit(pageSize).Offset((page - 1) * pageSize).Find(&rows).Error; err != nil {
+		fail(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, pageResponse[T]{Items: rows, Total: total, Page: page, PageSize: pageSize})
+}
+
+func applySearch(query *gorm.DB, c *gin.Context, columns ...string) *gorm.DB {
+	needle := strings.ToLower(strings.TrimSpace(c.Query("q")))
+	if needle == "" || len(columns) == 0 {
+		return query
+	}
+	parts := make([]string, 0, len(columns))
+	args := make([]any, 0, len(columns))
+	for _, column := range columns {
+		parts = append(parts, "LOWER("+column+") LIKE ?")
+		args = append(args, "%"+needle+"%")
+	}
+	return query.Where("("+strings.Join(parts, " OR ")+")", args...)
+}
+
+func filterString(query *gorm.DB, c *gin.Context, column, param string) *gorm.DB {
+	value := strings.TrimSpace(c.Query(param))
+	if value == "" {
+		return query
+	}
+	return query.Where(column+" = ?", value)
+}
+
+func filterUint(query *gorm.DB, c *gin.Context, column, param string) *gorm.DB {
+	value, err := strconv.ParseUint(strings.TrimSpace(c.Query(param)), 10, 64)
+	if err != nil || value == 0 {
+		return query
+	}
+	return query.Where(column+" = ?", uint(value))
+}
+
+func filterDateRange(query *gorm.DB, c *gin.Context, column string) *gorm.DB {
+	if from := parseQueryTime(c.Query("dateFrom")); !from.IsZero() {
+		query = query.Where(column+" >= ?", from)
+	}
+	if to := parseQueryTime(c.Query("dateTo")); !to.IsZero() {
+		query = query.Where(column+" <= ?", to)
+	}
+	return query
+}
+
+func parseQueryTime(value string) time.Time {
+	value = strings.TrimSpace(value)
+	if value == "" {
+		return time.Time{}
+	}
+	for _, layout := range []string{time.RFC3339, "2006-01-02"} {
+		parsed, err := time.Parse(layout, value)
+		if err == nil {
+			return parsed
+		}
+	}
+	return time.Time{}
+}
+
 func (s *Server) listUsers(c *gin.Context) {
-	var users []models.User
-	s.db.Order("id desc").Find(&users)
-	c.JSON(http.StatusOK, users)
+	query := s.db.Model(&models.User{})
+	query = applySearch(query, c, "username", "display_name", "role", "status")
+	query = filterString(query, c, "status", "status")
+	respondPage[models.User](c, query, "id desc")
 }
 
 type userPayload struct {
@@ -396,9 +576,11 @@ func (s *Server) updateUser(c *gin.Context) {
 
 func (s *Server) listNodes(c *gin.Context) {
 	s.markStaleNodesOffline(time.Now())
-	var nodes []models.Node
-	s.db.Order("id desc").Find(&nodes)
-	c.JSON(http.StatusOK, nodes)
+	query := s.db.Model(&models.Node{})
+	query = applySearch(query, c, "name", "uuid", "status", "version", "public_ip", "connect_host")
+	query = filterString(query, c, "status", "status")
+	query = filterUint(query, c, "device_group_id", "deviceGroupId")
+	respondPage[models.Node](c, query, "id desc")
 }
 
 func (s *Server) markStaleNodesOffline(now time.Time) {
@@ -473,95 +655,486 @@ func (s *Server) requestNodeUninstall(c *gin.Context) {
 	c.JSON(http.StatusAccepted, node)
 }
 
-type crudAfter[T any] func(*gin.Context, *gorm.DB, *T, string)
-
-func registerCRUD[T any](group *gin.RouterGroup, path string, db *gorm.DB, after crudAfter[T]) {
-	group.GET(path, func(c *gin.Context) {
-		var rows []T
-		if err := db.Order("id desc").Find(&rows).Error; err != nil {
-			fail(c, err)
-			return
-		}
-		c.JSON(http.StatusOK, rows)
-	})
-	group.POST(path, func(c *gin.Context) {
-		var row T
-		if err := c.ShouldBindJSON(&row); err != nil {
-			bad(c, err)
-			return
-		}
-		if err := db.Create(&row).Error; err != nil {
-			fail(c, err)
-			return
-		}
-		if after != nil {
-			after(c, db, &row, "create")
-		}
-		c.JSON(http.StatusCreated, row)
-	})
-	group.PUT(path+"/:id", func(c *gin.Context) {
-		id, err := strconv.ParseUint(c.Param("id"), 10, 64)
-		if err != nil {
-			bad(c, err)
-			return
-		}
-		var row T
-		if err := db.First(&row, id).Error; err != nil {
-			notFound(c)
-			return
-		}
-		if err := c.ShouldBindJSON(&row); err != nil {
-			bad(c, err)
-			return
-		}
-		setID(&row, uint(id))
-		if err := db.Save(&row).Error; err != nil {
-			fail(c, err)
-			return
-		}
-		if after != nil {
-			after(c, db, &row, "update")
-		}
-		c.JSON(http.StatusOK, row)
-	})
-	group.DELETE(path+"/:id", func(c *gin.Context) {
-		var row T
-		if err := db.First(&row, c.Param("id")).Error; err != nil {
-			notFound(c)
-			return
-		}
-		if err := db.Delete(&row).Error; err != nil {
-			fail(c, err)
-			return
-		}
-		if after != nil {
-			after(c, db, &row, "delete")
-		}
-		c.Status(http.StatusNoContent)
-	})
+type deviceGroupPayload struct {
+	Name             string  `json:"name"`
+	Role             string  `json:"role"`
+	BindIPs          string  `json:"bindIPs"`
+	PortStart        int     `json:"portStart"`
+	PortEnd          int     `json:"portEnd"`
+	TrafficRatio     float64 `json:"trafficRatio"`
+	ProtocolPolicyID *uint   `json:"protocolPolicyId"`
+	FailoverGroupID  *uint   `json:"failoverGroupId"`
+	AdvancedJSON     string  `json:"advancedJson"`
 }
 
-func setID(row any, id uint) {
-	value := reflect.ValueOf(row)
-	if value.Kind() != reflect.Ptr || value.IsNil() {
+func (s *Server) listDeviceGroups(c *gin.Context) {
+	query := s.db.Model(&models.DeviceGroup{})
+	query = applySearch(query, c, "name", "role", "bind_ips")
+	query = filterString(query, c, "role", "role")
+	respondPage[models.DeviceGroup](c, query, "id desc")
+}
+
+func (s *Server) createDeviceGroup(c *gin.Context) {
+	var req deviceGroupPayload
+	if err := c.ShouldBindJSON(&req); err != nil {
+		bad(c, err)
 		return
 	}
-	elem := value.Elem()
-	if base := elem.FieldByName("BaseModel"); base.IsValid() {
-		if idField := base.FieldByName("ID"); idField.IsValid() && idField.CanSet() {
-			idField.SetUint(uint64(id))
-			return
-		}
+	row := models.DeviceGroup{}
+	if err := s.applyDeviceGroupPayload(&row, req); err != nil {
+		bad(c, err)
+		return
 	}
-	if idField := elem.FieldByName("ID"); idField.IsValid() && idField.CanSet() {
-		idField.SetUint(uint64(id))
+	if err := s.db.Create(&row).Error; err != nil {
+		fail(c, err)
+		return
 	}
+	s.afterDeviceGroupChange(c, s.db, &row, "create")
+	c.JSON(http.StatusCreated, row)
 }
 
-func auditHook[T any](s *Server, resource string) crudAfter[T] {
-	return func(c *gin.Context, db *gorm.DB, row *T, action string) {
-		s.audit(c, actor(c), resource+"."+action, resource, modelID(row), "{}")
+func (s *Server) updateDeviceGroup(c *gin.Context) {
+	var row models.DeviceGroup
+	if err := s.db.First(&row, c.Param("id")).Error; err != nil {
+		notFound(c)
+		return
 	}
+	var req deviceGroupPayload
+	if err := c.ShouldBindJSON(&req); err != nil {
+		bad(c, err)
+		return
+	}
+	if err := s.applyDeviceGroupPayload(&row, req); err != nil {
+		bad(c, err)
+		return
+	}
+	if err := s.db.Save(&row).Error; err != nil {
+		fail(c, err)
+		return
+	}
+	s.afterDeviceGroupChange(c, s.db, &row, "update")
+	c.JSON(http.StatusOK, row)
+}
+
+func (s *Server) deleteDeviceGroup(c *gin.Context) {
+	var row models.DeviceGroup
+	if err := s.db.First(&row, c.Param("id")).Error; err != nil {
+		notFound(c)
+		return
+	}
+	if err := s.db.Delete(&row).Error; err != nil {
+		fail(c, err)
+		return
+	}
+	s.afterDeviceGroupChange(c, s.db, &row, "delete")
+	c.Status(http.StatusNoContent)
+}
+
+func (s *Server) applyDeviceGroupPayload(row *models.DeviceGroup, req deviceGroupPayload) error {
+	req.Name = strings.TrimSpace(req.Name)
+	req.Role = strings.TrimSpace(req.Role)
+	if req.Name == "" {
+		return errors.New("name is required")
+	}
+	if req.Role == "" {
+		req.Role = "entry"
+	}
+	if !contains([]string{"entry", "exit", "relay"}, req.Role) {
+		return errors.New("role must be entry, exit, or relay")
+	}
+	if req.PortStart < 0 || req.PortEnd < 0 || req.PortStart > 65535 || req.PortEnd > 65535 {
+		return errors.New("port range must be between 0 and 65535")
+	}
+	if req.PortStart > 0 && req.PortEnd > 0 && req.PortStart > req.PortEnd {
+		return errors.New("portStart must be less than or equal to portEnd")
+	}
+	if req.TrafficRatio == 0 {
+		req.TrafficRatio = 1
+	}
+	if req.TrafficRatio < 0 {
+		return errors.New("trafficRatio must be non-negative")
+	}
+	if err := s.requireOptionalID(&models.ProtocolPolicy{}, req.ProtocolPolicyID, "protocol policy"); err != nil {
+		return err
+	}
+	if err := s.requireOptionalID(&models.DeviceGroup{}, req.FailoverGroupID, "failover device group"); err != nil {
+		return err
+	}
+	row.Name = req.Name
+	row.Role = req.Role
+	row.BindIPs = strings.TrimSpace(req.BindIPs)
+	row.PortStart = req.PortStart
+	row.PortEnd = req.PortEnd
+	row.TrafficRatio = req.TrafficRatio
+	row.ProtocolPolicyID = req.ProtocolPolicyID
+	row.FailoverGroupID = req.FailoverGroupID
+	row.AdvancedJSON = req.AdvancedJSON
+	return nil
+}
+
+type tunnelPayload struct {
+	Name              string  `json:"name"`
+	Mode              string  `json:"mode"`
+	EntryGroupID      uint    `json:"entryGroupId"`
+	ExitGroupID       *uint   `json:"exitGroupId"`
+	Protocol          string  `json:"protocol"`
+	FlowAccounting    string  `json:"flowAccounting"`
+	EntryTrafficRatio float64 `json:"entryTrafficRatio"`
+	ExitTrafficRatio  float64 `json:"exitTrafficRatio"`
+	ProtocolPolicyID  *uint   `json:"protocolPolicyId"`
+	AdvancedJSON      string  `json:"advancedJson"`
+}
+
+func (s *Server) listTunnels(c *gin.Context) {
+	query := s.db.Model(&models.Tunnel{})
+	query = applySearch(query, c, "name", "mode", "protocol", "flow_accounting")
+	query = filterString(query, c, "mode", "mode")
+	query = filterUint(query, c, "entry_group_id", "entryGroupId")
+	query = filterUint(query, c, "exit_group_id", "exitGroupId")
+	respondPage[models.Tunnel](c, query, "id desc")
+}
+
+func (s *Server) createTunnel(c *gin.Context) {
+	var req tunnelPayload
+	if err := c.ShouldBindJSON(&req); err != nil {
+		bad(c, err)
+		return
+	}
+	row := models.Tunnel{}
+	if err := s.applyTunnelPayload(&row, req); err != nil {
+		bad(c, err)
+		return
+	}
+	if err := s.db.Create(&row).Error; err != nil {
+		fail(c, err)
+		return
+	}
+	s.afterTunnelChange(c, s.db, &row, "create")
+	c.JSON(http.StatusCreated, row)
+}
+
+func (s *Server) updateTunnel(c *gin.Context) {
+	var row models.Tunnel
+	if err := s.db.First(&row, c.Param("id")).Error; err != nil {
+		notFound(c)
+		return
+	}
+	var req tunnelPayload
+	if err := c.ShouldBindJSON(&req); err != nil {
+		bad(c, err)
+		return
+	}
+	if err := s.applyTunnelPayload(&row, req); err != nil {
+		bad(c, err)
+		return
+	}
+	if err := s.db.Save(&row).Error; err != nil {
+		fail(c, err)
+		return
+	}
+	s.afterTunnelChange(c, s.db, &row, "update")
+	c.JSON(http.StatusOK, row)
+}
+
+func (s *Server) deleteTunnel(c *gin.Context) {
+	var row models.Tunnel
+	if err := s.db.First(&row, c.Param("id")).Error; err != nil {
+		notFound(c)
+		return
+	}
+	if err := s.db.Delete(&row).Error; err != nil {
+		fail(c, err)
+		return
+	}
+	s.afterTunnelChange(c, s.db, &row, "delete")
+	c.Status(http.StatusNoContent)
+}
+
+func (s *Server) applyTunnelPayload(row *models.Tunnel, req tunnelPayload) error {
+	req.Name = strings.TrimSpace(req.Name)
+	if req.Name == "" {
+		return errors.New("name is required")
+	}
+	if req.Mode == "" {
+		req.Mode = "single"
+	}
+	if !contains([]string{"single", "relay", "failover"}, req.Mode) {
+		return errors.New("mode must be single, relay, or failover")
+	}
+	if req.Protocol == "" {
+		req.Protocol = "direct"
+	}
+	if !contains([]string{"direct", "tcp", "tls", "ws", "wss", "ws_over_tls", "ws-over-tls", "quic"}, req.Protocol) {
+		return errors.New("unsupported tunnel protocol")
+	}
+	if req.FlowAccounting == "" {
+		req.FlowAccounting = "single"
+	}
+	if !contains([]string{"single", "entry", "exit", "both"}, req.FlowAccounting) {
+		return errors.New("flowAccounting must be single, entry, exit, or both")
+	}
+	if req.EntryGroupID == 0 {
+		return errors.New("entryGroupId is required")
+	}
+	if err := s.requireID(&models.DeviceGroup{}, req.EntryGroupID, "entry device group"); err != nil {
+		return err
+	}
+	if err := s.requireOptionalID(&models.DeviceGroup{}, req.ExitGroupID, "exit device group"); err != nil {
+		return err
+	}
+	if err := s.requireOptionalID(&models.ProtocolPolicy{}, req.ProtocolPolicyID, "protocol policy"); err != nil {
+		return err
+	}
+	if req.EntryTrafficRatio == 0 {
+		req.EntryTrafficRatio = 1
+	}
+	if req.ExitTrafficRatio == 0 {
+		req.ExitTrafficRatio = 1
+	}
+	if req.EntryTrafficRatio < 0 || req.ExitTrafficRatio < 0 {
+		return errors.New("traffic ratios must be non-negative")
+	}
+	row.Name = req.Name
+	row.Mode = req.Mode
+	row.EntryGroupID = req.EntryGroupID
+	row.ExitGroupID = req.ExitGroupID
+	row.Protocol = req.Protocol
+	row.FlowAccounting = req.FlowAccounting
+	row.EntryTrafficRatio = req.EntryTrafficRatio
+	row.ExitTrafficRatio = req.ExitTrafficRatio
+	row.ProtocolPolicyID = req.ProtocolPolicyID
+	row.AdvancedJSON = req.AdvancedJSON
+	return nil
+}
+
+type protocolPolicyPayload struct {
+	Name                 string `json:"name"`
+	Template             string `json:"template"`
+	Mode                 string `json:"mode"`
+	BlockTLS             bool   `json:"blockTls"`
+	BlockQUIC            bool   `json:"blockQuic"`
+	AllowPlainTCPOnly    bool   `json:"allowPlainTcpOnly"`
+	AllowHTTPOnly        bool   `json:"allowHttpOnly"`
+	BlockProxyLike       bool   `json:"blockProxyLike"`
+	BlockEncryptedTunnel bool   `json:"blockEncryptedTunnel"`
+	Description          string `json:"description"`
+}
+
+func (s *Server) listProtocolPolicies(c *gin.Context) {
+	query := s.db.Model(&models.ProtocolPolicy{})
+	query = applySearch(query, c, "name", "template", "mode", "description")
+	query = filterString(query, c, "mode", "mode")
+	respondPage[models.ProtocolPolicy](c, query, "id desc")
+}
+
+func (s *Server) createProtocolPolicy(c *gin.Context) {
+	var req protocolPolicyPayload
+	if err := c.ShouldBindJSON(&req); err != nil {
+		bad(c, err)
+		return
+	}
+	row := models.ProtocolPolicy{}
+	if err := applyProtocolPolicyPayload(&row, req); err != nil {
+		bad(c, err)
+		return
+	}
+	if err := s.db.Create(&row).Error; err != nil {
+		fail(c, err)
+		return
+	}
+	s.afterProtocolPolicyChange(c, s.db, &row, "create")
+	c.JSON(http.StatusCreated, row)
+}
+
+func (s *Server) updateProtocolPolicy(c *gin.Context) {
+	var row models.ProtocolPolicy
+	if err := s.db.First(&row, c.Param("id")).Error; err != nil {
+		notFound(c)
+		return
+	}
+	var req protocolPolicyPayload
+	if err := c.ShouldBindJSON(&req); err != nil {
+		bad(c, err)
+		return
+	}
+	if err := applyProtocolPolicyPayload(&row, req); err != nil {
+		bad(c, err)
+		return
+	}
+	if err := s.db.Save(&row).Error; err != nil {
+		fail(c, err)
+		return
+	}
+	s.afterProtocolPolicyChange(c, s.db, &row, "update")
+	c.JSON(http.StatusOK, row)
+}
+
+func (s *Server) deleteProtocolPolicy(c *gin.Context) {
+	var row models.ProtocolPolicy
+	if err := s.db.First(&row, c.Param("id")).Error; err != nil {
+		notFound(c)
+		return
+	}
+	if err := s.db.Delete(&row).Error; err != nil {
+		fail(c, err)
+		return
+	}
+	s.afterProtocolPolicyChange(c, s.db, &row, "delete")
+	c.Status(http.StatusNoContent)
+}
+
+func applyProtocolPolicyPayload(row *models.ProtocolPolicy, req protocolPolicyPayload) error {
+	req.Name = strings.TrimSpace(req.Name)
+	if req.Name == "" {
+		return errors.New("name is required")
+	}
+	if req.Template == "" {
+		req.Template = "custom"
+	}
+	if !contains([]string{"none", "iepl_iplc_no_tls", "plain_tcp_only", "http_only", "block_proxy_like", "custom"}, req.Template) {
+		return errors.New("unsupported protocol policy template")
+	}
+	if req.Mode == "" {
+		req.Mode = "block"
+	}
+	if !contains([]string{"observe", "alert", "block"}, req.Mode) {
+		return errors.New("mode must be observe, alert, or block")
+	}
+	row.Name = req.Name
+	row.Template = req.Template
+	row.Mode = req.Mode
+	row.BlockTLS = req.BlockTLS
+	row.BlockQUIC = req.BlockQUIC
+	row.AllowPlainTCPOnly = req.AllowPlainTCPOnly
+	row.AllowHTTPOnly = req.AllowHTTPOnly
+	row.BlockProxyLike = req.BlockProxyLike
+	row.BlockEncryptedTunnel = req.BlockEncryptedTunnel
+	row.Description = req.Description
+	return nil
+}
+
+type speedLimitPayload struct {
+	Name        string `json:"name"`
+	UserID      *uint  `json:"userId"`
+	TunnelID    *uint  `json:"tunnelId"`
+	RuleID      *uint  `json:"ruleId"`
+	UploadBps   int64  `json:"uploadBps"`
+	DownloadBps int64  `json:"downloadBps"`
+	MaxConns    int    `json:"maxConns"`
+	MaxIPs      int    `json:"maxIps"`
+}
+
+func (s *Server) listSpeedLimits(c *gin.Context) {
+	query := s.db.Model(&models.SpeedLimit{})
+	query = applySearch(query, c, "name")
+	query = filterUint(query, c, "user_id", "userId")
+	query = filterUint(query, c, "tunnel_id", "tunnelId")
+	query = filterUint(query, c, "rule_id", "ruleId")
+	respondPage[models.SpeedLimit](c, query, "id desc")
+}
+
+func (s *Server) createSpeedLimit(c *gin.Context) {
+	var req speedLimitPayload
+	if err := c.ShouldBindJSON(&req); err != nil {
+		bad(c, err)
+		return
+	}
+	row := models.SpeedLimit{}
+	if err := s.applySpeedLimitPayload(&row, req); err != nil {
+		bad(c, err)
+		return
+	}
+	if err := s.db.Create(&row).Error; err != nil {
+		fail(c, err)
+		return
+	}
+	s.afterSpeedLimitChange(c, s.db, &row, "create")
+	c.JSON(http.StatusCreated, row)
+}
+
+func (s *Server) updateSpeedLimit(c *gin.Context) {
+	var row models.SpeedLimit
+	if err := s.db.First(&row, c.Param("id")).Error; err != nil {
+		notFound(c)
+		return
+	}
+	var req speedLimitPayload
+	if err := c.ShouldBindJSON(&req); err != nil {
+		bad(c, err)
+		return
+	}
+	if err := s.applySpeedLimitPayload(&row, req); err != nil {
+		bad(c, err)
+		return
+	}
+	if err := s.db.Save(&row).Error; err != nil {
+		fail(c, err)
+		return
+	}
+	s.afterSpeedLimitChange(c, s.db, &row, "update")
+	c.JSON(http.StatusOK, row)
+}
+
+func (s *Server) deleteSpeedLimit(c *gin.Context) {
+	var row models.SpeedLimit
+	if err := s.db.First(&row, c.Param("id")).Error; err != nil {
+		notFound(c)
+		return
+	}
+	if err := s.db.Delete(&row).Error; err != nil {
+		fail(c, err)
+		return
+	}
+	s.afterSpeedLimitChange(c, s.db, &row, "delete")
+	c.Status(http.StatusNoContent)
+}
+
+func (s *Server) applySpeedLimitPayload(row *models.SpeedLimit, req speedLimitPayload) error {
+	req.Name = strings.TrimSpace(req.Name)
+	if req.Name == "" {
+		return errors.New("name is required")
+	}
+	if req.UploadBps < 0 || req.DownloadBps < 0 || req.MaxConns < 0 || req.MaxIPs < 0 {
+		return errors.New("speed limit values must be non-negative")
+	}
+	if req.UserID == nil && req.TunnelID == nil && req.RuleID == nil {
+		return errors.New("one of userId, tunnelId, or ruleId is required")
+	}
+	if err := s.requireOptionalID(&models.User{}, req.UserID, "user"); err != nil {
+		return err
+	}
+	if err := s.requireOptionalID(&models.Tunnel{}, req.TunnelID, "tunnel"); err != nil {
+		return err
+	}
+	if err := s.requireOptionalID(&models.ForwardRule{}, req.RuleID, "forward rule"); err != nil {
+		return err
+	}
+	row.Name = req.Name
+	row.UserID = req.UserID
+	row.TunnelID = req.TunnelID
+	row.RuleID = req.RuleID
+	row.UploadBps = req.UploadBps
+	row.DownloadBps = req.DownloadBps
+	row.MaxConns = req.MaxConns
+	row.MaxIPs = req.MaxIPs
+	return nil
+}
+
+func (s *Server) requireID(model any, id uint, name string) error {
+	if id == 0 {
+		return fmt.Errorf("%s is required", name)
+	}
+	if err := s.db.First(model, id).Error; err != nil {
+		return fmt.Errorf("%s not found", name)
+	}
+	return nil
+}
+
+func (s *Server) requireOptionalID(model any, id *uint, name string) error {
+	if id == nil || *id == 0 {
+		return nil
+	}
+	return s.requireID(model, *id, name)
 }
 
 func (s *Server) afterTunnelChange(c *gin.Context, db *gorm.DB, tunnel *models.Tunnel, action string) {
@@ -580,50 +1153,49 @@ func (s *Server) afterDeviceGroupChange(c *gin.Context, db *gorm.DB, group *mode
 }
 
 func (s *Server) afterProtocolPolicyChange(c *gin.Context, db *gorm.DB, policy *models.ProtocolPolicy, action string) {
-	db.Model(&models.Node{}).Update("desired_revision", time.Now().UnixNano())
+	db.Model(&models.Node{}).Where("id > ?", 0).Update("desired_revision", time.Now().UnixNano())
 	s.audit(c, actor(c), "protocol_policy."+action, "protocol_policy", fmt.Sprint(policy.ID), "{}")
 }
 
 func (s *Server) afterSpeedLimitChange(c *gin.Context, db *gorm.DB, limit *models.SpeedLimit, action string) {
-	db.Model(&models.Node{}).Update("desired_revision", time.Now().UnixNano())
+	db.Model(&models.Node{}).Where("id > ?", 0).Update("desired_revision", time.Now().UnixNano())
 	s.audit(c, actor(c), "speed_limit."+action, "speed_limit", fmt.Sprint(limit.ID), "{}")
 }
 
-func modelID(row any) string {
-	value := reflect.ValueOf(row)
-	if value.Kind() == reflect.Ptr {
-		value = value.Elem()
-	}
-	if value.Kind() != reflect.Struct {
-		return ""
-	}
-	if base := value.FieldByName("BaseModel"); base.IsValid() {
-		if idField := base.FieldByName("ID"); idField.IsValid() {
-			return fmt.Sprint(idField.Uint())
-		}
-	}
-	if idField := value.FieldByName("ID"); idField.IsValid() {
-		return fmt.Sprint(idField.Uint())
-	}
-	return ""
-}
-
 func (s *Server) listForwardRules(c *gin.Context) {
-	var rows []models.ForwardRule
-	query := s.db.Order("id desc")
+	query := s.db.Model(&models.ForwardRule{})
 	if ctxRole(c) != "admin" {
 		query = query.Where("user_id = ?", ctxUserID(c))
 	}
-	if err := query.Find(&rows).Error; err != nil {
-		fail(c, err)
-		return
-	}
-	c.JSON(http.StatusOK, rows)
+	query = applySearch(query, c, "name", "protocol", "remote_host", "status", "strategy")
+	query = filterString(query, c, "status", "status")
+	query = filterUint(query, c, "user_id", "userId")
+	query = filterUint(query, c, "tunnel_id", "tunnelId")
+	query = filterUint(query, c, "id", "ruleId")
+	respondPage[models.ForwardRule](c, query, "id desc")
+}
+
+type forwardRulePayload struct {
+	UserID           uint   `json:"userId"`
+	TunnelID         uint   `json:"tunnelId"`
+	Name             string `json:"name"`
+	Protocol         string `json:"protocol"`
+	ListenPort       int    `json:"listenPort"`
+	RemoteHost       string `json:"remoteHost"`
+	RemotePort       int    `json:"remotePort"`
+	Status           string `json:"status"`
+	Strategy         string `json:"strategy"`
+	ProtocolPolicyID *uint  `json:"protocolPolicyId"`
 }
 
 func (s *Server) createForwardRule(c *gin.Context) {
+	var req forwardRulePayload
+	if err := c.ShouldBindJSON(&req); err != nil {
+		bad(c, err)
+		return
+	}
 	var rule models.ForwardRule
-	if err := c.ShouldBindJSON(&rule); err != nil {
+	if err := s.applyForwardRulePayload(&rule, req); err != nil {
 		bad(c, err)
 		return
 	}
@@ -655,12 +1227,17 @@ func (s *Server) updateForwardRule(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "forbidden"})
 		return
 	}
-	if err := c.ShouldBindJSON(&existing); err != nil {
+	var req forwardRulePayload
+	if err := c.ShouldBindJSON(&req); err != nil {
 		bad(c, err)
 		return
 	}
 	id, _ := strconv.ParseUint(c.Param("id"), 10, 64)
 	existing.ID = uint(id)
+	if err := s.applyForwardRulePayload(&existing, req); err != nil {
+		bad(c, err)
+		return
+	}
 	if ctxRole(c) != "admin" {
 		existing.UserID = ctxUserID(c)
 	}
@@ -677,6 +1254,30 @@ func (s *Server) updateForwardRule(c *gin.Context) {
 	s.bumpTunnelRevision(existing.TunnelID, existing.Revision)
 	s.audit(c, actor(c), "forward_rule.update", "forward_rule", fmt.Sprint(existing.ID), "{}")
 	c.JSON(http.StatusOK, existing)
+}
+
+func (s *Server) applyForwardRulePayload(rule *models.ForwardRule, req forwardRulePayload) error {
+	rule.UserID = req.UserID
+	rule.TunnelID = req.TunnelID
+	rule.Name = strings.TrimSpace(req.Name)
+	rule.Protocol = defaultString(strings.TrimSpace(req.Protocol), "tcp")
+	rule.ListenPort = req.ListenPort
+	rule.RemoteHost = strings.TrimSpace(req.RemoteHost)
+	rule.RemotePort = req.RemotePort
+	rule.Strategy = strings.TrimSpace(req.Strategy)
+	rule.ProtocolPolicyID = req.ProtocolPolicyID
+	if req.Status != "" && contains([]string{"active", "paused", "disabled"}, req.Status) {
+		rule.Status = req.Status
+	}
+	if rule.Name == "" {
+		return errors.New("name is required")
+	}
+	if req.ProtocolPolicyID != nil && *req.ProtocolPolicyID != 0 {
+		if err := s.requireID(&models.ProtocolPolicy{}, *req.ProtocolPolicyID, "protocol policy"); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 func (s *Server) deleteForwardRule(c *gin.Context) {
@@ -891,9 +1492,10 @@ func (s *Server) createInstallToken(c *gin.Context) {
 }
 
 func (s *Server) listInstallTokens(c *gin.Context) {
-	var rows []models.InstallToken
-	s.db.Order("id desc").Find(&rows)
-	c.JSON(http.StatusOK, rows)
+	query := s.db.Model(&models.InstallToken{})
+	query = applySearch(query, c, "label")
+	query = filterUint(query, c, "device_group_id", "deviceGroupId")
+	respondPage[models.InstallToken](c, query, "id desc")
 }
 
 func (s *Server) agentRegister(c *gin.Context) {
@@ -1238,15 +1840,24 @@ func (s *Server) findNodeRule(db *gorm.DB, node models.Node, ruleID uint) (model
 }
 
 func (s *Server) listAuditLogs(c *gin.Context) {
-	var rows []models.AuditLog
-	s.db.Order("id desc").Limit(limit(c, 200)).Find(&rows)
-	c.JSON(http.StatusOK, rows)
+	query := s.db.Model(&models.AuditLog{})
+	query = applySearch(query, c, "action", "resource_type", "resource_id", "metadata_json")
+	query = filterString(query, c, "action", "action")
+	query = filterString(query, c, "resource_type", "resourceType")
+	query = filterString(query, c, "resource_id", "resourceId")
+	query = filterDateRange(query, c, "created_at")
+	respondPage[models.AuditLog](c, query, "id desc")
 }
 
 func (s *Server) listProtocolViolations(c *gin.Context) {
-	var rows []models.ProtocolViolation
-	s.db.Order("occurred_at desc").Limit(limit(c, 200)).Find(&rows)
-	c.JSON(http.StatusOK, rows)
+	query := s.db.Model(&models.ProtocolViolation{})
+	query = applySearch(query, c, "protocol", "source_ip", "action", "detail")
+	query = filterString(query, c, "action", "action")
+	query = filterString(query, c, "protocol", "protocol")
+	query = filterUint(query, c, "node_id", "nodeId")
+	query = filterUint(query, c, "rule_id", "ruleId")
+	query = filterDateRange(query, c, "occurred_at")
+	respondPage[models.ProtocolViolation](c, query, "occurred_at desc")
 }
 
 func (s *Server) deleteByID(model any) gin.HandlerFunc {

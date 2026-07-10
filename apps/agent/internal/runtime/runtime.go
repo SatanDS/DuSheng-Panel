@@ -19,11 +19,16 @@ import (
 )
 
 const (
-	defaultFirstPacketBytes = 2048
-	defaultReadTimeout      = time.Second
-	defaultFlushInterval    = 15 * time.Second
-	defaultUDPIdleTimeout   = 60 * time.Second
-	maxUDPPacketBytes       = 64 * 1024
+	defaultFirstPacketBytes      = 2048
+	defaultReadTimeout           = time.Second
+	defaultFlushInterval         = 15 * time.Second
+	defaultUDPIdleTimeout        = 60 * time.Second
+	defaultTrafficFlushSize      = 100
+	defaultMaxTrafficSamples     = 1000
+	defaultMaxTrafficBytes       = int64(1 << 40)
+	defaultMaxTrafficFailures    = 5
+	defaultMaxUDPSessionsPerRule = 4096
+	maxUDPPacketBytes            = 64 * 1024
 )
 
 type Reporter interface {
@@ -32,11 +37,15 @@ type Reporter interface {
 }
 
 type Options struct {
-	ListenHost       string
-	FirstPacketBytes int
-	ReadTimeout      time.Duration
-	FlushInterval    time.Duration
-	UDPIdleTimeout   time.Duration
+	ListenHost            string
+	FirstPacketBytes      int
+	ReadTimeout           time.Duration
+	FlushInterval         time.Duration
+	UDPIdleTimeout        time.Duration
+	MaxTrafficSamples     int
+	MaxTrafficBytes       int64
+	MaxTrafficFailures    int
+	MaxUDPSessionsPerRule int
 }
 
 type Runtime struct {
@@ -52,6 +61,14 @@ type Runtime struct {
 	lastApplyErr string
 	closed       bool
 	stopFlush    chan struct{}
+
+	acceptErrors        int64
+	dialErrors          int64
+	udpReadErrors       int64
+	udpDialErrors       int64
+	udpRejectedSessions int64
+	upstreamWriteErrors int64
+	udpCleanedSessions  int64
 }
 
 type listenerKey struct {
@@ -82,11 +99,23 @@ func New(reporter Reporter, logger *log.Logger, options Options) *Runtime {
 	if options.UDPIdleTimeout <= 0 {
 		options.UDPIdleTimeout = defaultUDPIdleTimeout
 	}
+	if options.MaxTrafficSamples <= 0 {
+		options.MaxTrafficSamples = defaultMaxTrafficSamples
+	}
+	if options.MaxTrafficBytes <= 0 {
+		options.MaxTrafficBytes = defaultMaxTrafficBytes
+	}
+	if options.MaxTrafficFailures <= 0 {
+		options.MaxTrafficFailures = defaultMaxTrafficFailures
+	}
+	if options.MaxUDPSessionsPerRule <= 0 {
+		options.MaxUDPSessionsPerRule = defaultMaxUDPSessionsPerRule
+	}
 	rt := &Runtime{
 		reporter:  reporter,
 		logger:    logger,
 		options:   options,
-		traffic:   newTrafficBuffer(reporter, logger),
+		traffic:   newTrafficBuffer(reporter, logger, options),
 		listeners: map[listenerKey]managedListener{},
 		trackers:  map[uint]*limitTracker{},
 		stopFlush: make(chan struct{}),
@@ -188,6 +217,16 @@ func (r *Runtime) Status() map[string]any {
 		"activeConnections": activeTCP + activeUDP,
 		"activeUDPSessions": activeUDP,
 		"lastApplyError":    r.lastApplyErr,
+		"trafficBuffer":     r.traffic.status(),
+		"listenerErrors": map[string]int64{
+			"accept":              atomic.LoadInt64(&r.acceptErrors),
+			"dial":                atomic.LoadInt64(&r.dialErrors),
+			"udpRead":             atomic.LoadInt64(&r.udpReadErrors),
+			"udpDial":             atomic.LoadInt64(&r.udpDialErrors),
+			"udpRejectedSessions": atomic.LoadInt64(&r.udpRejectedSessions),
+			"upstreamWrite":       atomic.LoadInt64(&r.upstreamWriteErrors),
+			"udpCleanedSessions":  atomic.LoadInt64(&r.udpCleanedSessions),
+		},
 	}
 }
 
@@ -358,6 +397,7 @@ func (l *ruleListener) acceptLoop() {
 			case <-l.stopCh:
 				return
 			default:
+				atomic.AddInt64(&l.runtime.acceptErrors, 1)
 				l.runtime.logger.Printf("runtime accept failed rule=%d: %v", l.cfg.rule.ID, err)
 				continue
 			}
@@ -398,6 +438,7 @@ func (l *ruleListener) handle(conn net.Conn) {
 
 	target, err := net.DialTimeout("tcp", net.JoinHostPort(l.cfg.rule.RemoteHost, strconv.Itoa(l.cfg.rule.RemotePort)), 10*time.Second)
 	if err != nil {
+		atomic.AddInt64(&l.runtime.dialErrors, 1)
 		l.runtime.logger.Printf("runtime dial failed rule=%d target=%s:%d: %v", l.cfg.rule.ID, l.cfg.rule.RemoteHost, l.cfg.rule.RemotePort, err)
 		return
 	}
@@ -405,6 +446,7 @@ func (l *ruleListener) handle(conn net.Conn) {
 
 	if len(firstPacket) > 0 {
 		if _, err := target.Write(firstPacket); err != nil {
+			atomic.AddInt64(&l.runtime.upstreamWriteErrors, 1)
 			return
 		}
 		l.runtime.traffic.add(l.cfg.rule.ID, int64(len(firstPacket)), 0)
@@ -414,14 +456,22 @@ func (l *ruleListener) handle(conn net.Conn) {
 	downloadLimiter := newTokenBucket(l.cfg.limit.DownloadBps)
 	errc := make(chan error, 2)
 	go func() {
-		errc <- copyWithLimit(target, conn, uploadLimiter, func(n int64) {
+		err := copyWithLimit(target, conn, uploadLimiter, func(n int64) {
 			l.runtime.traffic.add(l.cfg.rule.ID, n, 0)
 		})
+		if err != nil && !errors.Is(err, net.ErrClosed) {
+			atomic.AddInt64(&l.runtime.upstreamWriteErrors, 1)
+		}
+		errc <- err
 	}()
 	go func() {
-		errc <- copyWithLimit(conn, target, downloadLimiter, func(n int64) {
+		err := copyWithLimit(conn, target, downloadLimiter, func(n int64) {
 			l.runtime.traffic.add(l.cfg.rule.ID, 0, n)
 		})
+		if err != nil && !errors.Is(err, net.ErrClosed) {
+			atomic.AddInt64(&l.runtime.upstreamWriteErrors, 1)
+		}
+		errc <- err
 	}()
 	<-errc
 	_ = conn.Close()
@@ -562,6 +612,7 @@ func (l *udpListener) readLoop() {
 			case <-l.stopCh:
 				return
 			default:
+				atomic.AddInt64(&l.runtime.udpReadErrors, 1)
 				l.runtime.logger.Printf("runtime udp read failed rule=%d: %v", l.cfg.rule.ID, err)
 				continue
 			}
@@ -596,6 +647,12 @@ func (l *udpListener) handleDatagram(clientAddr net.Addr, packet []byte) {
 	key := clientAddr.String()
 	l.mu.Lock()
 	session := l.sessions[key]
+	if session == nil && l.runtime.options.MaxUDPSessionsPerRule > 0 && len(l.sessions) >= l.runtime.options.MaxUDPSessionsPerRule {
+		l.mu.Unlock()
+		atomic.AddInt64(&l.runtime.udpRejectedSessions, 1)
+		l.runtime.logger.Printf("runtime udp session rejected by runtime cap rule=%d client=%s", l.cfg.rule.ID, clientAddr.String())
+		return
+	}
 	l.mu.Unlock()
 	if session != nil {
 		session.forwardClientPacket(packet)
@@ -613,6 +670,7 @@ func (l *udpListener) handleDatagram(clientAddr net.Addr, packet []byte) {
 	}
 
 	if l.cfg.tracker != nil && !l.cfg.tracker.acquire(sourceIP) {
+		atomic.AddInt64(&l.runtime.udpRejectedSessions, 1)
 		l.runtime.logger.Printf("runtime udp session rejected by limit rule=%d client=%s", l.cfg.rule.ID, clientAddr.String())
 		return
 	}
@@ -621,6 +679,7 @@ func (l *udpListener) handleDatagram(clientAddr net.Addr, packet []byte) {
 		if l.cfg.tracker != nil {
 			l.cfg.tracker.release(sourceIP)
 		}
+		atomic.AddInt64(&l.runtime.udpDialErrors, 1)
 		l.runtime.logger.Printf("runtime udp dial failed rule=%d target=%s:%d: %v", l.cfg.rule.ID, l.cfg.rule.RemoteHost, l.cfg.rule.RemotePort, err)
 		return
 	}
@@ -643,6 +702,16 @@ func (l *udpListener) handleDatagram(clientAddr net.Addr, packet []byte) {
 			l.cfg.tracker.release(sourceIP)
 		}
 		existing.forwardClientPacket(packet)
+		return
+	}
+	if l.runtime.options.MaxUDPSessionsPerRule > 0 && len(l.sessions) >= l.runtime.options.MaxUDPSessionsPerRule {
+		l.mu.Unlock()
+		session.close()
+		if l.cfg.tracker != nil {
+			l.cfg.tracker.release(sourceIP)
+		}
+		atomic.AddInt64(&l.runtime.udpRejectedSessions, 1)
+		l.runtime.logger.Printf("runtime udp session rejected by runtime cap rule=%d client=%s", l.cfg.rule.ID, clientAddr.String())
 		return
 	}
 	l.sessions[key] = session
@@ -669,6 +738,9 @@ func (l *udpListener) closeIdleSessions(now time.Time) {
 		if l.cfg.tracker != nil {
 			l.cfg.tracker.release(session.sourceIP)
 		}
+	}
+	if len(stale) > 0 {
+		atomic.AddInt64(&l.runtime.udpCleanedSessions, int64(len(stale)))
 	}
 }
 
@@ -767,6 +839,7 @@ func (s *udpSession) readLoop() {
 			}
 			s.touch()
 			if writeErr != nil {
+				atomic.AddInt64(&s.listener.runtime.upstreamWriteErrors, 1)
 				s.listener.runtime.logger.Printf("runtime udp client write failed rule=%d client=%s: %v", s.listener.cfg.rule.ID, s.clientAddr.String(), writeErr)
 				return
 			}
@@ -792,6 +865,7 @@ func (s *udpSession) forwardClientPacket(packet []byte) {
 		s.listener.runtime.traffic.add(s.listener.cfg.rule.ID, int64(written), 0)
 	}
 	if err != nil {
+		atomic.AddInt64(&s.listener.runtime.upstreamWriteErrors, 1)
 		s.listener.runtime.logger.Printf("runtime udp upstream write failed rule=%d client=%s: %v", s.listener.cfg.rule.ID, s.clientAddr.String(), err)
 		s.listener.removeSession(s)
 	}
@@ -812,14 +886,29 @@ func (s *udpSession) close() {
 }
 
 type trafficBuffer struct {
-	reporter Reporter
-	logger   *log.Logger
-	mu       sync.Mutex
-	samples  map[uint]client.TrafficSample
+	reporter    Reporter
+	logger      *log.Logger
+	maxSamples  int
+	maxBytes    int64
+	maxFailures int
+
+	mu             sync.Mutex
+	samples        map[uint]client.TrafficSample
+	pendingBytes   int64
+	flushFailures  int
+	droppedSamples int64
+	droppedBytes   int64
 }
 
-func newTrafficBuffer(reporter Reporter, logger *log.Logger) *trafficBuffer {
-	return &trafficBuffer{reporter: reporter, logger: logger, samples: map[uint]client.TrafficSample{}}
+func newTrafficBuffer(reporter Reporter, logger *log.Logger, options Options) *trafficBuffer {
+	return &trafficBuffer{
+		reporter:    reporter,
+		logger:      logger,
+		maxSamples:  options.MaxTrafficSamples,
+		maxBytes:    options.MaxTrafficBytes,
+		maxFailures: options.MaxTrafficFailures,
+		samples:     map[uint]client.TrafficSample{},
+	}
 }
 
 func (b *trafficBuffer) add(ruleID uint, inBytes, outBytes int64) {
@@ -827,12 +916,29 @@ func (b *trafficBuffer) add(ruleID uint, inBytes, outBytes int64) {
 		return
 	}
 	b.mu.Lock()
+	incoming := inBytes + outBytes
+	if incoming < 0 {
+		incoming = 0
+	}
+	if _, exists := b.samples[ruleID]; !exists && b.maxSamples > 0 && len(b.samples) >= b.maxSamples {
+		b.droppedSamples++
+		b.droppedBytes += incoming
+		b.mu.Unlock()
+		return
+	}
+	if b.maxBytes > 0 && incoming > 0 && b.pendingBytes+incoming > b.maxBytes {
+		b.droppedSamples++
+		b.droppedBytes += incoming
+		b.mu.Unlock()
+		return
+	}
 	sample := b.samples[ruleID]
 	sample.RuleID = ruleID
 	sample.InBytes += inBytes
 	sample.OutBytes += outBytes
 	b.samples[ruleID] = sample
-	flushNow := len(b.samples) >= 100
+	b.pendingBytes += incoming
+	flushNow := len(b.samples) >= defaultTrafficFlushSize
 	b.mu.Unlock()
 	if flushNow {
 		go b.flush(context.Background())
@@ -849,23 +955,66 @@ func (b *trafficBuffer) flush(ctx context.Context) {
 		return
 	}
 	samples := make([]client.TrafficSample, 0, len(b.samples))
+	pendingBytes := b.pendingBytes
 	for _, sample := range b.samples {
 		samples = append(samples, sample)
 	}
 	b.samples = map[uint]client.TrafficSample{}
+	b.pendingBytes = 0
 	b.mu.Unlock()
 
 	if _, err := b.reporter.ReportTraffic(ctx, client.TrafficReport{Samples: samples}); err != nil {
 		b.logger.Printf("runtime traffic report failed: %v", err)
 		b.mu.Lock()
+		b.flushFailures++
+		if b.maxFailures > 0 && b.flushFailures >= b.maxFailures {
+			b.droppedSamples += int64(len(samples))
+			b.droppedBytes += pendingBytes
+			b.mu.Unlock()
+			return
+		}
 		for _, sample := range samples {
+			bytes := sample.InBytes + sample.OutBytes
+			if bytes < 0 {
+				bytes = 0
+			}
+			if _, exists := b.samples[sample.RuleID]; !exists && b.maxSamples > 0 && len(b.samples) >= b.maxSamples {
+				b.droppedSamples++
+				b.droppedBytes += bytes
+				continue
+			}
+			if b.maxBytes > 0 && bytes > 0 && b.pendingBytes+bytes > b.maxBytes {
+				b.droppedSamples++
+				b.droppedBytes += bytes
+				continue
+			}
 			existing := b.samples[sample.RuleID]
 			existing.RuleID = sample.RuleID
 			existing.InBytes += sample.InBytes
 			existing.OutBytes += sample.OutBytes
 			b.samples[sample.RuleID] = existing
+			b.pendingBytes += bytes
 		}
 		b.mu.Unlock()
+		return
+	}
+	b.mu.Lock()
+	b.flushFailures = 0
+	b.mu.Unlock()
+}
+
+func (b *trafficBuffer) status() map[string]any {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return map[string]any{
+		"pendingSamples": len(b.samples),
+		"pendingBytes":   b.pendingBytes,
+		"flushFailures":  b.flushFailures,
+		"droppedSamples": b.droppedSamples,
+		"droppedBytes":   b.droppedBytes,
+		"maxSamples":     b.maxSamples,
+		"maxBytes":       b.maxBytes,
+		"maxFailures":    b.maxFailures,
 	}
 }
 
