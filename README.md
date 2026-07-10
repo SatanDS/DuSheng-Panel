@@ -192,14 +192,14 @@ HTTPS_PORT=443
 ### 4. 启动面板
 
 ```bash
-docker compose -f deploy/docker-compose.yml up -d --build
+docker compose --env-file .env -f deploy/docker-compose.yml up -d --build
 ```
 
 查看状态：
 
 ```bash
-docker compose -f deploy/docker-compose.yml ps
-docker compose -f deploy/docker-compose.yml logs -f api
+docker compose --env-file .env -f deploy/docker-compose.yml ps
+docker compose --env-file .env -f deploy/docker-compose.yml logs -f api
 ```
 
 访问地址：
@@ -249,7 +249,7 @@ journalctl -u dusheng-agent -f
 ```bash
 cd /opt/dusheng-panel
 git pull
-docker compose -f deploy/docker-compose.yml up -d --build
+docker compose --env-file .env -f deploy/docker-compose.yml up -d --build
 ```
 
 ## 生产部署目标
