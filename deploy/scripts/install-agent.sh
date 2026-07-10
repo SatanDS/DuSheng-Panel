@@ -177,15 +177,30 @@ if [ ! -f "\$MARKER" ]; then
   exit 0
 fi
 
-echo "DuSheng agent uninstall marker found; cleaning local agent files."
-cd /
+echo "DuSheng agent uninstall marker found; scheduling local agent cleanup."
+CLEANUP="/tmp/${SERVICE_NAME}-cleanup.sh"
+cat > "\$CLEANUP" <<'CLEANUP_EOF'
+#!/usr/bin/env bash
+set -u
+
 systemctl disable "${SERVICE_NAME}" >/dev/null 2>&1 || true
 rm -f "/etc/systemd/system/${SERVICE_NAME}.service"
 rm -f "${CONFIG_DIR}/agent.env"
 rmdir "${CONFIG_DIR}" >/dev/null 2>&1 || true
-rm -rf "${DATA_DIR}" "${LOG_DIR}" "${INSTALL_DIR}"
+rm -rf "${DATA_DIR}" "${LOG_DIR}" "${INSTALL_DIR}" >/dev/null 2>&1 || true
 systemctl daemon-reload >/dev/null 2>&1 || true
 systemctl reset-failed "${SERVICE_NAME}" >/dev/null 2>&1 || true
+rm -f "\$0" >/dev/null 2>&1 || true
+CLEANUP_EOF
+chmod 0755 "\$CLEANUP"
+
+if command -v systemd-run >/dev/null 2>&1; then
+  if ! systemd-run --unit "${SERVICE_NAME}-cleanup" --on-active=2s /bin/bash "\$CLEANUP" >/dev/null 2>&1; then
+    nohup /bin/bash "\$CLEANUP" >/dev/null 2>&1 &
+  fi
+else
+  nohup /bin/bash "\$CLEANUP" >/dev/null 2>&1 &
+fi
 EOF
   chmod 0755 "$INSTALL_DIR/uninstall-agent.sh"
   chown root:root "$INSTALL_DIR/uninstall-agent.sh"
