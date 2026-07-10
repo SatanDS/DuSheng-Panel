@@ -163,11 +163,7 @@ async function request<T>(path: string, options: RequestOptions = {}, retry = tr
       onUnauthorized?.();
     }
 
-    throw new ApiError(
-      errorMessage(payload, `Request failed with status ${response.status}`),
-      response.status,
-      payload
-    );
+    throw new ApiError(errorMessage(payload, `请求失败，状态码 ${response.status}`), response.status, payload);
   }
 
   return payload as T;

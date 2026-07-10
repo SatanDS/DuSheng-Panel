@@ -92,17 +92,73 @@ type ReferenceKey = "users" | "tunnels" | "protocol-policies" | "device-groups" 
 
 const pageSize = 25;
 
+const valueLabels: Record<string, string> = {
+  active: "启用",
+  disabled: "禁用",
+  suspended: "暂停",
+  online: "在线",
+  offline: "离线",
+  maintenance: "维护中",
+  entry: "入口",
+  exit: "出口",
+  relay: "中继",
+  single: "单端",
+  failover: "故障切换",
+  direct: "直连",
+  tcp_udp: "TCP + UDP",
+  least_conn: "最少连接",
+  round_robin: "轮询",
+  random: "随机",
+  source_hash: "源地址哈希",
+  both: "双侧",
+  block: "阻断",
+  alert: "告警",
+  observe: "观察",
+  allow: "允许",
+  synced: "已同步",
+  unsynced: "未同步",
+  running: "运行中",
+  unknown: "未知",
+  missing: "缺失",
+  not_configured: "未配置",
+  iepl_iplc_no_tls: "IEPL/IPLC 禁止 TLS/QUIC",
+  plain_tcp_only: "仅允许明文 TCP",
+  http_only: "仅允许 HTTP",
+  block_proxy_like: "阻断代理特征",
+  custom: "自定义",
+  admin: "管理员",
+  user: "普通用户",
+  create: "创建",
+  update: "更新",
+  delete: "删除",
+  login: "登录",
+  forward_rule: "转发规则",
+  forward_rules: "转发规则",
+  node: "节点",
+  nodes: "节点",
+  device_group: "设备组",
+  device_groups: "设备组",
+  tunnel: "隧道",
+  tunnels: "隧道",
+  protocol_policy: "协议策略",
+  protocol_policies: "协议策略",
+  speed_limit: "限速策略",
+  speed_limits: "限速策略",
+  install_token: "安装令牌",
+  install_tokens: "安装令牌"
+};
+
 const navItems: { key: PageKey; label: string; icon: LucideIcon }[] = [
-  { key: "dashboard", label: "Dashboard", icon: Gauge },
-  { key: "forward-rules", label: "Forward Rules", icon: Route },
-  { key: "nodes", label: "Nodes", icon: Server },
-  { key: "device-groups", label: "Device Groups", icon: Boxes },
-  { key: "tunnels", label: "Tunnels", icon: Network },
-  { key: "protocol-policies", label: "Protocol Policies", icon: ShieldCheck },
-  { key: "speed-limits", label: "Speed Limits", icon: SlidersHorizontal },
-  { key: "violations", label: "Violations", icon: AlertTriangle },
-  { key: "audit-logs", label: "Audit Logs", icon: ScrollText },
-  { key: "users", label: "Users", icon: Users }
+  { key: "dashboard", label: "总览", icon: Gauge },
+  { key: "forward-rules", label: "转发规则", icon: Route },
+  { key: "nodes", label: "节点", icon: Server },
+  { key: "device-groups", label: "设备组", icon: Boxes },
+  { key: "tunnels", label: "隧道", icon: Network },
+  { key: "protocol-policies", label: "协议策略", icon: ShieldCheck },
+  { key: "speed-limits", label: "限速策略", icon: SlidersHorizontal },
+  { key: "violations", label: "违规事件", icon: AlertTriangle },
+  { key: "audit-logs", label: "审计日志", icon: ScrollText },
+  { key: "users", label: "用户", icon: Users }
 ];
 
 const protocolOptions = [
@@ -112,42 +168,42 @@ const protocolOptions = [
 ];
 
 const policyOptions = [
-  { value: "iepl_iplc_no_tls", label: "IEPL/IPLC no TLS/QUIC" },
-  { value: "plain_tcp_only", label: "Plain TCP only" },
-  { value: "http_only", label: "HTTP only" },
-  { value: "block_proxy_like", label: "Block proxy-like" },
-  { value: "custom", label: "Custom" }
+  { value: "iepl_iplc_no_tls", label: "IEPL/IPLC 禁止 TLS/QUIC" },
+  { value: "plain_tcp_only", label: "仅允许明文 TCP" },
+  { value: "http_only", label: "仅允许 HTTP" },
+  { value: "block_proxy_like", label: "阻断代理特征" },
+  { value: "custom", label: "自定义" }
 ];
 
 const resourceConfigs: Record<Exclude<PageKey, "dashboard" | "violations" | "audit-logs">, ResourceConfig> = {
   "forward-rules": {
     key: "forward-rules",
-    title: "Forward Rules",
-    eyebrow: "Traffic entry mapping",
+    title: "转发规则",
+    eyebrow: "入口端口与上游映射",
     endpoint: "/forward-rules",
-    createLabel: "New rule",
+    createLabel: "新建规则",
     fields: [
-      { key: "name", label: "Name", required: true },
-      { key: "userId", label: "User", type: "number", optional: true, min: 1, reference: "users" },
-      { key: "tunnelId", label: "Tunnel", type: "number", required: true, min: 1, reference: "tunnels" },
-      { key: "protocol", label: "Protocol", type: "select", options: protocolOptions, required: true },
-      { key: "listenPort", label: "Listen Port", type: "number", min: 0, max: 65535 },
-      { key: "remoteHost", label: "Remote Host", required: true },
-      { key: "remotePort", label: "Remote Port", type: "number", required: true, min: 1, max: 65535 },
+      { key: "name", label: "名称", required: true },
+      { key: "userId", label: "用户", type: "number", optional: true, min: 1, reference: "users" },
+      { key: "tunnelId", label: "隧道", type: "number", required: true, min: 1, reference: "tunnels" },
+      { key: "protocol", label: "协议", type: "select", options: protocolOptions, required: true },
+      { key: "listenPort", label: "监听端口", type: "number", min: 0, max: 65535 },
+      { key: "remoteHost", label: "上游地址", required: true },
+      { key: "remotePort", label: "上游端口", type: "number", required: true, min: 1, max: 65535 },
       {
         key: "strategy",
-        label: "Strategy",
+        label: "调度策略",
         type: "select",
         options: [
-          { value: "least_conn", label: "Least connections" },
-          { value: "round_robin", label: "Round robin" },
-          { value: "random", label: "Random" },
-          { value: "source_hash", label: "Source hash" }
+          { value: "least_conn", label: "最少连接" },
+          { value: "round_robin", label: "轮询" },
+          { value: "random", label: "随机" },
+          { value: "source_hash", label: "源地址哈希" }
         ]
       },
       {
         key: "protocolPolicyId",
-        label: "Protocol Policy",
+        label: "协议策略",
         type: "number",
         optional: true,
         min: 1,
@@ -156,79 +212,79 @@ const resourceConfigs: Record<Exclude<PageKey, "dashboard" | "violations" | "aud
     ],
     columns: [
       { key: "id", label: "ID", className: "mono" },
-      { key: "name", label: "Name" },
-      { key: "protocol", label: "Protocol", render: (row) => <Badge>{text(row.protocol)}</Badge> },
-      { key: "listenPort", label: "Listen" },
-      { key: "remoteHost", label: "Remote" },
-      { key: "remotePort", label: "Port" },
-      { key: "status", label: "Status", render: (row) => <StatusPill value={text(row.status)} /> },
-      { key: "violationCount", label: "Violations" },
-      { key: "inBytes", label: "In", render: (row) => formatBytes(row.inBytes) },
-      { key: "outBytes", label: "Out", render: (row) => formatBytes(row.outBytes) }
+      { key: "name", label: "名称" },
+      { key: "protocol", label: "协议", render: (row) => <Badge>{displayValue(row.protocol)}</Badge> },
+      { key: "listenPort", label: "监听" },
+      { key: "remoteHost", label: "上游" },
+      { key: "remotePort", label: "端口" },
+      { key: "status", label: "状态", render: (row) => <StatusPill value={text(row.status)} /> },
+      { key: "violationCount", label: "违规" },
+      { key: "inBytes", label: "入站", render: (row) => formatBytes(row.inBytes) },
+      { key: "outBytes", label: "出站", render: (row) => formatBytes(row.outBytes) }
     ]
   },
   nodes: {
     key: "nodes",
-    title: "Nodes",
-    eyebrow: "Agent inventory",
+    title: "节点",
+    eyebrow: "Agent 节点清单",
     endpoint: "/nodes",
-    createLabel: "Nodes register with install tokens",
+    createLabel: "节点通过安装令牌注册",
     disableCreate: true,
     fields: [
-      { key: "deviceGroupId", label: "Device Group", type: "number", required: true, min: 1, reference: "device-groups" },
-      { key: "name", label: "Name", required: true },
+      { key: "deviceGroupId", label: "设备组", type: "number", required: true, min: 1, reference: "device-groups" },
+      { key: "name", label: "名称", required: true },
       {
         key: "status",
-        label: "Status",
+        label: "状态",
         type: "select",
         options: [
-          { value: "online", label: "Online" },
-          { value: "offline", label: "Offline" },
-          { value: "disabled", label: "Disabled" },
-          { value: "maintenance", label: "Maintenance" }
+          { value: "online", label: "在线" },
+          { value: "offline", label: "离线" },
+          { value: "disabled", label: "已禁用" },
+          { value: "maintenance", label: "维护中" }
         ]
       },
-      { key: "connectHost", label: "Connect Host" }
+      { key: "connectHost", label: "连接地址" }
     ],
     columns: [
       { key: "id", label: "ID", className: "mono" },
-      { key: "name", label: "Name" },
-      { key: "deviceGroupId", label: "Group" },
-      { key: "status", label: "Status", render: (row) => <StatusPill value={text(row.status)} /> },
-      { key: "publicIp", label: "Public IP" },
-      { key: "connectHost", label: "Connect Host" },
-      { key: "version", label: "Version" },
-      { key: "sync", label: "Sync", render: renderNodeSync },
+      { key: "name", label: "名称" },
+      { key: "deviceGroupId", label: "组" },
+      { key: "status", label: "状态", render: (row) => <StatusPill value={text(row.status)} /> },
+      { key: "publicIp", label: "公网 IP" },
+      { key: "connectHost", label: "连接地址" },
+      { key: "version", label: "版本" },
+      { key: "sync", label: "同步", render: renderNodeSync },
       { key: "systemJson", label: "Agent", render: renderNodeHealth },
-      { key: "lastSeenAt", label: "Last Seen", render: (row) => formatDate(row.lastSeenAt) }
+      { key: "lastSeenAt", label: "最后心跳", render: (row) => formatDate(row.lastSeenAt) }
     ]
   },
   "device-groups": {
     key: "device-groups",
-    title: "Device Groups",
-    eyebrow: "Entry and exit pools",
+    title: "设备组",
+    eyebrow: "入口、出口与中继池",
     endpoint: "/device-groups",
-    createLabel: "New group",
+    createLabel: "新建设备组",
     fields: [
-      { key: "name", label: "Name", required: true },
+      { key: "name", label: "名称", required: true },
       {
         key: "role",
-        label: "Role",
+        label: "角色",
         type: "select",
         options: [
-          { value: "entry", label: "Entry" },
-          { value: "exit", label: "Exit" },
-          { value: "relay", label: "Relay" }
+          { value: "entry", label: "入口" },
+          { value: "exit", label: "出口" },
+          { value: "relay", label: "中继" }
         ],
         required: true
       },
-      { key: "bindIPs", label: "Bind IPs" },
-      { key: "portStart", label: "Port Start", type: "number", min: 0, max: 65535 },
-      { key: "portEnd", label: "Port End", type: "number", min: 0, max: 65535 },
-      { key: "trafficRatio", label: "Traffic Ratio", type: "number", min: 0, step: 0.1 },
+      { key: "bindIPs", label: "绑定 IP" },
+      { key: "portStart", label: "起始端口", type: "number", min: 0, max: 65535 },
+      { key: "portEnd", label: "结束端口", type: "number", min: 0, max: 65535 },
+      { key: "trafficRatio", label: "流量倍率", type: "number", min: 0, step: 0.1 },
       {
         key: "protocolPolicyId",
-        label: "Protocol Policy",
+        label: "协议策略",
         type: "number",
         optional: true,
         min: 1,
@@ -236,52 +292,52 @@ const resourceConfigs: Record<Exclude<PageKey, "dashboard" | "violations" | "aud
       },
       {
         key: "failoverGroupId",
-        label: "Failover Group",
+        label: "故障切换组",
         type: "number",
         optional: true,
         min: 1,
         reference: "device-groups"
       },
-      { key: "advancedJson", label: "Advanced JSON", type: "textarea", rows: 4, fullWidth: true }
+      { key: "advancedJson", label: "高级 JSON", type: "textarea", rows: 4, fullWidth: true }
     ],
     columns: [
       { key: "id", label: "ID", className: "mono" },
-      { key: "name", label: "Name" },
-      { key: "role", label: "Role", render: (row) => <Badge>{text(row.role)}</Badge> },
-      { key: "bindIPs", label: "Bind IPs" },
-      { key: "portStart", label: "Start" },
-      { key: "portEnd", label: "End" },
-      { key: "trafficRatio", label: "Ratio" },
-      { key: "protocolPolicyId", label: "Policy" },
-      { key: "updatedAt", label: "Updated", render: (row) => formatDate(row.updatedAt) }
+      { key: "name", label: "名称" },
+      { key: "role", label: "角色", render: (row) => <Badge>{displayValue(row.role)}</Badge> },
+      { key: "bindIPs", label: "绑定 IP" },
+      { key: "portStart", label: "起始" },
+      { key: "portEnd", label: "结束" },
+      { key: "trafficRatio", label: "倍率" },
+      { key: "protocolPolicyId", label: "策略" },
+      { key: "updatedAt", label: "更新于", render: (row) => formatDate(row.updatedAt) }
     ]
   },
   tunnels: {
     key: "tunnels",
-    title: "Tunnels",
-    eyebrow: "Path and accounting control",
+    title: "隧道",
+    eyebrow: "链路路径与计费控制",
     endpoint: "/tunnels",
-    createLabel: "New tunnel",
+    createLabel: "新建隧道",
     fields: [
-      { key: "name", label: "Name", required: true },
+      { key: "name", label: "名称", required: true },
       {
         key: "mode",
-        label: "Mode",
+        label: "模式",
         type: "select",
         options: [
-          { value: "single", label: "Single" },
-          { value: "relay", label: "Relay" },
-          { value: "failover", label: "Failover" }
+          { value: "single", label: "单端" },
+          { value: "relay", label: "中继" },
+          { value: "failover", label: "故障切换" }
         ]
       },
-      { key: "entryGroupId", label: "Entry Group", type: "number", required: true, min: 1, reference: "device-groups" },
-      { key: "exitGroupId", label: "Exit Group", type: "number", optional: true, min: 1, reference: "device-groups" },
+      { key: "entryGroupId", label: "入口组", type: "number", required: true, min: 1, reference: "device-groups" },
+      { key: "exitGroupId", label: "出口组", type: "number", optional: true, min: 1, reference: "device-groups" },
       {
         key: "protocol",
-        label: "Protocol",
+        label: "协议",
         type: "select",
         options: [
-          { value: "direct", label: "Direct" },
+          { value: "direct", label: "直连" },
           { value: "tcp", label: "TCP" },
           { value: "tls", label: "TLS" },
           { value: "ws", label: "WebSocket" },
@@ -291,146 +347,146 @@ const resourceConfigs: Record<Exclude<PageKey, "dashboard" | "violations" | "aud
       },
       {
         key: "flowAccounting",
-        label: "Flow Accounting",
+        label: "流量计费",
         type: "select",
         options: [
-          { value: "single", label: "Single side" },
-          { value: "entry", label: "Entry side" },
-          { value: "exit", label: "Exit side" },
-          { value: "both", label: "Both sides" }
+          { value: "single", label: "单侧" },
+          { value: "entry", label: "入口侧" },
+          { value: "exit", label: "出口侧" },
+          { value: "both", label: "双侧" }
         ]
       },
-      { key: "entryTrafficRatio", label: "Entry Ratio", type: "number", min: 0, step: 0.1 },
-      { key: "exitTrafficRatio", label: "Exit Ratio", type: "number", min: 0, step: 0.1 },
+      { key: "entryTrafficRatio", label: "入口倍率", type: "number", min: 0, step: 0.1 },
+      { key: "exitTrafficRatio", label: "出口倍率", type: "number", min: 0, step: 0.1 },
       {
         key: "protocolPolicyId",
-        label: "Protocol Policy",
+        label: "协议策略",
         type: "number",
         optional: true,
         min: 1,
         reference: "protocol-policies"
       },
-      { key: "advancedJson", label: "Advanced JSON", type: "textarea", rows: 4, fullWidth: true }
+      { key: "advancedJson", label: "高级 JSON", type: "textarea", rows: 4, fullWidth: true }
     ],
     columns: [
       { key: "id", label: "ID", className: "mono" },
-      { key: "name", label: "Name" },
-      { key: "mode", label: "Mode", render: (row) => <Badge>{text(row.mode)}</Badge> },
-      { key: "entryGroupId", label: "Entry" },
-      { key: "exitGroupId", label: "Exit" },
-      { key: "protocol", label: "Protocol" },
-      { key: "flowAccounting", label: "Accounting" },
-      { key: "protocolPolicyId", label: "Policy" },
-      { key: "updatedAt", label: "Updated", render: (row) => formatDate(row.updatedAt) }
+      { key: "name", label: "名称" },
+      { key: "mode", label: "模式", render: (row) => <Badge>{displayValue(row.mode)}</Badge> },
+      { key: "entryGroupId", label: "入口" },
+      { key: "exitGroupId", label: "出口" },
+      { key: "protocol", label: "协议", render: (row) => displayValue(row.protocol) },
+      { key: "flowAccounting", label: "计费" },
+      { key: "protocolPolicyId", label: "策略" },
+      { key: "updatedAt", label: "更新于", render: (row) => formatDate(row.updatedAt) }
     ]
   },
   "protocol-policies": {
     key: "protocol-policies",
-    title: "Protocol Policies",
-    eyebrow: "Detection and enforcement",
+    title: "协议策略",
+    eyebrow: "首包检测与执行动作",
     endpoint: "/protocol-policies",
-    createLabel: "New policy",
+    createLabel: "新建策略",
     fields: [
-      { key: "name", label: "Name", required: true },
-      { key: "template", label: "Template", type: "select", options: policyOptions, required: true },
+      { key: "name", label: "名称", required: true },
+      { key: "template", label: "模板", type: "select", options: policyOptions, required: true },
       {
         key: "mode",
-        label: "Mode",
+        label: "动作",
         type: "select",
         options: [
-          { value: "block", label: "Block" },
-          { value: "alert", label: "Alert" },
-          { value: "observe", label: "Observe" }
+          { value: "block", label: "阻断" },
+          { value: "alert", label: "告警" },
+          { value: "observe", label: "观察" }
         ]
       },
-      { key: "blockTls", label: "Block TLS", type: "checkbox" },
-      { key: "blockQuic", label: "Block QUIC", type: "checkbox" },
-      { key: "allowPlainTcpOnly", label: "Plain TCP only", type: "checkbox" },
-      { key: "allowHttpOnly", label: "HTTP only", type: "checkbox" },
-      { key: "blockProxyLike", label: "Block proxy-like", type: "checkbox" },
-      { key: "blockEncryptedTunnel", label: "Block encrypted tunnel", type: "checkbox" },
-      { key: "description", label: "Description", type: "textarea", rows: 5, fullWidth: true }
+      { key: "blockTls", label: "阻断 TLS", type: "checkbox" },
+      { key: "blockQuic", label: "阻断 QUIC", type: "checkbox" },
+      { key: "allowPlainTcpOnly", label: "仅允许明文 TCP", type: "checkbox" },
+      { key: "allowHttpOnly", label: "仅允许 HTTP", type: "checkbox" },
+      { key: "blockProxyLike", label: "阻断代理特征", type: "checkbox" },
+      { key: "blockEncryptedTunnel", label: "阻断加密隧道", type: "checkbox" },
+      { key: "description", label: "说明", type: "textarea", rows: 5, fullWidth: true }
     ],
     columns: [
       { key: "id", label: "ID", className: "mono" },
-      { key: "name", label: "Name" },
-      { key: "template", label: "Template", render: (row) => <Badge>{text(row.template)}</Badge> },
-      { key: "mode", label: "Mode", render: (row) => <StatusPill value={text(row.mode)} /> },
-      { key: "flags", label: "Controls", render: renderPolicyFlags },
-      { key: "updatedAt", label: "Updated", render: (row) => formatDate(row.updatedAt) }
+      { key: "name", label: "名称" },
+      { key: "template", label: "模板", render: (row) => <Badge>{displayValue(row.template)}</Badge> },
+      { key: "mode", label: "动作", render: (row) => <StatusPill value={text(row.mode)} /> },
+      { key: "flags", label: "控制项", render: renderPolicyFlags },
+      { key: "updatedAt", label: "更新于", render: (row) => formatDate(row.updatedAt) }
     ]
   },
   "speed-limits": {
     key: "speed-limits",
-    title: "Speed Limits",
-    eyebrow: "Bandwidth and connection caps",
+    title: "限速策略",
+    eyebrow: "带宽、连接数与 IP 限制",
     endpoint: "/speed-limits",
-    createLabel: "New limit",
+    createLabel: "新建限速",
     fields: [
-      { key: "name", label: "Name", required: true },
-      { key: "userId", label: "User", type: "number", optional: true, min: 1, reference: "users" },
-      { key: "tunnelId", label: "Tunnel", type: "number", optional: true, min: 1, reference: "tunnels" },
-      { key: "ruleId", label: "Forward Rule", type: "number", optional: true, min: 1, reference: "forward-rules" },
-      { key: "uploadBps", label: "Upload Bps", type: "number", min: 0 },
-      { key: "downloadBps", label: "Download Bps", type: "number", min: 0 },
-      { key: "maxConns", label: "Max Connections", type: "number", min: 0 },
-      { key: "maxIps", label: "Max IPs", type: "number", min: 0 }
+      { key: "name", label: "名称", required: true },
+      { key: "userId", label: "用户", type: "number", optional: true, min: 1, reference: "users" },
+      { key: "tunnelId", label: "隧道", type: "number", optional: true, min: 1, reference: "tunnels" },
+      { key: "ruleId", label: "转发规则", type: "number", optional: true, min: 1, reference: "forward-rules" },
+      { key: "uploadBps", label: "上传 Bps", type: "number", min: 0 },
+      { key: "downloadBps", label: "下载 Bps", type: "number", min: 0 },
+      { key: "maxConns", label: "最大连接数", type: "number", min: 0 },
+      { key: "maxIps", label: "最大 IP 数", type: "number", min: 0 }
     ],
     columns: [
       { key: "id", label: "ID", className: "mono" },
-      { key: "name", label: "Name" },
-      { key: "userId", label: "User" },
-      { key: "tunnelId", label: "Tunnel" },
-      { key: "ruleId", label: "Rule" },
-      { key: "uploadBps", label: "Up", render: (row) => formatBps(row.uploadBps) },
-      { key: "downloadBps", label: "Down", render: (row) => formatBps(row.downloadBps) },
-      { key: "maxConns", label: "Conns" },
-      { key: "maxIps", label: "IPs" }
+      { key: "name", label: "名称" },
+      { key: "userId", label: "用户" },
+      { key: "tunnelId", label: "隧道" },
+      { key: "ruleId", label: "规则" },
+      { key: "uploadBps", label: "上行", render: (row) => formatBps(row.uploadBps) },
+      { key: "downloadBps", label: "下行", render: (row) => formatBps(row.downloadBps) },
+      { key: "maxConns", label: "连接" },
+      { key: "maxIps", label: "IP" }
     ]
   },
   users: {
     key: "users",
-    title: "Users",
-    eyebrow: "Accounts and quotas",
+    title: "用户",
+    eyebrow: "账号、配额与到期时间",
     endpoint: "/users",
-    createLabel: "New user",
+    createLabel: "新建用户",
     fields: [
-      { key: "username", label: "Username", required: true },
-      { key: "displayName", label: "Display Name" },
-      { key: "password", label: "Password", type: "password", requiredOnCreate: true, placeholder: "Leave blank on edit" },
+      { key: "username", label: "用户名", required: true },
+      { key: "displayName", label: "显示名称" },
+      { key: "password", label: "密码", type: "password", requiredOnCreate: true, placeholder: "编辑时留空则不修改" },
       {
         key: "role",
-        label: "Role",
+        label: "角色",
         type: "select",
         options: [
-          { value: "admin", label: "Admin" },
-          { value: "user", label: "User" }
+          { value: "admin", label: "管理员" },
+          { value: "user", label: "普通用户" }
         ]
       },
       {
         key: "status",
-        label: "Status",
+        label: "状态",
         type: "select",
         options: [
-          { value: "active", label: "Active" },
-          { value: "disabled", label: "Disabled" },
-          { value: "suspended", label: "Suspended" }
+          { value: "active", label: "启用" },
+          { value: "disabled", label: "禁用" },
+          { value: "suspended", label: "暂停" }
         ]
       },
-      { key: "flowLimitBytes", label: "Flow Limit Bytes", type: "number", min: 0 },
-      { key: "forwardLimit", label: "Forward Limit", type: "number", min: 0 },
-      { key: "expiresAt", label: "Expires At", type: "datetime-local", optional: true }
+      { key: "flowLimitBytes", label: "流量上限 Bytes", type: "number", min: 0 },
+      { key: "forwardLimit", label: "规则数量上限", type: "number", min: 0 },
+      { key: "expiresAt", label: "到期时间", type: "datetime-local", optional: true }
     ],
     columns: [
       { key: "id", label: "ID", className: "mono" },
-      { key: "username", label: "Username" },
-      { key: "displayName", label: "Display" },
-      { key: "role", label: "Role", render: (row) => <Badge>{text(row.role)}</Badge> },
-      { key: "status", label: "Status", render: (row) => <StatusPill value={text(row.status)} /> },
-      { key: "usedBytes", label: "Used", render: (row) => formatBytes(row.usedBytes) },
-      { key: "flowLimitBytes", label: "Limit", render: (row) => formatBytes(row.flowLimitBytes) },
-      { key: "forwardLimit", label: "Rules" },
-      { key: "expiresAt", label: "Expires", render: (row) => formatDate(row.expiresAt) }
+      { key: "username", label: "用户名" },
+      { key: "displayName", label: "显示名" },
+      { key: "role", label: "角色", render: (row) => <Badge>{displayValue(row.role)}</Badge> },
+      { key: "status", label: "状态", render: (row) => <StatusPill value={text(row.status)} /> },
+      { key: "usedBytes", label: "已用", render: (row) => formatBytes(row.usedBytes) },
+      { key: "flowLimitBytes", label: "上限", render: (row) => formatBytes(row.flowLimitBytes) },
+      { key: "forwardLimit", label: "规则数" },
+      { key: "expiresAt", label: "到期", render: (row) => formatDate(row.expiresAt) }
     ]
   }
 };
@@ -465,12 +521,12 @@ export default function App() {
         <div className="brand">
           <div className="brand-mark">DS</div>
           <div>
-            <strong>DuSheng Panel</strong>
-            <span>Operations Console</span>
+            <strong>DuSheng 转发面板</strong>
+            <span>节点与规则控制台</span>
           </div>
         </div>
 
-        <nav className="nav-list" aria-label="Primary">
+        <nav className="nav-list" aria-label="主导航">
           {navItems.map((item) => {
             const Icon = item.icon;
             return (
@@ -494,14 +550,14 @@ export default function App() {
             <h1>{pageTitle(activePage)}</h1>
           </div>
           <div className="topbar-actions">
-            <button className="icon-button" title="Refresh" onClick={() => setRefreshSeed((seed) => seed + 1)}>
+            <button className="icon-button" title="刷新" onClick={() => setRefreshSeed((seed) => seed + 1)}>
               <RefreshCw size={16} />
             </button>
             <div className="user-chip">
               <span>{session.user.displayName || session.user.username}</span>
-              <small>{session.user.role}</small>
+              <small>{displayValue(session.user.role)}</small>
             </div>
-            <button className="icon-button danger" title="Logout" onClick={logout}>
+            <button className="icon-button danger" title="退出登录" onClick={logout}>
               <LogOut size={16} />
             </button>
           </div>
@@ -529,7 +585,7 @@ function LoginPage({ onLogin }: { onLogin: (session: Session) => void }) {
       saveSession(response);
       onLogin(response);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Login failed");
+      setError(err instanceof Error ? err.message : "登录失败");
     } finally {
       setLoading(false);
     }
@@ -541,17 +597,17 @@ function LoginPage({ onLogin }: { onLogin: (session: Session) => void }) {
         <div className="brand login-brand">
           <div className="brand-mark">DS</div>
           <div>
-            <strong>DuSheng Panel</strong>
-            <span>Operations Console</span>
+            <strong>DuSheng 转发面板</strong>
+            <span>节点与规则控制台</span>
           </div>
         </div>
 
         <label>
-          Username
+          用户名
           <input autoFocus value={username} onChange={(event) => setUsername(event.target.value)} required />
         </label>
         <label>
-          Password
+          密码
           <input
             type="password"
             value={password}
@@ -564,7 +620,7 @@ function LoginPage({ onLogin }: { onLogin: (session: Session) => void }) {
 
         <button className="primary-action" type="submit" disabled={loading}>
           <KeyRound size={16} />
-          {loading ? "Signing in" : "Sign in"}
+          {loading ? "正在登录" : "登录"}
         </button>
       </form>
     </main>
@@ -623,7 +679,7 @@ function Dashboard({ refreshSeed }: { refreshSeed: number }) {
         }
       } catch (err) {
         if (alive) {
-          setError(err instanceof Error ? err.message : "Dashboard request failed");
+          setError(err instanceof Error ? err.message : "总览请求失败");
         }
       } finally {
         if (alive) {
@@ -639,7 +695,7 @@ function Dashboard({ refreshSeed }: { refreshSeed: number }) {
   }, [refreshSeed]);
 
   if (loading && !payload) {
-    return <StateBlock tone="loading" title="Loading dashboard" />;
+    return <StateBlock tone="loading" title="正在加载总览" />;
   }
 
   if (error && !payload) {
@@ -647,11 +703,11 @@ function Dashboard({ refreshSeed }: { refreshSeed: number }) {
   }
 
   const stats = [
-    { label: "Users", value: payload?.users ?? 0 },
-    { label: "Nodes Online", value: `${payload?.onlineNodes ?? 0}/${payload?.nodes ?? 0}` },
-    { label: "Forward Rules", value: payload?.forwardRules ?? 0 },
-    { label: "Traffic Today", value: formatBytes(payload?.todayBytes ?? 0) },
-    { label: "Violations 24h", value: payload?.violations24h ?? 0 }
+    { label: "用户数", value: payload?.users ?? 0 },
+    { label: "在线节点", value: `${payload?.onlineNodes ?? 0}/${payload?.nodes ?? 0}` },
+    { label: "转发规则", value: payload?.forwardRules ?? 0 },
+    { label: "今日流量", value: formatBytes(payload?.todayBytes ?? 0) },
+    { label: "24 小时违规", value: payload?.violations24h ?? 0 }
   ];
 
   return (
@@ -669,30 +725,30 @@ function Dashboard({ refreshSeed }: { refreshSeed: number }) {
 
       <div className="split-grid">
         <section className="panel">
-          <PanelHeader title="Recent Rules" icon={Route} />
+          <PanelHeader title="最近规则" icon={Route} />
           <DataTable
             rows={payload?.recentRules ?? []}
             columns={[
               { key: "id", label: "ID", className: "mono" },
-              { key: "name", label: "Name" },
-              { key: "protocol", label: "Protocol", render: (row) => <Badge>{text(row.protocol)}</Badge> },
-              { key: "listenPort", label: "Listen" },
-              { key: "status", label: "Status", render: (row) => <StatusPill value={text(row.status)} /> },
-              { key: "updatedAt", label: "Updated", render: (row) => formatDate(row.updatedAt) }
+              { key: "name", label: "名称" },
+              { key: "protocol", label: "协议", render: (row) => <Badge>{displayValue(row.protocol)}</Badge> },
+              { key: "listenPort", label: "监听" },
+              { key: "status", label: "状态", render: (row) => <StatusPill value={text(row.status)} /> },
+              { key: "updatedAt", label: "更新于", render: (row) => formatDate(row.updatedAt) }
             ]}
           />
         </section>
 
         <section className="panel">
-          <PanelHeader title="Recent Violations" icon={AlertTriangle} />
+          <PanelHeader title="最近违规" icon={AlertTriangle} />
           <DataTable
             rows={payload?.recentViolations ?? []}
             columns={[
-              { key: "occurredAt", label: "Time", render: (row) => formatDate(row.occurredAt) },
-              { key: "protocol", label: "Protocol", render: (row) => <Badge>{text(row.protocol)}</Badge> },
-              { key: "action", label: "Action", render: (row) => <StatusPill value={text(row.action)} /> },
-              { key: "sourceIp", label: "Source" },
-              { key: "ruleId", label: "Rule" }
+              { key: "occurredAt", label: "时间", render: (row) => formatDate(row.occurredAt) },
+              { key: "protocol", label: "协议", render: (row) => <Badge>{displayValue(row.protocol)}</Badge> },
+              { key: "action", label: "动作", render: (row) => <StatusPill value={text(row.action)} /> },
+              { key: "sourceIp", label: "来源" },
+              { key: "ruleId", label: "规则" }
             ]}
           />
         </section>
@@ -722,7 +778,7 @@ function ResourcePage({ config, refreshSeed }: { config: ResourceConfig; refresh
       setRows(Array.isArray(data) ? data : []);
       setPage(1);
     } catch (err) {
-      setError(err instanceof Error ? err.message : `${config.title} request failed`);
+      setError(err instanceof Error ? err.message : `${config.title}请求失败`);
     } finally {
       setLoading(false);
     }
@@ -790,16 +846,16 @@ function ResourcePage({ config, refreshSeed }: { config: ResourceConfig; refresh
       const payload = payloadFromDraft(config.fields, draft);
       if (editingId === null) {
         await api.post<Entity>(config.endpoint, payload);
-        setNotice(`${config.title} created`);
+        setNotice(`${config.title}已创建`);
       } else {
         await api.put<Entity>(`${config.endpoint}/${editingId}`, payload);
-        setNotice(`${config.title} #${editingId} updated`);
+        setNotice(`${config.title} #${editingId} 已更新`);
       }
 
       resetDraft();
       setReloadSeed((seed) => seed + 1);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Save failed");
+      setError(err instanceof Error ? err.message : "保存失败");
     } finally {
       setSaving(false);
     }
@@ -810,7 +866,7 @@ function ResourcePage({ config, refreshSeed }: { config: ResourceConfig; refresh
       return;
     }
 
-    if (!window.confirm(`Delete ${config.title} #${row.id}?`)) {
+    if (!window.confirm(`确认删除${config.title} #${row.id}？`)) {
       return;
     }
 
@@ -820,11 +876,11 @@ function ResourcePage({ config, refreshSeed }: { config: ResourceConfig; refresh
 
     try {
       await api.delete<void>(`${config.endpoint}/${row.id}`);
-      setNotice(`${config.title} #${row.id} deleted`);
+      setNotice(`${config.title} #${row.id} 已删除`);
       resetDraft();
       setReloadSeed((seed) => seed + 1);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Delete failed");
+      setError(err instanceof Error ? err.message : "删除失败");
     } finally {
       setSaving(false);
     }
@@ -854,14 +910,14 @@ function ResourcePage({ config, refreshSeed }: { config: ResourceConfig; refresh
         </div>
         <button className="ghost-action" onClick={() => setReloadSeed((seed) => seed + 1)} disabled={loading}>
           <RefreshCw size={15} />
-          Refresh
+          刷新
         </button>
       </section>
 
       <section className="table-toolbar">
         <input
-          aria-label={`Search ${config.title}`}
-          placeholder="Search records"
+          aria-label={`搜索${config.title}`}
+          placeholder="搜索记录"
           value={query}
           onChange={(event) => {
             setQuery(event.target.value);
@@ -876,9 +932,9 @@ function ResourcePage({ config, refreshSeed }: { config: ResourceConfig; refresh
 
       <div className="resource-grid">
         <section className="panel table-panel">
-          <PanelHeader title="Records" icon={Activity} meta={`${filteredRows.length}/${rows.length} rows`} />
+          <PanelHeader title="记录列表" icon={Activity} meta={`${filteredRows.length}/${rows.length} 条`} />
           {loading ? (
-            <StateBlock tone="loading" title="Loading records" />
+            <StateBlock tone="loading" title="正在加载记录" />
           ) : (
             <DataTable
               rows={visibleRows}
@@ -887,11 +943,11 @@ function ResourcePage({ config, refreshSeed }: { config: ResourceConfig; refresh
               selectedId={editingId}
               actions={(row) => (
                 <div className="row-actions">
-                  <button className="icon-button small" title="Edit" onClick={() => editRow(row)}>
+                  <button className="icon-button small" title="编辑" onClick={() => editRow(row)}>
                     <Pencil size={14} />
                   </button>
                   {!config.disableDelete ? (
-                    <button className="icon-button small danger" title="Delete" onClick={() => void deleteRow(row)}>
+                    <button className="icon-button small danger" title="删除" onClick={() => void deleteRow(row)}>
                       <Trash2 size={14} />
                     </button>
                   ) : null}
@@ -903,9 +959,9 @@ function ResourcePage({ config, refreshSeed }: { config: ResourceConfig; refresh
 
         <section className="panel form-panel">
           <PanelHeader
-            title={editingId === null ? config.createLabel : `Edit #${editingId}`}
+            title={editingId === null ? config.createLabel : `编辑 #${editingId}`}
             icon={editingId === null ? Plus : Pencil}
-            meta={config.disableCreate && editingId === null ? "Select a row" : undefined}
+            meta={config.disableCreate && editingId === null ? "请选择一条记录" : undefined}
           />
           <form className="resource-form" onSubmit={submit}>
             {config.fields.map((field) => (
@@ -927,11 +983,11 @@ function ResourcePage({ config, refreshSeed }: { config: ResourceConfig; refresh
                 disabled={saving || (Boolean(config.disableCreate) && editingId === null)}
               >
                 <Save size={15} />
-                {saving ? "Saving" : "Save"}
+                {saving ? "保存中" : "保存"}
               </button>
               <button className="ghost-action" type="button" onClick={resetDraft} disabled={saving}>
                 <X size={15} />
-                Clear
+                清空
               </button>
             </div>
           </form>
@@ -958,7 +1014,7 @@ function InstallTokensPanel({ refreshSeed }: { refreshSeed: number }) {
       const data = await api.get<InstallToken[]>("/install-tokens");
       setTokens(Array.isArray(data) ? data : []);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Install token request failed");
+      setError(err instanceof Error ? err.message : "安装令牌请求失败");
     } finally {
       setLoading(false);
     }
@@ -986,7 +1042,7 @@ function InstallTokensPanel({ refreshSeed }: { refreshSeed: number }) {
       setTtlHours("24");
       await load();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Install token create failed");
+      setError(err instanceof Error ? err.message : "安装令牌创建失败");
     } finally {
       setSaving(false);
     }
@@ -998,22 +1054,22 @@ function InstallTokensPanel({ refreshSeed }: { refreshSeed: number }) {
 
   return (
     <section className="panel">
-      <PanelHeader title="Install Tokens" icon={KeyRound} meta={`${tokens.length} issued`} />
+      <PanelHeader title="安装令牌" icon={KeyRound} meta={`已签发 ${tokens.length} 个`} />
       {error ? <div className="notice error">{error}</div> : null}
       {created ? (
         <div className="token-output">
           <div>
-            <span>Token</span>
+            <span>令牌</span>
             <code>{created.token}</code>
             <button className="ghost-action small-action" onClick={() => void copy(created.token)}>
-              Copy
+              复制
             </button>
           </div>
           <div>
-            <span>Command</span>
+            <span>安装命令</span>
             <code>{created.command}</code>
             <button className="ghost-action small-action" onClick={() => void copy(created.command)}>
-              Copy
+              复制
             </button>
           </div>
         </div>
@@ -1022,11 +1078,11 @@ function InstallTokensPanel({ refreshSeed }: { refreshSeed: number }) {
       <div className="install-grid">
         <form className="inline-form" onSubmit={submit}>
           <label>
-            Label
+            标签
             <input value={label} onChange={(event) => setLabel(event.target.value)} />
           </label>
           <label>
-            Device Group ID
+            设备组 ID
             <input
               type="number"
               min={1}
@@ -1036,7 +1092,7 @@ function InstallTokensPanel({ refreshSeed }: { refreshSeed: number }) {
             />
           </label>
           <label>
-            TTL Hours
+            有效期（小时）
             <input
               type="number"
               min={1}
@@ -1047,21 +1103,21 @@ function InstallTokensPanel({ refreshSeed }: { refreshSeed: number }) {
           </label>
           <button className="primary-action" disabled={saving}>
             <Plus size={15} />
-            Issue
+            签发
           </button>
         </form>
 
         {loading ? (
-          <StateBlock tone="loading" title="Loading tokens" />
+          <StateBlock tone="loading" title="正在加载令牌" />
         ) : (
           <DataTable
             rows={tokens}
             columns={[
               { key: "id", label: "ID", className: "mono" },
-              { key: "label", label: "Label" },
-              { key: "deviceGroupId", label: "Group" },
-              { key: "expiresAt", label: "Expires", render: (row) => formatDate(row.expiresAt) },
-              { key: "usedAt", label: "Used", render: (row) => formatDate(row.usedAt) }
+              { key: "label", label: "标签" },
+              { key: "deviceGroupId", label: "设备组" },
+              { key: "expiresAt", label: "到期", render: (row) => formatDate(row.expiresAt) },
+              { key: "usedAt", label: "使用时间", render: (row) => formatDate(row.usedAt) }
             ]}
           />
         )}
@@ -1092,7 +1148,7 @@ function ViolationsPage({ refreshSeed }: { refreshSeed: number }) {
         return data.find((row) => row.id === current.id) ?? data[0] ?? null;
       });
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Protocol violations request failed");
+      setError(err instanceof Error ? err.message : "协议违规请求失败");
     } finally {
       setLoading(false);
     }
@@ -1113,12 +1169,12 @@ function ViolationsPage({ refreshSeed }: { refreshSeed: number }) {
     <div className="stack">
       <section className="section-heading">
         <div>
-          <p>Protocol enforcement</p>
-          <h2>Violations</h2>
+          <p>协议执行</p>
+          <h2>违规事件</h2>
         </div>
         <button className="ghost-action" onClick={() => void load()} disabled={loading}>
           <RefreshCw size={15} />
-          Refresh
+          刷新
         </button>
       </section>
 
@@ -1126,8 +1182,8 @@ function ViolationsPage({ refreshSeed }: { refreshSeed: number }) {
 
       <section className="table-toolbar">
         <input
-          aria-label="Search protocol violations"
-          placeholder="Search violations"
+          aria-label="搜索协议违规"
+          placeholder="搜索违规事件"
           value={query}
           onChange={(event) => {
             setQuery(event.target.value);
@@ -1139,81 +1195,81 @@ function ViolationsPage({ refreshSeed }: { refreshSeed: number }) {
 
       <div className="metric-grid compact">
         <div className="metric">
-          <span>Total</span>
+          <span>总数</span>
           <strong>{rows.length}</strong>
         </div>
         <div className="metric">
-          <span>Blocked</span>
+          <span>已阻断</span>
           <strong>{blocked}</strong>
         </div>
         <div className="metric">
-          <span>Protocols</span>
+          <span>协议数</span>
           <strong>{uniqueProtocols}</strong>
         </div>
       </div>
 
       <div className="resource-grid">
         <section className="panel table-panel">
-          <PanelHeader title="Events" icon={AlertTriangle} meta={`${filteredRows.length}/${rows.length} latest`} />
+          <PanelHeader title="事件列表" icon={AlertTriangle} meta={`${filteredRows.length}/${rows.length} 条`} />
           {loading ? (
-            <StateBlock tone="loading" title="Loading violations" />
+            <StateBlock tone="loading" title="正在加载违规事件" />
           ) : (
             <DataTable
               rows={visibleRows}
               selectedId={selected?.id ?? null}
               onRowClick={(row) => setSelected(row as ProtocolViolation)}
               columns={[
-                { key: "occurredAt", label: "Occurred", render: (row) => formatDate(row.occurredAt) },
-                { key: "action", label: "Action", render: (row) => <StatusPill value={text(row.action)} /> },
-                { key: "protocol", label: "Protocol", render: (row) => <Badge>{text(row.protocol)}</Badge> },
-                { key: "sourceIp", label: "Source IP" },
-                { key: "ruleId", label: "Rule" },
-                { key: "nodeId", label: "Node" },
-                { key: "policyId", label: "Policy" }
+                { key: "occurredAt", label: "发生时间", render: (row) => formatDate(row.occurredAt) },
+                { key: "action", label: "动作", render: (row) => <StatusPill value={text(row.action)} /> },
+                { key: "protocol", label: "协议", render: (row) => <Badge>{displayValue(row.protocol)}</Badge> },
+                { key: "sourceIp", label: "来源 IP" },
+                { key: "ruleId", label: "规则" },
+                { key: "nodeId", label: "节点" },
+                { key: "policyId", label: "策略" }
               ]}
             />
           )}
         </section>
 
         <section className="panel detail-panel">
-          <PanelHeader title="Event Detail" icon={Activity} />
+          <PanelHeader title="事件详情" icon={Activity} />
           {selected ? (
             <dl className="detail-list">
               <div>
-                <dt>Event ID</dt>
+                <dt>事件 ID</dt>
                 <dd>{selected.id}</dd>
               </div>
               <div>
-                <dt>Occurred</dt>
+                <dt>发生时间</dt>
                 <dd>{formatDate(selected.occurredAt)}</dd>
               </div>
               <div>
-                <dt>Action</dt>
+                <dt>动作</dt>
                 <dd>
                   <StatusPill value={selected.action} />
                 </dd>
               </div>
               <div>
-                <dt>Protocol</dt>
-                <dd>{selected.protocol || "-"}</dd>
+                <dt>协议</dt>
+                <dd>{displayValue(selected.protocol)}</dd>
               </div>
               <div>
-                <dt>Source IP</dt>
+                <dt>来源 IP</dt>
                 <dd>{selected.sourceIp || "-"}</dd>
               </div>
               <div>
-                <dt>Rule / Node / Policy</dt>
+                <dt>规则 / 节点 / 策略</dt>
                 <dd>
                   {selected.ruleId} / {selected.nodeId} / {selected.policyId}
                 </dd>
               </div>
               <div className="full">
-                <dt>Detail</dt>
+                <dt>详情</dt>
                 <dd className="prewrap">{selected.detail || "-"}</dd>
               </div>
             </dl>
           ) : (
-            <StateBlock tone="empty" title="No violation selected" />
+            <StateBlock tone="empty" title="请选择一条违规事件" />
           )}
         </section>
       </div>
@@ -1236,7 +1292,7 @@ function AuditLogsPage({ refreshSeed }: { refreshSeed: number }) {
       setRows(Array.isArray(data) ? data : []);
       setPage(1);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Audit log request failed");
+      setError(err instanceof Error ? err.message : "审计日志请求失败");
     } finally {
       setLoading(false);
     }
@@ -1255,19 +1311,19 @@ function AuditLogsPage({ refreshSeed }: { refreshSeed: number }) {
     <div className="stack">
       <section className="section-heading">
         <div>
-          <p>Administrative activity</p>
-          <h2>Audit Logs</h2>
+          <p>管理活动</p>
+          <h2>审计日志</h2>
         </div>
         <button className="ghost-action" onClick={() => void load()} disabled={loading}>
           <RefreshCw size={15} />
-          Refresh
+          刷新
         </button>
       </section>
 
       <section className="table-toolbar">
         <input
-          aria-label="Search audit logs"
-          placeholder="Search logs"
+          aria-label="搜索审计日志"
+          placeholder="搜索日志"
           value={query}
           onChange={(event) => {
             setQuery(event.target.value);
@@ -1280,19 +1336,19 @@ function AuditLogsPage({ refreshSeed }: { refreshSeed: number }) {
       {error ? <div className="notice error">{error}</div> : null}
 
       <section className="panel table-panel">
-        <PanelHeader title="Events" icon={ScrollText} meta={`${filteredRows.length}/${rows.length} rows`} />
+        <PanelHeader title="事件列表" icon={ScrollText} meta={`${filteredRows.length}/${rows.length} 条`} />
         {loading ? (
-          <StateBlock tone="loading" title="Loading audit logs" />
+          <StateBlock tone="loading" title="正在加载审计日志" />
         ) : (
           <DataTable
             rows={visibleRows}
             columns={[
-              { key: "createdAt", label: "Time", render: (row) => formatDate(row.createdAt) },
-              { key: "actorId", label: "Actor" },
-              { key: "action", label: "Action", render: (row) => <Badge>{text(row.action)}</Badge> },
-              { key: "resourceType", label: "Resource" },
+              { key: "createdAt", label: "时间", render: (row) => formatDate(row.createdAt) },
+              { key: "actorId", label: "操作者" },
+              { key: "action", label: "动作", render: (row) => <Badge>{displayValue(row.action)}</Badge> },
+              { key: "resourceType", label: "资源", render: (row) => displayValue(row.resourceType) },
               { key: "resourceId", label: "ID", className: "mono" },
-              { key: "metadataJson", label: "Metadata" }
+              { key: "metadataJson", label: "元数据" }
             ]}
           />
         )}
@@ -1325,9 +1381,9 @@ function ForwardRuleTools() {
       link.download = `dusheng-forward-rules-${new Date().toISOString().slice(0, 10)}.json`;
       link.click();
       URL.revokeObjectURL(url);
-      setNotice(`Exported ${rules.length} rules`);
+      setNotice(`已导出 ${rules.length} 条规则`);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Export failed");
+      setError(err instanceof Error ? err.message : "导出失败");
     } finally {
       setBusy(false);
     }
@@ -1344,14 +1400,14 @@ function ForwardRuleTools() {
       const bundle = JSON.parse(await file.text()) as { rules?: Entity[] };
       const rules = Array.isArray(bundle.rules) ? bundle.rules : [];
       if (rules.length === 0) {
-        throw new Error("No rules found in import bundle");
+        throw new Error("导入文件中没有找到规则");
       }
       for (const rule of rules) {
         await api.post<Entity>("/forward-rules", importRulePayload(rule));
       }
-      setNotice(`Imported ${rules.length} rules`);
+      setNotice(`已导入 ${rules.length} 条规则`);
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Import failed");
+      setError(err instanceof Error ? err.message : "导入失败");
     } finally {
       setBusy(false);
     }
@@ -1359,17 +1415,17 @@ function ForwardRuleTools() {
 
   return (
     <section className="panel tool-panel">
-      <PanelHeader title="Import / Export" icon={Route} />
+      <PanelHeader title="导入 / 导出" icon={Route} />
       {error ? <div className="notice error">{error}</div> : null}
       {notice ? <div className="notice success">{notice}</div> : null}
       <div className="tool-actions">
         <button className="ghost-action" type="button" disabled={busy} onClick={() => void exportRules()}>
           <Download size={15} />
-          Export JSON
+          导出 JSON
         </button>
         <label className="file-action">
           <Upload size={15} />
-          Import JSON
+          导入 JSON
           <input
             type="file"
             accept="application/json,.json"
@@ -1394,7 +1450,7 @@ function PaginationControls({
   return (
     <div className="pagination">
       <button className="ghost-action small-action" type="button" disabled={page <= 1} onClick={() => onPage(page - 1)}>
-        Prev
+        上一页
       </button>
       <span>
         {page} / {pageCount}
@@ -1405,7 +1461,7 @@ function PaginationControls({
         disabled={page >= pageCount}
         onClick={() => onPage(page + 1)}
       >
-        Next
+        下一页
       </button>
     </div>
   );
@@ -1425,7 +1481,7 @@ function DataTable({
   actions?: (row: Entity) => ReactNode;
 }) {
   if (rows.length === 0) {
-    return <StateBlock tone="empty" title="No records" />;
+    return <StateBlock tone="empty" title="暂无记录" />;
   }
 
   return (
@@ -1436,7 +1492,7 @@ function DataTable({
             {columns.map((column) => (
               <th key={column.key}>{column.label}</th>
             ))}
-            {actions ? <th className="actions-col">Actions</th> : null}
+            {actions ? <th className="actions-col">操作</th> : null}
           </tr>
         </thead>
         <tbody>
@@ -1513,7 +1569,7 @@ function FieldControl({
           disabled={disabled}
           onChange={(event) => onChange(event.target.value)}
         >
-          <option value="">Unset</option>
+          <option value="">未设置</option>
           {field.options?.map((option) => (
             <option key={option.value} value={option.value}>
               {option.label}
@@ -1535,7 +1591,7 @@ function FieldControl({
           disabled={disabled}
           onChange={(event) => onChange(event.target.value)}
         >
-          <option value="">{field.optional ? "Unset" : "Select"}</option>
+          <option value="">{field.optional ? "未设置" : "请选择"}</option>
           {referenced.map((option) => (
             <option key={option.value} value={option.value}>
               {option.label}
@@ -1608,6 +1664,11 @@ function StatusPill({ value }: { value: string }) {
     normalized.includes("online") ||
     normalized.includes("active") ||
     normalized.includes("allow") ||
+    normalized.includes("在线") ||
+    normalized.includes("启用") ||
+    normalized.includes("允许") ||
+    normalized.includes("已同步") ||
+    normalized.includes("运行中") ||
     normalized === "synced" ||
     normalized === "running" ||
     normalized.startsWith("runtime ")
@@ -1615,30 +1676,38 @@ function StatusPill({ value }: { value: string }) {
       : normalized.includes("block") ||
           normalized.includes("violation") ||
           normalized.includes("disabled") ||
-          normalized.includes("suspended")
+          normalized.includes("suspended") ||
+          normalized.includes("阻断") ||
+          normalized.includes("违规") ||
+          normalized.includes("禁用") ||
+          normalized.includes("暂停")
         ? "bad"
         : normalized.includes("unsynced") ||
             normalized.includes("alert") ||
             normalized.includes("missing") ||
-            normalized.includes("not_configured")
+            normalized.includes("not_configured") ||
+            normalized.includes("未同步") ||
+            normalized.includes("告警") ||
+            normalized.includes("缺失") ||
+            normalized.includes("未配置")
           ? "warn"
           : "neutral";
 
-  return <span className={`status-pill ${tone}`}>{value || "-"}</span>;
+  return <span className={`status-pill ${tone}`}>{displayValue(value)}</span>;
 }
 
 function renderPolicyFlags(row: Entity) {
   const flags = [
     ["TLS", row.blockTls],
     ["QUIC", row.blockQuic],
-    ["Plain TCP", row.allowPlainTcpOnly],
-    ["HTTP", row.allowHttpOnly],
-    ["Proxy-like", row.blockProxyLike],
-    ["Encrypted tunnel", row.blockEncryptedTunnel]
+    ["仅明文 TCP", row.allowPlainTcpOnly],
+    ["仅 HTTP", row.allowHttpOnly],
+    ["代理特征", row.blockProxyLike],
+    ["加密隧道", row.blockEncryptedTunnel]
   ].filter(([, enabled]) => Boolean(enabled));
 
   if (flags.length === 0) {
-    return <span className="muted">None</span>;
+    return <span className="muted">无</span>;
   }
 
   return (
@@ -1654,29 +1723,29 @@ function renderNodeSync(row: Entity) {
   const applied = Number(row.appliedRevision ?? 0);
   const desired = Number(row.desiredRevision ?? 0);
   const synced = applied >= desired;
-  return <StatusPill value={synced ? "synced" : `unsynced ${applied}/${desired}`} />;
+  return <StatusPill value={synced ? "synced" : `未同步 ${applied}/${desired}`} />;
 }
 
 function renderNodeHealth(row: Entity) {
   const system = parseSystem(row.systemJson);
   const runtimeStatus = system?.runtime && typeof system.runtime === "object" ? (system.runtime as Record<string, unknown>) : null;
   const status = runtimeStatus?.running
-    ? `runtime ${runtimeStatus.listeners ?? 0}/${runtimeStatus.activeConnections ?? 0}`
+    ? `运行中 ${runtimeStatus.listeners ?? 0}/${runtimeStatus.activeConnections ?? 0}`
     : text(system?.gostStatus ?? (system?.gostActive ? "running" : "unknown"));
   return <StatusPill value={status} />;
 }
 
 function pageTitle(activePage: PageKey) {
   if (activePage === "dashboard") {
-    return "Operational Overview";
+    return "运营总览";
   }
 
   if (activePage === "violations") {
-    return "Protocol Alerts";
+    return "协议告警";
   }
 
   if (activePage === "audit-logs") {
-    return "Administrative Activity";
+    return "管理审计";
   }
 
   return resourceConfigs[activePage].eyebrow;
@@ -1791,12 +1860,29 @@ function text(value: unknown) {
   return String(value);
 }
 
-function formatCell(value: unknown) {
-  if (typeof value === "boolean") {
-    return value ? "Yes" : "No";
+function displayValue(value: unknown) {
+  const raw = text(value);
+  if (raw === "-") {
+    return raw;
   }
 
-  return text(value);
+  const normalized = raw.toLowerCase();
+  if (normalized.startsWith("runtime ")) {
+    return `运行中 ${raw.slice("runtime ".length)}`;
+  }
+  if (normalized.startsWith("unsynced ")) {
+    return `未同步 ${raw.slice("unsynced ".length)}`;
+  }
+
+  return valueLabels[normalized] ?? valueLabels[raw] ?? raw;
+}
+
+function formatCell(value: unknown) {
+  if (typeof value === "boolean") {
+    return value ? "是" : "否";
+  }
+
+  return displayValue(value);
 }
 
 function formatBytes(value: unknown) {
@@ -1829,7 +1915,7 @@ function formatDate(value: unknown) {
     return String(value);
   }
 
-  return new Intl.DateTimeFormat(undefined, {
+  return new Intl.DateTimeFormat("zh-CN", {
     month: "2-digit",
     day: "2-digit",
     hour: "2-digit",
