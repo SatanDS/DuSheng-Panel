@@ -210,6 +210,8 @@ cat > "\$CLEANUP" <<'CLEANUP_EOF'
 set -u
 
 systemctl disable "${SERVICE_NAME}" >/dev/null 2>&1 || true
+systemctl stop "${SERVICE_NAME}" >/dev/null 2>&1 || true
+systemctl stop "${DPI_SERVICE_NAME}" >/dev/null 2>&1 || true
 systemctl disable "${DPI_SERVICE_NAME}" >/dev/null 2>&1 || true
 rm -f "/etc/systemd/system/${SERVICE_NAME}.service"
 rm -f "/etc/systemd/system/${DPI_SERVICE_NAME}.service"
@@ -218,6 +220,7 @@ rmdir "${CONFIG_DIR}" >/dev/null 2>&1 || true
 rm -rf "${DATA_DIR}" "${LOG_DIR}" "${INSTALL_DIR}" >/dev/null 2>&1 || true
 systemctl daemon-reload >/dev/null 2>&1 || true
 systemctl reset-failed "${SERVICE_NAME}" >/dev/null 2>&1 || true
+systemctl reset-failed "${DPI_SERVICE_NAME}" >/dev/null 2>&1 || true
 rm -f "\$0" >/dev/null 2>&1 || true
 CLEANUP_EOF
 chmod 0755 "\$CLEANUP"
