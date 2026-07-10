@@ -64,6 +64,8 @@ func dialector(databaseURL string) (gorm.Dialector, error) {
 		return sqlite.Dialector{DriverName: "sqlite", DSN: path}, nil
 	case strings.HasPrefix(databaseURL, "postgres://"), strings.HasPrefix(databaseURL, "postgresql://"):
 		return postgres.Open(databaseURL), nil
+	case strings.Contains(databaseURL, "host=") && strings.Contains(databaseURL, "dbname="):
+		return postgres.Open(databaseURL), nil
 	case strings.HasPrefix(databaseURL, "mysql://"):
 		return mysql.Open(strings.TrimPrefix(databaseURL, "mysql://")), nil
 	default:

@@ -22,7 +22,7 @@ services:
     restart: unless-stopped
     environment:
       DUSHENG_LISTEN: 0.0.0.0:18888
-      DUSHENG_DATABASE_URL: postgres://${POSTGRES_USER:-dusheng}:${POSTGRES_PASSWORD:-change-me-dusheng}@postgres:5432/${POSTGRES_DB:-dusheng}?sslmode=disable
+      DUSHENG_DATABASE_URL: host=postgres user=${POSTGRES_USER:-dusheng} password=${POSTGRES_PASSWORD:-change-me-dusheng} dbname=${POSTGRES_DB:-dusheng} port=5432 sslmode=disable TimeZone=Asia/Taipei
       DUSHENG_ENV: ${DUSHENG_ENV:-production}
       DUSHENG_JWT_SECRET: ${DUSHENG_JWT_SECRET:-change-me-in-production}
       DUSHENG_ADMIN_USERNAME: ${DUSHENG_ADMIN_USERNAME:-admin_user}
