@@ -96,6 +96,8 @@ const valueLabels: Record<string, string> = {
   active: "启用",
   disabled: "禁用",
   suspended: "暂停",
+  uninstalling: "卸载中",
+  uninstall_failed: "卸载失败",
   online: "在线",
   offline: "离线",
   maintenance: "维护中",
@@ -241,7 +243,9 @@ const resourceConfigs: Record<Exclude<PageKey, "dashboard" | "violations" | "aud
           { value: "online", label: "在线" },
           { value: "offline", label: "离线" },
           { value: "disabled", label: "已禁用" },
-          { value: "maintenance", label: "维护中" }
+          { value: "maintenance", label: "维护中" },
+          { value: "uninstalling", label: "卸载中" },
+          { value: "uninstall_failed", label: "卸载失败" }
         ]
       },
       { key: "connectHost", label: "连接地址" }
@@ -876,7 +880,7 @@ function ResourcePage({ config, refreshSeed }: { config: ResourceConfig; refresh
 
     try {
       await api.delete<void>(`${config.endpoint}/${row.id}`);
-      setNotice(`${config.title} #${row.id} 已删除`);
+      setNotice(config.key === "nodes" ? `节点 #${row.id} 卸载指令已下发` : `${config.title} #${row.id} 已删除`);
       resetDraft();
       setReloadSeed((seed) => seed + 1);
     } catch (err) {
@@ -1680,7 +1684,8 @@ function StatusPill({ value }: { value: string }) {
           normalized.includes("阻断") ||
           normalized.includes("违规") ||
           normalized.includes("禁用") ||
-          normalized.includes("暂停")
+          normalized.includes("暂停") ||
+          normalized.includes("卸载失败")
         ? "bad"
         : normalized.includes("unsynced") ||
             normalized.includes("alert") ||
@@ -1689,7 +1694,8 @@ function StatusPill({ value }: { value: string }) {
             normalized.includes("未同步") ||
             normalized.includes("告警") ||
             normalized.includes("缺失") ||
-            normalized.includes("未配置")
+            normalized.includes("未配置") ||
+            normalized.includes("卸载中")
           ? "warn"
           : "neutral";
 

@@ -41,18 +41,21 @@ type DeviceGroup struct {
 
 type Node struct {
 	BaseModel
-	DeviceGroupID   uint       `gorm:"index;not null" json:"deviceGroupId"`
-	Name            string     `gorm:"size:120;not null" json:"name"`
-	UUID            string     `gorm:"uniqueIndex;size:80;not null" json:"uuid"`
-	TokenHash       string     `gorm:"index;size:128;not null" json:"-"`
-	Status          string     `gorm:"size:20;not null;default:offline" json:"status"`
-	Version         string     `gorm:"size:80" json:"version"`
-	PublicIP        string     `gorm:"size:80" json:"publicIp"`
-	ConnectHost     string     `gorm:"size:160" json:"connectHost"`
-	LastSeenAt      *time.Time `json:"lastSeenAt"`
-	SystemJSON      string     `gorm:"type:text" json:"systemJson"`
-	AppliedRevision int64      `json:"appliedRevision"`
-	DesiredRevision int64      `json:"desiredRevision"`
+	DeviceGroupID        uint       `gorm:"index;not null" json:"deviceGroupId"`
+	Name                 string     `gorm:"size:120;not null" json:"name"`
+	UUID                 string     `gorm:"uniqueIndex;size:80;not null" json:"uuid"`
+	TokenHash            string     `gorm:"index;size:128;not null" json:"-"`
+	Status               string     `gorm:"size:20;not null;default:offline" json:"status"`
+	Version              string     `gorm:"size:80" json:"version"`
+	PublicIP             string     `gorm:"size:80" json:"publicIp"`
+	ConnectHost          string     `gorm:"size:160" json:"connectHost"`
+	LastSeenAt           *time.Time `json:"lastSeenAt"`
+	SystemJSON           string     `gorm:"type:text" json:"systemJson"`
+	AppliedRevision      int64      `json:"appliedRevision"`
+	DesiredRevision      int64      `json:"desiredRevision"`
+	UninstallRequestedAt *time.Time `json:"uninstallRequestedAt"`
+	UninstallConfirmedAt *time.Time `json:"uninstallConfirmedAt"`
+	UninstallCommandID   string     `gorm:"size:120" json:"uninstallCommandId"`
 }
 
 type Tunnel struct {

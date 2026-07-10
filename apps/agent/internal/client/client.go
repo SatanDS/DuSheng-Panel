@@ -61,6 +61,19 @@ type HeartbeatRequest struct {
 type HeartbeatResponse struct {
 	DesiredRevision int64     `json:"desiredRevision"`
 	ServerTime      time.Time `json:"serverTime"`
+	Command         *Command  `json:"command,omitempty"`
+}
+
+type Command struct {
+	ID          string    `json:"id"`
+	Action      string    `json:"action"`
+	Reason      string    `json:"reason,omitempty"`
+	RequestedAt time.Time `json:"requestedAt,omitempty"`
+}
+
+type CommandAck struct {
+	Status  string `json:"status"`
+	Message string `json:"message,omitempty"`
 }
 
 type AgentConfig struct {
@@ -261,6 +274,10 @@ func (c *Client) ReportViolation(ctx context.Context, req ViolationReport) (Prot
 		return ProtocolViolation{}, err
 	}
 	return resp, nil
+}
+
+func (c *Client) AckCommand(ctx context.Context, id string, req CommandAck) error {
+	return c.doJSON(ctx, http.MethodPost, "/agent/commands/"+id+"/ack", req, nil, true)
 }
 
 func (c *Client) doJSON(ctx context.Context, method, path string, input, output any, authenticated bool) error {

@@ -83,6 +83,12 @@ HTTPS_PORT=7443
 
 TCP/UDP 转发链路由 agent 直接计量流量，并定时批量上报 `/agent/traffic`。限速、最大连接数和最大 IP 数也在 agent runtime 内执行；UDP v1 按 clientAddr 维护 session，支持 QUIC 首包检测、阻断/告警、计量、限速和空闲清理。`gost` transport adapter 会在后续阶段补齐。
 
+## 节点卸载
+
+在面板「节点」页删除节点时，API 会先把节点标记为 `uninstalling`，并通过下一次 agent 心跳下发 `uninstall` 命令。新版 agent 收到命令后会写入本机卸载标记、回执 API，然后退出；systemd 的 root 权限 `ExecStopPost` 清理器会禁用服务并删除 `/opt/dusheng-agent`、`/etc/dusheng/agent.env`、`/var/lib/dusheng-agent`、`/var/log/dusheng-agent` 等本机文件。API 收到回执后会删除面板里的节点记录。
+
+已安装的旧节点如果没有新版 systemd 清理器，需要重新执行安装命令或升级 agent 后，才能支持面板侧同步卸载。
+
 ## 本地生成 Agent Release 二进制
 
 节点安装脚本默认会从 GitHub Release 下载以下文件：

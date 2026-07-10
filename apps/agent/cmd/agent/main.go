@@ -2,10 +2,12 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"flag"
 	"log"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"runtime"
 	"strings"
 	"syscall"
@@ -75,8 +77,13 @@ func main() {
 	if err := syncer.SyncOnce(ctx); err != nil {
 		logger.Printf("initial config sync failed: %v", err)
 	}
-	if err := sendHeartbeat(ctx, api, syncer, gost, strings.TrimSpace(*gostPath), logger); err != nil {
+	if command, err := sendHeartbeat(ctx, api, syncer, gost, strings.TrimSpace(*gostPath), logger); err != nil {
 		logger.Printf("initial heartbeat failed: %v", err)
+	} else if shouldExit, err := handleCommand(ctx, api, command, *dataDir, logger); err != nil {
+		logger.Printf("handle command failed: %v", err)
+	} else if shouldExit {
+		shutdown(rt, gost, logger)
+		return
 	}
 
 	configTicker := time.NewTicker(30 * time.Second)
@@ -87,29 +94,32 @@ func main() {
 	for {
 		select {
 		case <-ctx.Done():
-			shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-			defer cancel()
-			if err := rt.Stop(shutdownCtx); err != nil {
-				logger.Printf("stop runtime: %v", err)
-			}
-			if err := gost.Stop(shutdownCtx); err != nil {
-				logger.Printf("stop gost: %v", err)
-			}
-			logger.Printf("agent stopped")
+			shutdown(rt, gost, logger)
 			return
 		case <-configTicker.C:
 			if err := syncer.SyncOnce(ctx); err != nil {
 				logger.Printf("config sync failed: %v", err)
 			}
 		case <-heartbeatTicker.C:
-			if err := sendHeartbeat(ctx, api, syncer, gost, strings.TrimSpace(*gostPath), logger); err != nil {
+			command, err := sendHeartbeat(ctx, api, syncer, gost, strings.TrimSpace(*gostPath), logger)
+			if err != nil {
 				logger.Printf("heartbeat failed: %v", err)
+				continue
+			}
+			shouldExit, err := handleCommand(ctx, api, command, *dataDir, logger)
+			if err != nil {
+				logger.Printf("handle command failed: %v", err)
+				continue
+			}
+			if shouldExit {
+				shutdown(rt, gost, logger)
+				return
 			}
 		}
 	}
 }
 
-func sendHeartbeat(ctx context.Context, api *client.Client, syncer *configsync.Syncer, gost *supervisor.Supervisor, gostPath string, logger *log.Logger) error {
+func sendHeartbeat(ctx context.Context, api *client.Client, syncer *configsync.Syncer, gost *supervisor.Supervisor, gostPath string, logger *log.Logger) (*client.Command, error) {
 	host, _ := os.Hostname()
 	runtimeStatus := syncer.RuntimeStatus()
 	resp, err := api.Heartbeat(ctx, client.HeartbeatRequest{
@@ -130,10 +140,59 @@ func sendHeartbeat(ctx context.Context, api *client.Client, syncer *configsync.S
 		},
 	})
 	if err != nil {
-		return err
+		return nil, err
 	}
 	logger.Printf("heartbeat ok desiredRevision=%d", resp.DesiredRevision)
-	return nil
+	return resp.Command, nil
+}
+
+func handleCommand(ctx context.Context, api *client.Client, command *client.Command, dataDir string, logger *log.Logger) (bool, error) {
+	if command == nil {
+		return false, nil
+	}
+	action := strings.ToLower(strings.TrimSpace(command.Action))
+	if action != "uninstall" {
+		logger.Printf("ignoring unknown command id=%s action=%s", command.ID, command.Action)
+		return false, nil
+	}
+	if strings.TrimSpace(command.ID) == "" {
+		return false, nil
+	}
+	if err := os.MkdirAll(dataDir, 0o700); err != nil {
+		return false, err
+	}
+	marker := filepath.Join(dataDir, "uninstall-requested")
+	content, err := json.MarshalIndent(map[string]any{
+		"id":          command.ID,
+		"action":      command.Action,
+		"reason":      command.Reason,
+		"requestedAt": command.RequestedAt,
+		"markedAt":    time.Now().UTC(),
+	}, "", "  ")
+	if err != nil {
+		return false, err
+	}
+	content = append(content, '\n')
+	if err := os.WriteFile(marker, content, 0o600); err != nil {
+		return false, err
+	}
+	if err := api.AckCommand(ctx, command.ID, client.CommandAck{Status: "accepted", Message: "uninstall marker written"}); err != nil {
+		return false, err
+	}
+	logger.Printf("uninstall command accepted id=%s marker=%s", command.ID, marker)
+	return true, nil
+}
+
+func shutdown(rt *agentruntime.Runtime, gost *supervisor.Supervisor, logger *log.Logger) {
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	if err := rt.Stop(shutdownCtx); err != nil {
+		logger.Printf("stop runtime: %v", err)
+	}
+	if err := gost.Stop(shutdownCtx); err != nil {
+		logger.Printf("stop gost: %v", err)
+	}
+	logger.Printf("agent stopped")
 }
 
 func firstEnv(keys ...string) string {

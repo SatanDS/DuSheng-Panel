@@ -163,6 +163,28 @@ EOF
   chown root:"$AGENT_USER" "$CONFIG_DIR/agent.env"
 }
 
+write_uninstall_helper() {
+  cat > "$INSTALL_DIR/uninstall-agent.sh" <<EOF
+#!/usr/bin/env bash
+set -euo pipefail
+
+MARKER="${DATA_DIR}/uninstall-requested"
+if [ ! -f "\$MARKER" ]; then
+  exit 0
+fi
+
+echo "DuSheng agent uninstall marker found; cleaning local agent files."
+systemctl disable "${SERVICE_NAME}" >/dev/null 2>&1 || true
+rm -f "/etc/systemd/system/${SERVICE_NAME}.service"
+rm -f "${CONFIG_DIR}/agent.env"
+rmdir "${CONFIG_DIR}" >/dev/null 2>&1 || true
+rm -rf "${DATA_DIR}" "${LOG_DIR}" "${INSTALL_DIR}"
+systemctl daemon-reload >/dev/null 2>&1 || true
+EOF
+  chmod 0755 "$INSTALL_DIR/uninstall-agent.sh"
+  chown root:root "$INSTALL_DIR/uninstall-agent.sh"
+}
+
 write_service() {
   cat > "/etc/systemd/system/${SERVICE_NAME}.service" <<EOF
 [Unit]
@@ -181,6 +203,7 @@ Environment=DUSHENG_GOST_PATH=${GOST_BIN}
 Environment=DUSHENG_GOST_BIN=${GOST_BIN}
 EnvironmentFile=-${CONFIG_DIR}/agent.env
 ExecStart=${INSTALL_DIR}/dusheng-agent -base-url \${DUSHENG_API_URL} -install-token \${DUSHENG_INSTALL_TOKEN} -data-dir \${DUSHENG_DATA_DIR} -gost-path \${DUSHENG_GOST_PATH}
+ExecStopPost=+/bin/bash ${INSTALL_DIR}/uninstall-agent.sh
 Restart=always
 RestartSec=3
 LimitNOFILE=1048576
@@ -190,7 +213,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=true
-ReadWritePaths=${DATA_DIR} ${LOG_DIR} ${INSTALL_DIR}
+ReadWritePaths=${DATA_DIR} ${LOG_DIR} ${INSTALL_DIR} ${CONFIG_DIR} /etc/systemd/system
 
 [Install]
 WantedBy=multi-user.target
@@ -210,6 +233,7 @@ main() {
   install_agent_binary "$arch"
   install_gost_binary
   write_env_file
+  write_uninstall_helper
   write_service
 
   systemctl daemon-reload

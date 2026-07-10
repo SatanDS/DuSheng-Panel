@@ -51,6 +51,7 @@ func NewServer(cfg config.Config, db *gorm.DB) *gin.Engine {
 	agent.GET("/config", s.agentConfig)
 	agent.POST("/traffic", s.agentTraffic)
 	agent.POST("/violations", s.agentViolation)
+	agent.POST("/commands/:id/ack", s.agentCommandAck)
 
 	protected := api.Group("", s.userAuth())
 	protected.GET("/me", s.me)
@@ -71,7 +72,7 @@ func NewServer(cfg config.Config, db *gorm.DB) *gin.Engine {
 	registerCRUD[models.SpeedLimit](admin, "/speed-limits", s.db, s.afterSpeedLimitChange)
 	admin.GET("/nodes", s.listNodes)
 	admin.PUT("/nodes/:id", s.updateNode)
-	admin.DELETE("/nodes/:id", s.deleteByID(&models.Node{}))
+	admin.DELETE("/nodes/:id", s.requestNodeUninstall)
 	admin.POST("/install-tokens", s.createInstallToken)
 	admin.GET("/install-tokens", s.listInstallTokens)
 	admin.GET("/audit-logs", s.listAuditLogs)
@@ -447,6 +448,29 @@ func (s *Server) updateNode(c *gin.Context) {
 	}
 	s.audit(c, actor(c), "node.update", "node", fmt.Sprint(node.ID), "{}")
 	c.JSON(http.StatusOK, node)
+}
+
+func (s *Server) requestNodeUninstall(c *gin.Context) {
+	var node models.Node
+	if err := s.db.First(&node, c.Param("id")).Error; err != nil {
+		notFound(c)
+		return
+	}
+	now := time.Now().UTC()
+	if node.UninstallCommandID == "" {
+		node.UninstallCommandID = fmt.Sprintf("uninstall-%d-%d", node.ID, now.UnixNano())
+	}
+	node.Status = "uninstalling"
+	node.DesiredRevision = now.UnixNano()
+	node.UninstallRequestedAt = &now
+	node.UninstallConfirmedAt = nil
+	if err := s.db.Save(&node).Error; err != nil {
+		fail(c, err)
+		return
+	}
+	metadata, _ := json.Marshal(map[string]any{"commandId": node.UninstallCommandID})
+	s.audit(c, actor(c), "node.uninstall.request", "node", fmt.Sprint(node.ID), string(metadata))
+	c.JSON(http.StatusAccepted, node)
 }
 
 type crudAfter[T any] func(*gin.Context, *gorm.DB, *T, string)
@@ -936,7 +960,9 @@ func (s *Server) agentHeartbeat(c *gin.Context) {
 	}
 	systemJSON, _ := json.Marshal(req.System)
 	now := time.Now()
-	node.Status = "online"
+	if node.Status != "uninstalling" {
+		node.Status = "online"
+	}
 	node.Version = req.Version
 	node.PublicIP = req.PublicIP
 	node.ConnectHost = req.ConnectHost
@@ -947,7 +973,23 @@ func (s *Server) agentHeartbeat(c *gin.Context) {
 		fail(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"desiredRevision": node.DesiredRevision, "serverTime": now.UTC()})
+	response := gin.H{"desiredRevision": node.DesiredRevision, "serverTime": now.UTC()}
+	if command := uninstallCommand(node); command != nil {
+		response["command"] = command
+	}
+	c.JSON(http.StatusOK, response)
+}
+
+func uninstallCommand(node models.Node) gin.H {
+	if node.Status != "uninstalling" || node.UninstallCommandID == "" || node.UninstallRequestedAt == nil {
+		return nil
+	}
+	return gin.H{
+		"id":          node.UninstallCommandID,
+		"action":      "uninstall",
+		"reason":      "node deleted from panel",
+		"requestedAt": node.UninstallRequestedAt.UTC(),
+	}
 }
 
 func (s *Server) agentConfig(c *gin.Context) {
@@ -1124,6 +1166,55 @@ func (s *Server) agentViolation(c *gin.Context) {
 	}
 	s.db.Model(&models.ForwardRule{}).Where("id = ?", req.RuleID).Updates(updates)
 	c.JSON(http.StatusCreated, row)
+}
+
+func (s *Server) agentCommandAck(c *gin.Context) {
+	node := ctxNode(c)
+	commandID := strings.TrimSpace(c.Param("id"))
+	if commandID == "" || commandID != node.UninstallCommandID {
+		bad(c, errors.New("unknown command"))
+		return
+	}
+	var req struct {
+		Status  string `json:"status"`
+		Message string `json:"message"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		bad(c, err)
+		return
+	}
+	req.Status = strings.TrimSpace(req.Status)
+	if req.Status == "" {
+		req.Status = "accepted"
+	}
+	if !contains([]string{"accepted", "done", "failed"}, req.Status) {
+		bad(c, errors.New("status must be accepted, done, or failed"))
+		return
+	}
+	now := time.Now().UTC()
+	if req.Status == "failed" {
+		node.Status = "uninstall_failed"
+		node.UninstallConfirmedAt = &now
+		if req.Message != "" {
+			systemJSON, _ := json.Marshal(map[string]any{"uninstallError": req.Message})
+			node.SystemJSON = string(systemJSON)
+		}
+		if err := s.db.Save(&node).Error; err != nil {
+			fail(c, err)
+			return
+		}
+		metadata, _ := json.Marshal(map[string]any{"commandId": commandID, "status": req.Status, "message": req.Message})
+		s.audit(c, nil, "node.uninstall.failed", "node", fmt.Sprint(node.ID), string(metadata))
+		c.Status(http.StatusNoContent)
+		return
+	}
+	metadata, _ := json.Marshal(map[string]any{"commandId": commandID, "status": req.Status, "message": req.Message})
+	s.audit(c, nil, "node.uninstall.ack", "node", fmt.Sprint(node.ID), string(metadata))
+	if err := s.db.Delete(&models.Node{}, node.ID).Error; err != nil {
+		fail(c, err)
+		return
+	}
+	c.Status(http.StatusNoContent)
 }
 
 func (s *Server) findNodeRule(db *gorm.DB, node models.Node, ruleID uint) (models.ForwardRule, error) {

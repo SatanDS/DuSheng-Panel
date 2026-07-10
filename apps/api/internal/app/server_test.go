@@ -102,6 +102,17 @@ func jsonRequest(t *testing.T, router http.Handler, method, path string, body an
 	return rec
 }
 
+func adminToken(t *testing.T, s *Server) string {
+	t.Helper()
+	hash, err := auth.HashPassword("secret")
+	require.NoError(t, err)
+	admin := models.User{Username: "admin", PasswordHash: hash, Role: "admin", Status: "active"}
+	require.NoError(t, s.db.Create(&admin).Error)
+	token, err := auth.GenerateToken(admin.ID, admin.Role, auth.TokenTypeAccess, "test-secret-for-unit-tests", time.Hour)
+	require.NoError(t, err)
+	return token
+}
+
 func TestPrepareForwardRuleAllocatesFirstFreePort(t *testing.T) {
 	s := testServer(t)
 	user, _, tunnel, _ := seedForwardFixture(t, s)
@@ -185,6 +196,49 @@ func TestForwardRuleUniqueTunnelListenPort(t *testing.T) {
 	second.ID = 0
 	second.Name = "second"
 	require.Error(t, s.db.Create(&second).Error)
+}
+
+func TestDeleteNodeRequestsAgentUninstallAndAckDeletesNode(t *testing.T) {
+	s := testServer(t)
+	token := adminToken(t, s)
+	group := models.DeviceGroup{Name: "entry", Role: "entry", PortStart: 20000, PortEnd: 30000, TrafficRatio: 1}
+	require.NoError(t, s.db.Create(&group).Error)
+	nodeToken := "node-token"
+	node := models.Node{
+		DeviceGroupID: group.ID,
+		Name:          "node",
+		UUID:          "node-uninstall",
+		TokenHash:     auth.TokenHash(nodeToken),
+		Status:        "online",
+	}
+	require.NoError(t, s.db.Create(&node).Error)
+	router := testRouter(t, s)
+
+	rec := jsonRequest(t, router, http.MethodDelete, fmt.Sprintf("/api/v1/nodes/%d", node.ID), map[string]any{}, token)
+	require.Equal(t, http.StatusAccepted, rec.Code)
+	require.NoError(t, s.db.First(&node, node.ID).Error)
+	require.Equal(t, "uninstalling", node.Status)
+	require.NotEmpty(t, node.UninstallCommandID)
+	require.NotNil(t, node.UninstallRequestedAt)
+
+	rec = jsonRequest(t, router, http.MethodPost, "/api/v1/agent/heartbeat", map[string]any{
+		"version":         "test",
+		"appliedRevision": 0,
+		"system":          map[string]any{"runtime": "test"},
+	}, nodeToken)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var heartbeat map[string]any
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &heartbeat))
+	command, ok := heartbeat["command"].(map[string]any)
+	require.True(t, ok)
+	require.Equal(t, "uninstall", command["action"])
+	require.Equal(t, node.UninstallCommandID, command["id"])
+
+	rec = jsonRequest(t, router, http.MethodPost, "/api/v1/agent/commands/"+node.UninstallCommandID+"/ack", map[string]any{
+		"status": "accepted",
+	}, nodeToken)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	require.ErrorIs(t, s.db.First(&models.Node{}, node.ID).Error, gorm.ErrRecordNotFound)
 }
 
 func TestAgentTrafficRejectsNegativeBytes(t *testing.T) {

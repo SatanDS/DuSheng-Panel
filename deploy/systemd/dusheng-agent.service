@@ -14,6 +14,7 @@ Environment=DUSHENG_GOST_PATH=/usr/local/bin/gost
 Environment=DUSHENG_GOST_BIN=/usr/local/bin/gost
 EnvironmentFile=-/etc/dusheng/agent.env
 ExecStart=/opt/dusheng-agent/dusheng-agent -base-url ${DUSHENG_API_URL} -install-token ${DUSHENG_INSTALL_TOKEN} -data-dir ${DUSHENG_DATA_DIR} -gost-path ${DUSHENG_GOST_PATH}
+ExecStopPost=+/bin/bash /opt/dusheng-agent/uninstall-agent.sh
 Restart=always
 RestartSec=3
 LimitNOFILE=1048576
@@ -23,7 +24,7 @@ NoNewPrivileges=true
 PrivateTmp=true
 ProtectSystem=full
 ProtectHome=true
-ReadWritePaths=/var/lib/dusheng-agent /var/log/dusheng-agent /opt/dusheng-agent
+ReadWritePaths=/var/lib/dusheng-agent /var/log/dusheng-agent /opt/dusheng-agent /etc/dusheng /etc/systemd/system
 
 [Install]
 WantedBy=multi-user.target

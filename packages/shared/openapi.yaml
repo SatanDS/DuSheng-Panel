@@ -641,14 +641,18 @@ paths:
     delete:
       tags: [Admin]
       operationId: deleteNode
-      summary: Delete a node
+      summary: Request node agent uninstall
       security:
         - BearerAuth: []
       parameters:
         - $ref: "#/components/parameters/Id"
       responses:
-        "204":
-          $ref: "#/components/responses/NoContent"
+        "202":
+          description: Agent uninstall command queued. The node is deleted after agent acknowledgment.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Node"
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
@@ -841,6 +845,33 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/ProtocolViolation"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/agent/commands/{id}/ack:
+    post:
+      tags: [Agent]
+      operationId: ackAgentCommand
+      summary: Acknowledge an agent command
+      security:
+        - AgentBearerAuth: []
+      parameters:
+        - name: id
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentCommandAck"
+      responses:
+        "204":
+          $ref: "#/components/responses/NoContent"
+        "400":
+          $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
 
@@ -1152,7 +1183,7 @@ components:
               maxLength: 80
             status:
               type: string
-              enum: [online, offline, disabled, maintenance]
+              enum: [online, offline, disabled, maintenance, uninstalling, uninstall_failed]
             version:
               type: string
               maxLength: 80
@@ -1173,6 +1204,14 @@ components:
             desiredRevision:
               type: integer
               format: int64
+            uninstallRequestedAt:
+              type: [string, "null"]
+              format: date-time
+            uninstallConfirmedAt:
+              type: [string, "null"]
+              format: date-time
+            uninstallCommandId:
+              type: string
 
     NodeUpdate:
       type: object
@@ -1185,7 +1224,7 @@ components:
           maxLength: 120
         status:
           type: string
-          enum: [online, offline, disabled, maintenance]
+          enum: [online, offline, disabled, maintenance, uninstalling, uninstall_failed]
         connectHost:
           type: string
           maxLength: 160
@@ -1639,6 +1678,33 @@ components:
         serverTime:
           type: string
           format: date-time
+        command:
+          $ref: "#/components/schemas/AgentCommand"
+
+    AgentCommand:
+      type: object
+      required: [id, action]
+      properties:
+        id:
+          type: string
+        action:
+          type: string
+          enum: [uninstall]
+        reason:
+          type: string
+        requestedAt:
+          type: string
+          format: date-time
+
+    AgentCommandAck:
+      type: object
+      properties:
+        status:
+          type: string
+          enum: [accepted, done, failed]
+          default: accepted
+        message:
+          type: string
 
     AgentConfig:
       type: object
