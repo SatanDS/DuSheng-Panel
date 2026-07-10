@@ -241,6 +241,32 @@ func TestDeleteNodeRequestsAgentUninstallAndAckDeletesNode(t *testing.T) {
 	require.ErrorIs(t, s.db.First(&models.Node{}, node.ID).Error, gorm.ErrRecordNotFound)
 }
 
+func TestForceDeleteNodeRemovesRecordAndAudits(t *testing.T) {
+	s := testServer(t)
+	token := adminToken(t, s)
+	group := models.DeviceGroup{Name: "entry", Role: "entry", PortStart: 20000, PortEnd: 30000, TrafficRatio: 1}
+	require.NoError(t, s.db.Create(&group).Error)
+	node := models.Node{
+		DeviceGroupID:        group.ID,
+		Name:                 "offline-node",
+		UUID:                 "node-force-delete",
+		TokenHash:            auth.TokenHash("node-token"),
+		Status:               "uninstalling",
+		UninstallCommandID:   "uninstall-test",
+		DesiredRevision:      123,
+		UninstallRequestedAt: ptrTime(time.Now().Add(-time.Minute)),
+	}
+	require.NoError(t, s.db.Create(&node).Error)
+
+	rec := jsonRequest(t, testRouter(t, s), http.MethodDelete, fmt.Sprintf("/api/v1/nodes/%d?force=true", node.ID), map[string]any{}, token)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	require.ErrorIs(t, s.db.First(&models.Node{}, node.ID).Error, gorm.ErrRecordNotFound)
+
+	var audit models.AuditLog
+	require.NoError(t, s.db.Where("action = ? AND resource_type = ? AND resource_id = ?", "node.delete.force", "node", fmt.Sprint(node.ID)).First(&audit).Error)
+	require.Contains(t, audit.MetadataJSON, "uninstall-test")
+}
+
 func TestAgentTrafficRejectsNegativeBytes(t *testing.T) {
 	s := testServer(t)
 	user, entry, tunnel, _ := seedForwardFixture(t, s)
@@ -301,6 +327,56 @@ func TestAgentTrafficRejectsRuleOutsideNodeTunnel(t *testing.T) {
 		"samples": []map[string]any{{"ruleId": rule.ID, "inBytes": 1, "outBytes": 2}},
 	}, nodeToken)
 	require.Equal(t, http.StatusForbidden, rec.Code)
+}
+
+func TestAgentTrafficExhaustsQuotaAndStopsConfig(t *testing.T) {
+	s := testServer(t)
+	user, entry, tunnel, _ := seedForwardFixture(t, s)
+	user.FlowLimitBytes = 5
+	user.UsedBytes = 0
+	require.NoError(t, s.db.Save(&user).Error)
+	rule := models.ForwardRule{
+		UserID:     user.ID,
+		TunnelID:   tunnel.ID,
+		Name:       "quota-rule",
+		Protocol:   "tcp",
+		Strategy:   "least_conn",
+		ListenPort: 20001,
+		RemoteHost: "127.0.0.1",
+		RemotePort: 8081,
+		Status:     "active",
+		Revision:   1,
+	}
+	require.NoError(t, s.db.Create(&rule).Error)
+	nodeToken := "node-token"
+	node := models.Node{
+		DeviceGroupID: entry.ID,
+		Name:          "node",
+		UUID:          "node-quota",
+		TokenHash:     auth.TokenHash(nodeToken),
+		Status:        "online",
+	}
+	require.NoError(t, s.db.Create(&node).Error)
+	router := testRouter(t, s)
+
+	rec := jsonRequest(t, router, http.MethodPost, "/api/v1/agent/traffic", map[string]any{
+		"samples": []map[string]any{{"ruleId": rule.ID, "inBytes": 3, "outBytes": 3}},
+	}, nodeToken)
+	require.Equal(t, http.StatusOK, rec.Code)
+
+	require.NoError(t, s.db.First(&user, user.ID).Error)
+	require.Equal(t, int64(6), user.UsedBytes)
+	require.NoError(t, s.db.First(&rule, rule.ID).Error)
+	require.Equal(t, "quota_exhausted", rule.Status)
+	require.Greater(t, rule.Revision, int64(1))
+
+	rec = jsonRequest(t, router, http.MethodGet, "/api/v1/agent/config", nil, nodeToken)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var payload struct {
+		ForwardRules []models.ForwardRule `json:"forwardRules"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
+	require.Empty(t, payload.ForwardRules)
 }
 
 func TestDashboardScopesNonAdminUser(t *testing.T) {
@@ -448,4 +524,35 @@ func TestProductionConfigRejectsUnsafeDefaults(t *testing.T) {
 	cfg.CORSOrigins = []string{"https://panel.example.com"}
 	cfg.DatabaseURL = "postgres://dusheng:change-me-dusheng@db:5432/dusheng"
 	require.ErrorContains(t, cfg.Validate(), "database password")
+}
+
+func TestDeleteInstallTokenRevokesAgentRegistration(t *testing.T) {
+	s := testServer(t)
+	token := adminToken(t, s)
+	group := models.DeviceGroup{Name: "entry", Role: "entry", PortStart: 20000, PortEnd: 30000, TrafficRatio: 1}
+	require.NoError(t, s.db.Create(&group).Error)
+	plain := "install-token"
+	row := models.InstallToken{
+		Label:         "smoke",
+		TokenHash:     auth.TokenHash(plain),
+		DeviceGroupID: group.ID,
+		ExpiresAt:     time.Now().Add(time.Hour),
+	}
+	require.NoError(t, s.db.Create(&row).Error)
+	router := testRouter(t, s)
+
+	rec := jsonRequest(t, router, http.MethodDelete, fmt.Sprintf("/api/v1/install-tokens/%d", row.ID), map[string]any{}, token)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+
+	rec = jsonRequest(t, router, http.MethodPost, "/api/v1/agent/register", map[string]any{
+		"installToken": plain,
+		"name":         "should-fail",
+		"uuid":         "revoked-token-node",
+	}, "")
+	require.Equal(t, http.StatusUnauthorized, rec.Code)
+	require.ErrorIs(t, s.db.First(&models.InstallToken{}, row.ID).Error, gorm.ErrRecordNotFound)
+}
+
+func ptrTime(value time.Time) *time.Time {
+	return &value
 }

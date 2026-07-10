@@ -1228,7 +1228,7 @@ func isBenignFirstRead(err error) bool {
 
 func skipRule(rule client.ForwardRule) bool {
 	status := strings.ToLower(strings.TrimSpace(rule.Status))
-	if status == "paused" || status == "disabled" || status == "deleted" {
+	if status == "paused" || status == "disabled" || status == "deleted" || status == "quota_exhausted" {
 		return true
 	}
 	return rule.ListenPort <= 0 || rule.RemoteHost == "" || rule.RemotePort <= 0

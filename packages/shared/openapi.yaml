@@ -670,6 +670,13 @@ paths:
         - BearerAuth: []
       parameters:
         - $ref: "#/components/parameters/Id"
+        - name: force
+          in: query
+          required: false
+          schema:
+            type: boolean
+            default: false
+          description: Force-delete the panel node record immediately without waiting for agent uninstall acknowledgment.
       responses:
         "202":
           description: Agent uninstall command queued. The node is deleted after agent acknowledgment.
@@ -677,6 +684,8 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/Node"
+        "204":
+          description: Node record force-deleted.
         "403":
           $ref: "#/components/responses/Forbidden"
         "404":
@@ -724,6 +733,23 @@ paths:
                 $ref: "#/components/schemas/InstallTokenCreateResponse"
         "403":
           $ref: "#/components/responses/Forbidden"
+
+  /api/v1/install-tokens/{id}:
+    delete:
+      tags: [Admin]
+      operationId: deleteInstallToken
+      summary: Revoke a node install token
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/Id"
+      responses:
+        "204":
+          description: Install token revoked.
+        "403":
+          $ref: "#/components/responses/Forbidden"
+        "404":
+          $ref: "#/components/responses/NotFound"
 
   /api/v1/audit-logs:
     get:
@@ -1558,6 +1584,10 @@ components:
           type: string
           enum: [least_conn, round_robin, random, source_hash]
           default: least_conn
+        status:
+          type: string
+          enum: [active, paused, disabled]
+          description: active requests a resync; quota_exhausted is a system-managed status.
         protocolPolicyId:
           type: [integer, "null"]
           minimum: 1
@@ -1568,7 +1598,7 @@ components:
 
     ForwardRuleStatus:
       type: string
-      enum: [unsynced, syncing, active, paused, failed, protocol_violation]
+      enum: [unsynced, syncing, active, paused, disabled, failed, protocol_violation, quota_exhausted]
 
     ProtocolPolicy:
       description: >

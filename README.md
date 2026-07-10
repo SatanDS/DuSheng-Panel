@@ -89,6 +89,8 @@ TCP/UDP 转发链路由 agent 直接计量流量，并定时批量上报 `/agent
 
 已安装的旧节点如果没有新版 systemd 清理器，需要重新执行安装命令或升级 agent 后，才能支持面板侧同步卸载。
 
+如果节点离线、卸载失败或长期停留在 `uninstalling`，管理员可以在节点页执行强制删除。强制删除只删除面板记录，不会清理远端机器上的 agent 服务和文件。
+
 ## 本地生成 Agent Release 二进制
 
 节点安装脚本默认会从 GitHub Release 下载以下文件：
@@ -259,6 +261,8 @@ cd /opt/dusheng-panel
 git pull
 docker compose --env-file .env -f deploy/docker-compose.yml up -d --build
 ```
+
+备份、恢复、Release 更新、回滚和安全收尾见 [运维手册](docs/operations.md)。
 
 ## 生产部署目标
 

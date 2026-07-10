@@ -119,6 +119,7 @@ const valueLabels: Record<string, string> = {
   allow: "允许",
   synced: "已同步",
   unsynced: "未同步",
+  quota_exhausted: "流量用尽",
   running: "运行中",
   unknown: "未知",
   missing: "缺失",
@@ -201,6 +202,18 @@ const resourceConfigs: Record<Exclude<PageKey, "dashboard" | "violations" | "aud
           { value: "round_robin", label: "轮询" },
           { value: "random", label: "随机" },
           { value: "source_hash", label: "源地址哈希" }
+        ]
+      },
+      {
+        key: "status",
+        label: "状态",
+        type: "select",
+        optional: true,
+        options: [
+          { value: "active", label: "启用" },
+          { value: "paused", label: "暂停" },
+          { value: "disabled", label: "禁用" },
+          { value: "quota_exhausted", label: "流量用尽" }
         ]
       },
       {
@@ -878,7 +891,14 @@ function ResourcePage({ config, refreshSeed }: { config: ResourceConfig; refresh
       return;
     }
 
-    if (!window.confirm(`确认删除${config.title} #${row.id}？`)) {
+    const nodeStatus = String(row.status ?? "");
+    const forceNodeDelete =
+      config.key === "nodes" && ["offline", "uninstalling", "uninstall_failed"].includes(nodeStatus);
+    const confirmText = forceNodeDelete
+      ? `节点 #${row.id} 当前为${displayValue(nodeStatus)}，将强制删除面板记录，不等待 Agent 卸载回执。确认继续？`
+      : `确认删除${config.title} #${row.id}？`;
+
+    if (!window.confirm(confirmText)) {
       return;
     }
 
@@ -887,8 +907,14 @@ function ResourcePage({ config, refreshSeed }: { config: ResourceConfig; refresh
     setNotice(null);
 
     try {
-      await api.delete<void>(`${config.endpoint}/${row.id}`);
-      setNotice(config.key === "nodes" ? `节点 #${row.id} 卸载指令已下发` : `${config.title} #${row.id} 已删除`);
+      await api.delete<void>(`${config.endpoint}/${row.id}${forceNodeDelete ? "?force=true" : ""}`);
+      setNotice(
+        config.key === "nodes"
+          ? forceNodeDelete
+            ? `节点 #${row.id} 已强制删除`
+            : `节点 #${row.id} 卸载指令已下发`
+          : `${config.title} #${row.id} 已删除`
+      );
       resetDraft();
       setReloadSeed((seed) => seed + 1);
     } catch (err) {
@@ -1085,6 +1111,26 @@ function InstallTokensPanel({ refreshSeed }: { refreshSeed: number }) {
     await navigator.clipboard?.writeText(value);
   }
 
+  async function revokeToken(row: Entity) {
+    if (typeof row.id !== "number") {
+      return;
+    }
+    if (!window.confirm(`确认撤销安装令牌 #${row.id}？撤销后该令牌不能再注册节点。`)) {
+      return;
+    }
+    setSaving(true);
+    setError(null);
+    setCreated(null);
+    try {
+      await api.delete<void>(`/install-tokens/${row.id}`);
+      await load();
+    } catch (err) {
+      setError(err instanceof Error ? err.message : "安装令牌撤销失败");
+    } finally {
+      setSaving(false);
+    }
+  }
+
   return (
     <section className="panel">
       <PanelHeader title="安装令牌" icon={KeyRound} meta={`显示 ${tokens.length}/${total} 个`} />
@@ -1152,6 +1198,16 @@ function InstallTokensPanel({ refreshSeed }: { refreshSeed: number }) {
               { key: "expiresAt", label: "到期", render: (row) => formatDate(row.expiresAt) },
               { key: "usedAt", label: "使用时间", render: (row) => formatDate(row.usedAt) }
             ]}
+            actions={(row) => (
+              <button
+                className="icon-button small danger"
+                title="撤销"
+                disabled={saving}
+                onClick={() => void revokeToken(row)}
+              >
+                <Trash2 size={14} />
+              </button>
+            )}
           />
         )}
       </div>

@@ -130,6 +130,24 @@ func TestRuntimeApplyStartsAndStopsListeners(t *testing.T) {
 	}
 }
 
+func TestRuntimeSkipsQuotaExhaustedRules(t *testing.T) {
+	reporter := &mockReporter{}
+	rt := New(reporter, nil, Options{ListenHost: "127.0.0.1", ReadTimeout: 50 * time.Millisecond})
+	defer rt.Stop(context.Background())
+
+	_, upstreamPort, stopUpstream := startEchoServer(t)
+	defer stopUpstream()
+	cfg := testConfig(freePort(t), upstreamPort)
+	cfg.ForwardRules[0].Status = "quota_exhausted"
+
+	if err := rt.Apply(context.Background(), cfg); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	if status := rt.Status(); status["listeners"] != 0 {
+		t.Fatalf("listeners = %v, want 0", status["listeners"])
+	}
+}
+
 func TestRuntimeAllowsTCPAndReportsTraffic(t *testing.T) {
 	reporter := &mockReporter{}
 	rt := New(reporter, nil, Options{ListenHost: "127.0.0.1", ReadTimeout: time.Second, FlushInterval: time.Hour})

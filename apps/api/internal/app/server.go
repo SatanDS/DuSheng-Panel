@@ -114,6 +114,7 @@ func NewServer(cfg config.Config, db *gorm.DB) *gin.Engine {
 	admin.DELETE("/nodes/:id", s.requestNodeUninstall)
 	admin.POST("/install-tokens", s.createInstallToken)
 	admin.GET("/install-tokens", s.listInstallTokens)
+	admin.DELETE("/install-tokens/:id", s.deleteInstallToken)
 	admin.GET("/audit-logs", s.listAuditLogs)
 	admin.GET("/protocol-violations", s.listProtocolViolations)
 
@@ -636,6 +637,23 @@ func (s *Server) requestNodeUninstall(c *gin.Context) {
 	var node models.Node
 	if err := s.db.First(&node, c.Param("id")).Error; err != nil {
 		notFound(c)
+		return
+	}
+	if strings.EqualFold(c.Query("force"), "true") {
+		metadata, _ := json.Marshal(map[string]any{
+			"status":                  node.Status,
+			"lastSeenAt":              node.LastSeenAt,
+			"uninstallCommandId":      node.UninstallCommandID,
+			"uninstallRequestedAt":    node.UninstallRequestedAt,
+			"uninstallConfirmedAt":    node.UninstallConfirmedAt,
+			"previousDesiredRevision": node.DesiredRevision,
+		})
+		if err := s.db.Delete(&node).Error; err != nil {
+			fail(c, err)
+			return
+		}
+		s.audit(c, actor(c), "node.delete.force", "node", fmt.Sprint(node.ID), string(metadata))
+		c.Status(http.StatusNoContent)
 		return
 	}
 	now := time.Now().UTC()
@@ -1206,7 +1224,7 @@ func (s *Server) createForwardRule(c *gin.Context) {
 		bad(c, err)
 		return
 	}
-	rule.Status = "unsynced"
+	rule.Status = forwardRuleStatusAfterWrite(req.Status)
 	rule.Revision = time.Now().UnixNano()
 	if err := s.db.Create(&rule).Error; err != nil {
 		fail(c, err)
@@ -1245,7 +1263,7 @@ func (s *Server) updateForwardRule(c *gin.Context) {
 		bad(c, err)
 		return
 	}
-	existing.Status = "unsynced"
+	existing.Status = forwardRuleStatusAfterWrite(req.Status)
 	existing.Revision = time.Now().UnixNano()
 	if err := s.db.Save(&existing).Error; err != nil {
 		fail(c, err)
@@ -1278,6 +1296,16 @@ func (s *Server) applyForwardRulePayload(rule *models.ForwardRule, req forwardRu
 		}
 	}
 	return nil
+}
+
+func forwardRuleStatusAfterWrite(status string) string {
+	normalized := strings.ToLower(strings.TrimSpace(status))
+	switch normalized {
+	case "paused", "disabled":
+		return normalized
+	default:
+		return "unsynced"
+	}
 }
 
 func (s *Server) deleteForwardRule(c *gin.Context) {
@@ -1436,15 +1464,19 @@ func encryptedTunnelProtocol(protocol string) bool {
 }
 
 func (s *Server) bumpTunnelRevision(tunnelID uint, revision int64) {
+	s.bumpTunnelRevisionWithDB(s.db, tunnelID, revision)
+}
+
+func (s *Server) bumpTunnelRevisionWithDB(db *gorm.DB, tunnelID uint, revision int64) {
 	var tunnel models.Tunnel
-	if err := s.db.First(&tunnel, tunnelID).Error; err != nil {
+	if err := db.First(&tunnel, tunnelID).Error; err != nil {
 		return
 	}
 	ids := []uint{tunnel.EntryGroupID}
 	if tunnel.ExitGroupID != nil {
 		ids = append(ids, *tunnel.ExitGroupID)
 	}
-	s.db.Model(&models.Node{}).Where("device_group_id IN ?", ids).Update("desired_revision", revision)
+	db.Model(&models.Node{}).Where("device_group_id IN ?", ids).Update("desired_revision", revision)
 }
 
 func (s *Server) createInstallToken(c *gin.Context) {
@@ -1496,6 +1528,26 @@ func (s *Server) listInstallTokens(c *gin.Context) {
 	query = applySearch(query, c, "label")
 	query = filterUint(query, c, "device_group_id", "deviceGroupId")
 	respondPage[models.InstallToken](c, query, "id desc")
+}
+
+func (s *Server) deleteInstallToken(c *gin.Context) {
+	var token models.InstallToken
+	if err := s.db.First(&token, c.Param("id")).Error; err != nil {
+		notFound(c)
+		return
+	}
+	metadata, _ := json.Marshal(map[string]any{
+		"label":         token.Label,
+		"deviceGroupId": token.DeviceGroupID,
+		"expiresAt":     token.ExpiresAt,
+		"usedAt":        token.UsedAt,
+	})
+	if err := s.db.Delete(&token).Error; err != nil {
+		fail(c, err)
+		return
+	}
+	s.audit(c, actor(c), "install_token.delete", "install_token", fmt.Sprint(token.ID), string(metadata))
+	c.Status(http.StatusNoContent)
 }
 
 func (s *Server) agentRegister(c *gin.Context) {
@@ -1612,7 +1664,7 @@ func (s *Server) agentConfig(c *gin.Context) {
 	}
 	var rules []models.ForwardRule
 	if len(tunnelIDs) > 0 {
-		s.db.Where("tunnel_id IN ? AND status <> ?", tunnelIDs, "paused").Order("listen_port asc").Find(&rules)
+		s.db.Where("tunnel_id IN ? AND status NOT IN ?", tunnelIDs, []string{"paused", "disabled", "deleted", "quota_exhausted"}).Order("listen_port asc").Find(&rules)
 	}
 	var policies []models.ProtocolPolicy
 	s.db.Order("id asc").Find(&policies)
@@ -1670,18 +1722,20 @@ func (s *Server) agentTraffic(c *gin.Context) {
 		}
 	}
 	err := s.db.Transaction(func(tx *gorm.DB) error {
+		exhaustedUsers := map[uint]struct{}{}
+		now := time.Now()
 		for _, sample := range req.Samples {
 			rule, err := s.findNodeRule(tx, node, sample.RuleID)
 			if err != nil {
 				return err
 			}
 			if sample.InBytes > 0 {
-				if err := tx.Create(&models.TrafficSample{UserID: rule.UserID, RuleID: rule.ID, NodeID: node.ID, Direction: "in", Bytes: sample.InBytes, SampledAt: time.Now()}).Error; err != nil {
+				if err := tx.Create(&models.TrafficSample{UserID: rule.UserID, RuleID: rule.ID, NodeID: node.ID, Direction: "in", Bytes: sample.InBytes, SampledAt: now}).Error; err != nil {
 					return err
 				}
 			}
 			if sample.OutBytes > 0 {
-				if err := tx.Create(&models.TrafficSample{UserID: rule.UserID, RuleID: rule.ID, NodeID: node.ID, Direction: "out", Bytes: sample.OutBytes, SampledAt: time.Now()}).Error; err != nil {
+				if err := tx.Create(&models.TrafficSample{UserID: rule.UserID, RuleID: rule.ID, NodeID: node.ID, Direction: "out", Bytes: sample.OutBytes, SampledAt: now}).Error; err != nil {
 					return err
 				}
 			}
@@ -1693,6 +1747,20 @@ func (s *Server) agentTraffic(c *gin.Context) {
 				return err
 			}
 			if err := tx.Model(&models.User{}).Where("id = ?", rule.UserID).Update("used_bytes", gorm.Expr("used_bytes + ?", total)).Error; err != nil {
+				return err
+			}
+			if total > 0 {
+				var user models.User
+				if err := tx.Select("id", "flow_limit_bytes", "used_bytes").First(&user, rule.UserID).Error; err != nil {
+					return err
+				}
+				if user.FlowLimitBytes > 0 && user.UsedBytes >= user.FlowLimitBytes {
+					exhaustedUsers[user.ID] = struct{}{}
+				}
+			}
+		}
+		for userID := range exhaustedUsers {
+			if err := s.exhaustUserQuota(tx, userID, now.UnixNano()); err != nil {
 				return err
 			}
 		}
@@ -1711,6 +1779,28 @@ func (s *Server) agentTraffic(c *gin.Context) {
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"accepted": len(req.Samples)})
+}
+
+func (s *Server) exhaustUserQuota(tx *gorm.DB, userID uint, revision int64) error {
+	var tunnelIDs []uint
+	if err := tx.Model(&models.ForwardRule{}).
+		Where("user_id = ? AND status NOT IN ?", userID, []string{"paused", "disabled", "deleted", "quota_exhausted"}).
+		Distinct("tunnel_id").
+		Pluck("tunnel_id", &tunnelIDs).Error; err != nil {
+		return err
+	}
+	if len(tunnelIDs) == 0 {
+		return nil
+	}
+	if err := tx.Model(&models.ForwardRule{}).
+		Where("user_id = ? AND status NOT IN ?", userID, []string{"paused", "disabled", "deleted", "quota_exhausted"}).
+		Updates(map[string]any{"status": "quota_exhausted", "revision": revision}).Error; err != nil {
+		return err
+	}
+	for _, tunnelID := range tunnelIDs {
+		s.bumpTunnelRevisionWithDB(tx, tunnelID, revision)
+	}
+	return nil
 }
 
 func (s *Server) agentViolation(c *gin.Context) {
