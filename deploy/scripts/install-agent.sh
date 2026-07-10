@@ -37,8 +37,8 @@ detect_os() {
   case "${ID:-}" in
     debian)
       case "${VERSION_ID:-}" in
-        11|12) ;;
-        *) echo "Unsupported Debian version: ${VERSION_ID:-unknown}. Debian 11 or 12 is required." >&2; exit 1 ;;
+        11|12|13) ;;
+        *) echo "Unsupported Debian version: ${VERSION_ID:-unknown}. Debian 11, 12, or 13 is required." >&2; exit 1 ;;
       esac
       ;;
     ubuntu)
@@ -107,9 +107,9 @@ install_agent_binary() {
     if tar -tzf "$tmp/agent" >/dev/null 2>&1; then
       tar -xzf "$tmp/agent" -C "$tmp"
       local found
-      found="$(find "$tmp" -type f -name dusheng-agent -perm -111 | head -n 1)"
+      found="$(find "$tmp" -type f -name dusheng-agent | head -n 1)"
       if [ -z "$found" ]; then
-        echo "Archive does not contain an executable named dusheng-agent." >&2
+        echo "Archive does not contain a file named dusheng-agent." >&2
         exit 1
       fi
       install -m 0755 "$found" "$INSTALL_DIR/dusheng-agent"
@@ -139,9 +139,9 @@ install_gost_binary() {
   if tar -tzf "$tmp/gost" >/dev/null 2>&1; then
     tar -xzf "$tmp/gost" -C "$tmp"
     local found
-    found="$(find "$tmp" -type f -name gost -perm -111 | head -n 1)"
+    found="$(find "$tmp" -type f -name gost | head -n 1)"
     if [ -z "$found" ]; then
-      echo "gost archive does not contain an executable named gost." >&2
+      echo "gost archive does not contain a file named gost." >&2
       exit 1
     fi
     install -m 0755 "$found" "$GOST_BIN"
