@@ -2,7 +2,7 @@
 
 ARG GO_VERSION=1.25
 
-FROM --platform=$TARGETPLATFORM golang:${GO_VERSION}-bookworm AS build
+FROM golang:${GO_VERSION}-bookworm AS build
 WORKDIR /src
 
 RUN apt-get update \
