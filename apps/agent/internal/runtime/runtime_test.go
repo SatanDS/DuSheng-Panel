@@ -148,6 +148,32 @@ func TestRuntimeSkipsQuotaExhaustedRules(t *testing.T) {
 	}
 }
 
+func TestRuntimeApplyIgnoresRuleUsageCounters(t *testing.T) {
+	reporter := &mockReporter{}
+	rt := New(reporter, nil, Options{ListenHost: "127.0.0.1", ReadTimeout: 50 * time.Millisecond})
+	defer rt.Stop(context.Background())
+
+	_, upstreamPort, stopUpstream := startEchoServer(t)
+	defer stopUpstream()
+	cfg := testConfig(freePort(t), upstreamPort)
+
+	if err := rt.Apply(context.Background(), cfg); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+
+	cfg.ForwardRules[0].InBytes = 1024
+	cfg.ForwardRules[0].OutBytes = 2048
+	cfg.ForwardRules[0].Revision = time.Now().UnixNano()
+	cfg.ForwardRules[0].LastSyncError = "old transient error"
+	cfg.ForwardRules[0].ViolationCount = 3
+	if err := rt.Apply(context.Background(), cfg); err != nil {
+		t.Fatalf("Apply(usage counters) error = %v", err)
+	}
+	if status := rt.Status(); status["listeners"] != 1 {
+		t.Fatalf("listeners = %v, want 1", status["listeners"])
+	}
+}
+
 func TestRuntimeAllowsTCPAndReportsTraffic(t *testing.T) {
 	reporter := &mockReporter{}
 	rt := New(reporter, nil, Options{ListenHost: "127.0.0.1", ReadTimeout: time.Second, FlushInterval: time.Hour})

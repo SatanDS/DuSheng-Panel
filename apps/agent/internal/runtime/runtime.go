@@ -1390,15 +1390,61 @@ func policyFromClient(policy *client.ProtocolPolicy, network string) protocol.Po
 }
 
 func fingerprint(rule client.ForwardRule, tunnel client.Tunnel, group client.DeviceGroup, policy *client.ProtocolPolicy, limit effectiveSpeedLimit, listenHost, network string) string {
+	ruleValue := struct {
+		ID               uint
+		UserID           uint
+		TunnelID         uint
+		Name             string
+		Protocol         string
+		ListenPort       int
+		RemoteHost       string
+		RemotePort       int
+		Status           string
+		Strategy         string
+		ProtocolPolicyID *uint
+	}{
+		ID:               rule.ID,
+		UserID:           rule.UserID,
+		TunnelID:         rule.TunnelID,
+		Name:             rule.Name,
+		Protocol:         rule.Protocol,
+		ListenPort:       rule.ListenPort,
+		RemoteHost:       rule.RemoteHost,
+		RemotePort:       rule.RemotePort,
+		Status:           rule.Status,
+		Strategy:         rule.Strategy,
+		ProtocolPolicyID: rule.ProtocolPolicyID,
+	}
+	tunnelValue := struct {
+		ID                uint
+		EntryGroupID      uint
+		ExitGroupID       *uint
+		Protocol          string
+		FlowAccounting    string
+		EntryTrafficRatio float64
+		ExitTrafficRatio  float64
+		ProtocolPolicyID  *uint
+		AdvancedJSON      string
+	}{
+		ID:                tunnel.ID,
+		EntryGroupID:      tunnel.EntryGroupID,
+		ExitGroupID:       tunnel.ExitGroupID,
+		Protocol:          tunnel.Protocol,
+		FlowAccounting:    tunnel.FlowAccounting,
+		EntryTrafficRatio: tunnel.EntryTrafficRatio,
+		ExitTrafficRatio:  tunnel.ExitTrafficRatio,
+		ProtocolPolicyID:  tunnel.ProtocolPolicyID,
+		AdvancedJSON:      tunnel.AdvancedJSON,
+	}
 	value := struct {
-		Rule       client.ForwardRule
-		Tunnel     client.Tunnel
+		Rule       any
+		Tunnel     any
 		GroupID    uint
 		Policy     *client.ProtocolPolicy
 		Limit      effectiveSpeedLimit
 		ListenHost string
 		Network    string
-	}{rule, tunnel, group.ID, policy, limit, listenHost, network}
+	}{ruleValue, tunnelValue, group.ID, policy, limit, listenHost, network}
 	content, _ := json.Marshal(value)
 	return string(content)
 }
