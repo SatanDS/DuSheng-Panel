@@ -67,8 +67,12 @@ detect_arch() {
 
 install_packages() {
   export DEBIAN_FRONTEND=noninteractive
+  local packages=(ca-certificates curl tar gzip)
+  if ! command -v systemctl >/dev/null 2>&1; then
+    packages+=(systemd)
+  fi
   apt-get update
-  apt-get install -y --no-install-recommends ca-certificates curl tar gzip systemd
+  apt-get install -y --no-install-recommends "${packages[@]}"
 }
 
 ensure_user_and_dirs() {
@@ -174,12 +178,14 @@ if [ ! -f "\$MARKER" ]; then
 fi
 
 echo "DuSheng agent uninstall marker found; cleaning local agent files."
+cd /
 systemctl disable "${SERVICE_NAME}" >/dev/null 2>&1 || true
 rm -f "/etc/systemd/system/${SERVICE_NAME}.service"
 rm -f "${CONFIG_DIR}/agent.env"
 rmdir "${CONFIG_DIR}" >/dev/null 2>&1 || true
 rm -rf "${DATA_DIR}" "${LOG_DIR}" "${INSTALL_DIR}"
 systemctl daemon-reload >/dev/null 2>&1 || true
+systemctl reset-failed "${SERVICE_NAME}" >/dev/null 2>&1 || true
 EOF
   chmod 0755 "$INSTALL_DIR/uninstall-agent.sh"
   chown root:root "$INSTALL_DIR/uninstall-agent.sh"
@@ -204,7 +210,7 @@ Environment=DUSHENG_GOST_BIN=${GOST_BIN}
 EnvironmentFile=-${CONFIG_DIR}/agent.env
 ExecStart=${INSTALL_DIR}/dusheng-agent -base-url \${DUSHENG_API_URL} -install-token \${DUSHENG_INSTALL_TOKEN} -data-dir \${DUSHENG_DATA_DIR} -gost-path \${DUSHENG_GOST_PATH}
 ExecStopPost=+/bin/bash ${INSTALL_DIR}/uninstall-agent.sh
-Restart=always
+Restart=on-failure
 RestartSec=3
 LimitNOFILE=1048576
 AmbientCapabilities=CAP_NET_BIND_SERVICE
