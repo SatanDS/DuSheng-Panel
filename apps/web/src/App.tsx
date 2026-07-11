@@ -97,7 +97,14 @@ const valueLabels: Record<string, string> = {
   disabled: "禁用",
   suspended: "暂停",
   uninstalling: "卸载中",
+  uninstall_legacy: "旧版卸载待确认",
+  uninstall_timeout: "卸载确认超时",
   uninstall_failed: "卸载失败",
+  accepted: "已接收",
+  done: "已完成",
+  failed: "失败",
+  timeout: "超时",
+  legacy: "旧版确认",
   online: "在线",
   offline: "离线",
   maintenance: "维护中",
@@ -305,6 +312,8 @@ const resourceConfigs: Record<Exclude<PageKey, "dashboard" | "violations" | "aud
           { value: "disabled", label: "已禁用" },
           { value: "maintenance", label: "维护中" },
           { value: "uninstalling", label: "卸载中" },
+          { value: "uninstall_legacy", label: "旧版卸载待确认" },
+          { value: "uninstall_timeout", label: "卸载确认超时" },
           { value: "uninstall_failed", label: "卸载失败" }
         ]
       },
@@ -319,6 +328,7 @@ const resourceConfigs: Record<Exclude<PageKey, "dashboard" | "violations" | "aud
       { key: "connectHost", label: "连接地址" },
       { key: "version", label: "版本" },
       { key: "sync", label: "同步", render: renderNodeSync },
+      { key: "uninstallAckStatus", label: "卸载确认", render: renderNodeUninstall },
       { key: "systemJson", label: "Agent", render: renderNodeHealth },
       { key: "lastSeenAt", label: "最后心跳", render: (row) => formatDate(row.lastSeenAt) }
     ]
@@ -956,7 +966,7 @@ function ResourcePage({ config, refreshSeed }: { config: ResourceConfig; refresh
 
     const nodeStatus = String(row.status ?? "");
     const forceNodeDelete =
-      config.key === "nodes" && ["offline", "uninstalling", "uninstall_failed"].includes(nodeStatus);
+      config.key === "nodes" && ["offline", "uninstalling", "uninstall_legacy", "uninstall_timeout", "uninstall_failed"].includes(nodeStatus);
     const confirmText = forceNodeDelete
       ? `节点 #${row.id} 当前为${displayValue(nodeStatus)}，将强制删除面板记录，不等待 Agent 卸载回执。确认继续？`
       : `确认删除${config.title} #${row.id}？`;
@@ -1985,6 +1995,17 @@ function renderNodeSync(row: Entity) {
   const desired = Number(row.desiredRevision ?? 0);
   const synced = applied >= desired;
   return <StatusPill value={synced ? "synced" : `未同步 ${applied}/${desired}`} />;
+}
+
+function renderNodeUninstall(row: Entity) {
+  const status = text(row.status);
+  if (!["uninstalling", "uninstall_legacy", "uninstall_timeout", "uninstall_failed"].includes(status)) {
+    return <span className="muted">-</span>;
+  }
+  const ack = text(row.uninstallAckStatus);
+  const message = text(row.uninstallAckMessage);
+  const detail = message === "-" ? displayValue(status) : `${displayValue(status)}：${message}`;
+  return <StatusPill value={ack === "-" ? detail : `${displayValue(ack)} / ${detail}`} />;
 }
 
 function renderNodeHealth(row: Entity) {

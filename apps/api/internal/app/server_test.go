@@ -319,7 +319,7 @@ func TestDeleteNodeRequestsAgentUninstallAndAckDeletesNode(t *testing.T) {
 	require.NotNil(t, node.UninstallRequestedAt)
 
 	rec = jsonRequest(t, router, http.MethodPost, "/api/v1/agent/heartbeat", map[string]any{
-		"version":         "test",
+		"version":         "v0.1.5",
 		"appliedRevision": 0,
 		"system":          map[string]any{"runtime": "test"},
 	}, nodeToken)
@@ -337,12 +337,77 @@ func TestDeleteNodeRequestsAgentUninstallAndAckDeletesNode(t *testing.T) {
 	require.Equal(t, http.StatusNoContent, rec.Code)
 	require.NoError(t, s.db.First(&node, node.ID).Error)
 	require.Equal(t, "uninstalling", node.Status)
+	require.Equal(t, "accepted", node.UninstallAckStatus)
+	require.False(t, node.UninstallLegacy)
 
 	rec = jsonRequest(t, router, http.MethodPost, "/api/v1/agent/commands/"+node.UninstallCommandID+"/ack", map[string]any{
 		"status": "done",
 	}, nodeToken)
 	require.Equal(t, http.StatusNoContent, rec.Code)
 	require.ErrorIs(t, s.db.First(&models.Node{}, node.ID).Error, gorm.ErrRecordNotFound)
+}
+
+func TestLegacyAgentAcceptedUninstallDoesNotRemainPending(t *testing.T) {
+	s := testServer(t)
+	group := models.DeviceGroup{Name: "entry", Role: "entry", PortStart: 20000, PortEnd: 30000, TrafficRatio: 1}
+	require.NoError(t, s.db.Create(&group).Error)
+	nodeToken := "legacy-node-token"
+	now := time.Now().UTC()
+	node := models.Node{
+		DeviceGroupID: group.ID, Name: "legacy", UUID: "legacy-uninstall", TokenHash: auth.TokenHash(nodeToken),
+		Status: "uninstalling", Version: "dev", UninstallCommandID: "uninstall-legacy", UninstallRequestedAt: &now,
+	}
+	require.NoError(t, s.db.Create(&node).Error)
+
+	rec := jsonRequest(t, testRouter(t, s), http.MethodPost, "/api/v1/agent/commands/uninstall-legacy/ack", map[string]any{
+		"status": "accepted", "message": "cleanup scheduled",
+	}, nodeToken)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	require.NoError(t, s.db.First(&node, node.ID).Error)
+	require.Equal(t, "uninstall_legacy", node.Status)
+	require.True(t, node.UninstallLegacy)
+	require.Equal(t, "accepted", node.UninstallAckStatus)
+	require.NotNil(t, node.UninstallAckAt)
+}
+
+func TestStaleUninstallBecomesTimeout(t *testing.T) {
+	s := testServer(t)
+	requestedAt := time.Now().Add(-nodeUninstallAckTimeout - time.Second)
+	node := models.Node{DeviceGroupID: 1, Name: "timeout", UUID: "timeout-uninstall", TokenHash: "hash", Status: "uninstalling", UninstallCommandID: "uninstall-timeout", UninstallRequestedAt: &requestedAt}
+	require.NoError(t, s.db.Create(&node).Error)
+
+	s.markStaleNodesOffline(time.Now())
+	require.NoError(t, s.db.First(&node, node.ID).Error)
+	require.Equal(t, "uninstall_timeout", node.Status)
+	require.Equal(t, "timeout", node.UninstallAckStatus)
+	require.NotNil(t, node.UninstallAckAt)
+}
+
+func TestStaleLegacyUninstallIsRecoveredAfterAPIUpgrade(t *testing.T) {
+	s := testServer(t)
+	requestedAt := time.Now().Add(-nodeUninstallAckTimeout - time.Second)
+	lastSeenAt := requestedAt.Add(time.Second)
+	node := models.Node{
+		DeviceGroupID: 1, Name: "legacy-timeout", UUID: "legacy-timeout-uninstall", TokenHash: "hash",
+		Status: "uninstalling", Version: "dev", UninstallCommandID: "uninstall-legacy-timeout",
+		UninstallRequestedAt: &requestedAt, LastSeenAt: &lastSeenAt,
+	}
+	require.NoError(t, s.db.Create(&node).Error)
+
+	s.markStaleNodesOffline(time.Now())
+	require.NoError(t, s.db.First(&node, node.ID).Error)
+	require.Equal(t, "uninstall_legacy", node.Status)
+	require.Equal(t, "legacy", node.UninstallAckStatus)
+	require.True(t, node.UninstallLegacy)
+}
+
+func TestAgentSupportsFinalUninstallAck(t *testing.T) {
+	for version, expected := range map[string]bool{
+		"v0.1.4": false, "0.1.5": true, "v0.2.0": true, "v1.0.0": true,
+		"v0.1.5-rc.1": true, "dev": false, "test": false, "": false, "0.1": false,
+	} {
+		require.Equal(t, expected, agentSupportsFinalUninstallAck(version), version)
+	}
 }
 
 func TestForceDeleteNodeRemovesRecordAndAudits(t *testing.T) {

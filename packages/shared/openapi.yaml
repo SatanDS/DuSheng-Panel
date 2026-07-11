@@ -1458,7 +1458,7 @@ components:
               maxLength: 80
             status:
               type: string
-              enum: [online, offline, disabled, maintenance, uninstalling, uninstall_failed]
+              enum: [online, offline, disabled, maintenance, uninstalling, uninstall_legacy, uninstall_timeout, uninstall_failed]
             version:
               type: string
               maxLength: 80
@@ -1487,6 +1487,17 @@ components:
               format: date-time
             uninstallCommandId:
               type: string
+            uninstallAckStatus:
+              type: string
+              description: Latest uninstall acknowledgement (`accepted`, `done`, `failed`, `timeout`, or legacy compatibility recovery).
+            uninstallAckMessage:
+              type: string
+            uninstallAckAt:
+              type: [string, "null"]
+              format: date-time
+            uninstallLegacy:
+              type: boolean
+              description: The installed agent cannot confirm that system cleanup completed.
 
     NodeUpdate:
       type: object
@@ -1499,7 +1510,7 @@ components:
           maxLength: 120
         status:
           type: string
-          enum: [online, offline, disabled, maintenance, uninstalling, uninstall_failed]
+          enum: [online, offline, disabled, maintenance, uninstalling, uninstall_legacy, uninstall_timeout, uninstall_failed]
         connectHost:
           type: string
           maxLength: 160

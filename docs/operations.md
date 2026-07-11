@@ -76,7 +76,7 @@ docker compose --env-file .env -f deploy/docker-compose.yml up -d --build
 
 普通删除节点会先下发卸载命令，agent 回执后 API 才删除面板记录。适用于节点在线、能正常心跳的情况。
 
-当节点已经离线、卸载失败或长期卡在 `uninstalling` 时，可以在面板中执行强制删除。强制删除只移除面板记录，不会清理远端机器上的 systemd 服务或 `/opt/dusheng-agent` 文件。
+v0.1.4 及更早 agent 接收卸载命令后无法回传最终清理结果，面板会显示“旧版卸载待确认”；v0.1.5 及以上 agent 超过 5 分钟没有最终回执会显示“卸载确认超时”。节点离线、卸载失败或出现上述状态时，可以在核对远端机器后执行强制删除。强制删除只移除面板记录，不会清理远端机器上的 systemd 服务或 `/opt/dusheng-agent` 文件。
 
 ## 安全收尾
 

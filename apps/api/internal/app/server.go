@@ -26,6 +26,7 @@ type Server struct {
 }
 
 const nodeOfflineAfter = 90 * time.Second
+const nodeUninstallAckTimeout = 5 * time.Minute
 const agentConfigLease = 2 * time.Minute
 const (
 	defaultPageSize = 25
@@ -592,6 +593,26 @@ func (s *Server) markStaleNodesOffline(now time.Time) {
 	s.db.Model(&models.Node{}).
 		Where("status = ? AND (last_seen_at IS NULL OR last_seen_at < ?)", "online", cutoff).
 		Update("status", "offline")
+	uninstallCutoff := now.Add(-nodeUninstallAckTimeout)
+	var staleUninstalls []models.Node
+	if err := s.db.Where("status = ? AND uninstall_requested_at < ?", "uninstalling", uninstallCutoff).Find(&staleUninstalls).Error; err != nil {
+		return
+	}
+	for _, node := range staleUninstalls {
+		updates := map[string]any{
+			"status":                "uninstall_timeout",
+			"uninstall_ack_status":  "timeout",
+			"uninstall_ack_message": "agent did not confirm cleanup before the uninstall timeout",
+			"uninstall_ack_at":      now.UTC(),
+		}
+		if !agentSupportsFinalUninstallAck(node.Version) && node.LastSeenAt != nil && node.UninstallRequestedAt != nil && !node.LastSeenAt.Before(*node.UninstallRequestedAt) {
+			updates["status"] = "uninstall_legacy"
+			updates["uninstall_ack_status"] = "legacy"
+			updates["uninstall_ack_message"] = "legacy agent received the command but cannot confirm final cleanup"
+			updates["uninstall_legacy"] = true
+		}
+		s.db.Model(&models.Node{}).Where("id = ? AND status = ?", node.ID, "uninstalling").Updates(updates)
+	}
 }
 
 func (s *Server) nodeScopeForUser(userID uint) *gorm.DB {
@@ -667,6 +688,10 @@ func (s *Server) requestNodeUninstall(c *gin.Context) {
 	node.DesiredRevision = now.UnixNano()
 	node.UninstallRequestedAt = &now
 	node.UninstallConfirmedAt = nil
+	node.UninstallAckStatus = ""
+	node.UninstallAckMessage = ""
+	node.UninstallAckAt = nil
+	node.UninstallLegacy = false
 	if err := s.db.Save(&node).Error; err != nil {
 		fail(c, err)
 		return
@@ -2102,7 +2127,7 @@ func (s *Server) agentHeartbeat(c *gin.Context) {
 	}
 	systemJSON, _ := json.Marshal(req.System)
 	now := time.Now()
-	if node.Status != "uninstalling" {
+	if !isUninstallStatus(node.Status) {
 		node.Status = "online"
 	}
 	node.Version = req.Version
@@ -2132,6 +2157,32 @@ func uninstallCommand(node models.Node) gin.H {
 		"reason":      "node deleted from panel",
 		"requestedAt": node.UninstallRequestedAt.UTC(),
 	}
+}
+
+func isUninstallStatus(status string) bool {
+	return contains([]string{"uninstalling", "uninstall_legacy", "uninstall_timeout", "uninstall_failed"}, status)
+}
+
+func agentSupportsFinalUninstallAck(version string) bool {
+	version = strings.TrimSpace(strings.TrimPrefix(strings.ToLower(version), "v"))
+	parts := strings.Split(version, ".")
+	if len(parts) < 3 {
+		return false
+	}
+	values := make([]int, 3)
+	for i := range values {
+		part := parts[i]
+		if i == 2 {
+			part = strings.SplitN(part, "-", 2)[0]
+			part = strings.SplitN(part, "+", 2)[0]
+		}
+		value, err := strconv.Atoi(part)
+		if err != nil || value < 0 {
+			return false
+		}
+		values[i] = value
+	}
+	return values[0] > 0 || values[1] > 1 || (values[1] == 1 && values[2] >= 5)
 }
 
 func (s *Server) agentConfig(c *gin.Context) {
@@ -2392,6 +2443,9 @@ func (s *Server) agentCommandAck(c *gin.Context) {
 		return
 	}
 	now := time.Now().UTC()
+	node.UninstallAckStatus = req.Status
+	node.UninstallAckMessage = req.Message
+	node.UninstallAckAt = &now
 	if req.Status == "failed" {
 		node.Status = "uninstall_failed"
 		node.UninstallConfirmedAt = &now
@@ -2410,7 +2464,12 @@ func (s *Server) agentCommandAck(c *gin.Context) {
 	}
 	metadata, _ := json.Marshal(map[string]any{"commandId": commandID, "status": req.Status, "message": req.Message})
 	if req.Status == "accepted" {
-		node.Status = "uninstalling"
+		node.UninstallLegacy = !agentSupportsFinalUninstallAck(node.Version)
+		if node.UninstallLegacy {
+			node.Status = "uninstall_legacy"
+		} else {
+			node.Status = "uninstalling"
+		}
 		if err := s.db.Save(&node).Error; err != nil {
 			fail(c, err)
 			return

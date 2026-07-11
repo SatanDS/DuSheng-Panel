@@ -56,6 +56,10 @@ type Node struct {
 	UninstallRequestedAt *time.Time `json:"uninstallRequestedAt"`
 	UninstallConfirmedAt *time.Time `json:"uninstallConfirmedAt"`
 	UninstallCommandID   string     `gorm:"index;size:120" json:"uninstallCommandId"`
+	UninstallAckStatus   string     `gorm:"size:30" json:"uninstallAckStatus"`
+	UninstallAckMessage  string     `gorm:"type:text" json:"uninstallAckMessage"`
+	UninstallAckAt       *time.Time `json:"uninstallAckAt"`
+	UninstallLegacy      bool       `gorm:"not null;default:false" json:"uninstallLegacy"`
 }
 
 type Tunnel struct {
