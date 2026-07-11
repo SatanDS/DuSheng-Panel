@@ -41,3 +41,10 @@ func TestClassifyHighRiskProtocols(t *testing.T) {
 		})
 	}
 }
+
+func TestClassifyOpenVPNLikeStaysLowConfidence(t *testing.T) {
+	got := classify(classifyRequest{Network: "udp", Payload: []byte{0x38, 0x00, 0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08, 0x09, 0x0a, 0x0b, 0x0c}})
+	if got.Protocol != "openvpn_like" || got.Confidence >= 50 || got.RiskScore >= 50 {
+		t.Fatalf("classify() = %#v, want low-confidence openvpn_like candidate", got)
+	}
+}

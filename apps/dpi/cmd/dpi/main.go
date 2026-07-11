@@ -6,6 +6,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"flag"
+	"fmt"
 	"log"
 	"net"
 	"net/http"
@@ -16,7 +17,7 @@ import (
 	"time"
 )
 
-const version = "dev"
+var version = "dev"
 
 type classifyRequest struct {
 	Network         string   `json:"network"`
@@ -25,6 +26,13 @@ type classifyRequest struct {
 	Host            string   `json:"host"`
 	ALPN            []string `json:"alpn"`
 	RuleID          uint     `json:"ruleId"`
+	FlowID          string   `json:"flowId"`
+	Direction       string   `json:"direction"`
+	SourceIP        string   `json:"sourceIp"`
+	DestinationIP   string   `json:"destinationIp"`
+	SourcePort      int      `json:"sourcePort"`
+	DestinationPort int      `json:"destinationPort"`
+	TimestampMs     int64    `json:"timestampMs"`
 }
 
 type classifyResponse struct {
@@ -34,16 +42,29 @@ type classifyResponse struct {
 	RiskScore  int      `json:"riskScore"`
 	RiskLevel  string   `json:"riskLevel"`
 	Tags       []string `json:"tags,omitempty"`
+	Engine     string   `json:"engine"`
+	Final      bool     `json:"final"`
+	Packets    int      `json:"packets"`
 }
 
 func main() {
 	logger := log.New(os.Stdout, "dusheng-dpi ", log.LstdFlags|log.Lmicroseconds)
 	listen := flag.String("listen", firstEnvDefault("unix:/run/dusheng-dpi.sock", "DUSHENG_DPI_LISTEN"), "listen address, e.g. unix:/run/dusheng-dpi.sock or 127.0.0.1:19091")
+	engineMode := flag.String("engine", firstEnvDefault("auto", "DUSHENG_DPI_ENGINE"), "DPI engine: auto, ndpi, or heuristic")
+	maxFlows := flag.Int("max-flows", firstEnvInt(8192, "DUSHENG_DPI_MAX_FLOWS"), "maximum number of tracked DPI flows")
+	flowTTL := flag.Duration("flow-ttl", firstEnvDuration(2*time.Minute, "DUSHENG_DPI_FLOW_TTL"), "idle flow retention")
+	maxPackets := flag.Int("max-packets", firstEnvInt(12, "DUSHENG_DPI_MAX_PACKETS"), "maximum packets inspected per flow")
 	flag.Parse()
+	engine, err := openEngine(engineOptions{Mode: *engineMode, MaxFlows: *maxFlows, FlowTTL: *flowTTL, MaxPackets: *maxPackets})
+	if err != nil {
+		logger.Fatalf("initialize DPI engine: %v", err)
+	}
+	defer engine.Close()
+	logger.Printf("engine=%s version=%s", engine.Name(), engine.Version())
 
 	mux := http.NewServeMux()
 	mux.HandleFunc("/healthz", func(w http.ResponseWriter, _ *http.Request) {
-		respondJSON(w, http.StatusOK, map[string]any{"status": "ok", "version": version})
+		respondJSON(w, http.StatusOK, map[string]any{"status": "ok", "version": version, "engine": engine.Name(), "engineVersion": engine.Version(), "stats": engine.Stats()})
 	})
 	mux.HandleFunc("/classify", func(w http.ResponseWriter, r *http.Request) {
 		if r.Method != http.MethodPost {
@@ -55,7 +76,25 @@ func main() {
 			respondJSON(w, http.StatusBadRequest, map[string]any{"error": err.Error()})
 			return
 		}
-		respondJSON(w, http.StatusOK, classify(req))
+		result, err := engine.Classify(r.Context(), req)
+		if err != nil {
+			respondJSON(w, http.StatusUnprocessableEntity, map[string]any{"error": err.Error()})
+			return
+		}
+		respondJSON(w, http.StatusOK, result)
+	})
+	mux.HandleFunc("/flows/", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodDelete {
+			w.WriteHeader(http.StatusMethodNotAllowed)
+			return
+		}
+		flowID := strings.TrimSpace(strings.TrimPrefix(r.URL.Path, "/flows/"))
+		if flowID == "" {
+			respondJSON(w, http.StatusBadRequest, map[string]any{"error": "flow id is required"})
+			return
+		}
+		engine.CloseFlow(flowID)
+		w.WriteHeader(http.StatusNoContent)
 	})
 
 	ln, err := listenOn(*listen)
@@ -65,7 +104,10 @@ func main() {
 	if strings.HasPrefix(*listen, "unix:") {
 		_ = os.Chmod(strings.TrimPrefix(*listen, "unix:"), 0o660)
 	}
-	server := &http.Server{Handler: mux, ReadHeaderTimeout: 5 * time.Second}
+	server := &http.Server{
+		Handler: mux, ReadHeaderTimeout: 5 * time.Second, ReadTimeout: 10 * time.Second,
+		WriteTimeout: 10 * time.Second, IdleTimeout: 30 * time.Second, MaxHeaderBytes: 16 * 1024,
+	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 	go func() {
@@ -105,7 +147,7 @@ func classify(req classifyRequest) classifyResponse {
 	case looksWireGuard(req.Network, payload):
 		return verdict("wireguard", "vpn", 80, 85, "vpn", "encrypted_tunnel")
 	case looksOpenVPN(req.Network, payload):
-		return verdict("openvpn", "vpn", 65, 80, "vpn", "encrypted_tunnel")
+		return verdict("openvpn_like", "vpn", 45, 45, "vpn_candidate", "heuristic_low_confidence")
 	case builtin == "quic":
 		return verdict("quic", "web", 90, 20, "encrypted")
 	case builtin == "tls":
@@ -225,6 +267,29 @@ func firstEnvDefault(def string, keys ...string) string {
 	for _, key := range keys {
 		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
 			return value
+		}
+	}
+	return def
+}
+
+func firstEnvInt(def int, keys ...string) int {
+	for _, key := range keys {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			var parsed int
+			if _, err := fmt.Sscanf(value, "%d", &parsed); err == nil && parsed > 0 {
+				return parsed
+			}
+		}
+	}
+	return def
+}
+
+func firstEnvDuration(def time.Duration, keys ...string) time.Duration {
+	for _, key := range keys {
+		if value := strings.TrimSpace(os.Getenv(key)); value != "" {
+			if parsed, err := time.ParseDuration(value); err == nil && parsed > 0 {
+				return parsed
+			}
 		}
 	}
 	return def

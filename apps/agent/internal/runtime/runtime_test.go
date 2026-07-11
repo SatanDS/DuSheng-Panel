@@ -2,10 +2,13 @@ package runtime
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"io"
 	"log"
 	"net"
+	"net/http"
+	"net/http/httptest"
 	"strconv"
 	"strings"
 	"sync"
@@ -94,8 +97,8 @@ func TestTrafficBufferDropsAfterFlushFailures(t *testing.T) {
 	)
 	buffer.add(1, 10, 0)
 	buffer.flush(context.Background())
-	if status := buffer.status(); status["pendingSamples"] != 1 {
-		t.Fatalf("after first failure status = %#v, want requeued sample", status)
+	if status := buffer.status(); status["retryBatches"] != 1 {
+		t.Fatalf("after first failure status = %#v, want requeued batch", status)
 	}
 	buffer.flush(context.Background())
 	status := buffer.status()
@@ -174,6 +177,114 @@ func TestRuntimeApplyIgnoresRuleUsageCounters(t *testing.T) {
 	}
 }
 
+func TestRuntimeHotUpdatesPolicyWithoutDroppingListener(t *testing.T) {
+	reporter := &mockReporter{}
+	rt := New(reporter, nil, Options{ListenHost: "127.0.0.1", ReadTimeout: time.Second})
+	defer rt.Stop(context.Background())
+
+	_, upstreamPort, stopUpstream := startEchoServer(t)
+	defer stopUpstream()
+	listenPort := freePort(t)
+	cfg := testConfig(listenPort, upstreamPort)
+	if err := rt.Apply(context.Background(), cfg); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+
+	policyID := uint(70)
+	cfg.ForwardRules[0].ProtocolPolicyID = &policyID
+	cfg.ProtocolPolicies = []client.ProtocolPolicy{{ID: policyID, Mode: "block", BlockTLS: true}}
+	if err := rt.Apply(context.Background(), cfg); err != nil {
+		t.Fatalf("Apply(policy hot update) error = %v", err)
+	}
+	if status := rt.Status(); status["listeners"] != 1 {
+		t.Fatalf("listeners = %v, want 1", status["listeners"])
+	}
+
+	conn, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", itoa(listenPort)))
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write(testTLSClientHello()); err != nil {
+		t.Fatalf("Write() error = %v", err)
+	}
+	waitFor(t, func() bool { return reporter.violationCount() == 1 })
+	if violation := reporter.lastViolation(); violation.Action != "block" || violation.Protocol != "tls" {
+		t.Fatalf("violation = %#v, want tls block after hot update", violation)
+	}
+}
+
+func TestTCPRuntimeBlocksAfterMultiPacketDPIClassification(t *testing.T) {
+	reporter := &mockReporter{}
+	var mu sync.Mutex
+	packetsByFlow := map[string]int{}
+	dpiServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method == http.MethodGet {
+			_, _ = io.WriteString(w, `{"status":"ok","engine":"ndpi","engineVersion":"5.0"}`)
+			return
+		}
+		if r.Method == http.MethodDelete {
+			w.WriteHeader(http.StatusNoContent)
+			return
+		}
+		var req struct {
+			FlowID    string `json:"flowId"`
+			Direction string `json:"direction"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			t.Errorf("decode DPI request: %v", err)
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+		mu.Lock()
+		if req.Direction == "client_to_server" {
+			packetsByFlow[req.FlowID]++
+		}
+		packets := packetsByFlow[req.FlowID]
+		mu.Unlock()
+		if packets < 2 {
+			_, _ = io.WriteString(w, `{"protocol":"unknown","category":"unknown","confidence":0,"engine":"ndpi","final":false,"packets":1}`)
+			return
+		}
+		_, _ = io.WriteString(w, `{"protocol":"bittorrent","category":"p2p","confidence":95,"riskScore":95,"riskLevel":"high","tags":["p2p"],"engine":"ndpi","final":true,"packets":2}`)
+	}))
+	defer dpiServer.Close()
+
+	_, upstreamPort, stopUpstream := startEchoServer(t)
+	defer stopUpstream()
+	listenPort := freePort(t)
+	rt := New(reporter, nil, Options{ListenHost: "127.0.0.1", ReadTimeout: 80 * time.Millisecond, DPIAddress: dpiServer.URL, DPITimeout: time.Second})
+	defer rt.Stop(context.Background())
+	cfg := testConfig(listenPort, upstreamPort)
+	policyID := uint(909)
+	cfg.ForwardRules[0].ProtocolPolicyID = &policyID
+	cfg.ProtocolPolicies = []client.ProtocolPolicy{{ID: policyID, Mode: "block", InspectionLevel: "deep", BlockedProtocolGroups: "p2p"}}
+	if err := rt.Apply(context.Background(), cfg); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+
+	conn, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(listenPort)))
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("first-unknown-packet")); err != nil {
+		t.Fatalf("write first packet: %v", err)
+	}
+	buf := make([]byte, len("first-unknown-packet"))
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		t.Fatalf("read first echo: %v", err)
+	}
+	if _, err := conn.Write([]byte("second-packet")); err != nil {
+		t.Fatalf("write second packet: %v", err)
+	}
+	waitFor(t, func() bool { return reporter.violationCount() == 1 })
+	violation := reporter.lastViolation()
+	if violation.Action != "block" || !strings.Contains(violation.Detail, "bittorrent") {
+		t.Fatalf("violation = %#v, want multi-packet bittorrent block", violation)
+	}
+}
+
 func TestRuntimeAllowsTCPAndReportsTraffic(t *testing.T) {
 	reporter := &mockReporter{}
 	rt := New(reporter, nil, Options{ListenHost: "127.0.0.1", ReadTimeout: time.Second, FlushInterval: time.Hour})
@@ -211,6 +322,66 @@ func TestRuntimeAllowsTCPAndReportsTraffic(t *testing.T) {
 	}
 }
 
+func TestRuntimeDetectsFragmentedTLSClientHello(t *testing.T) {
+	reporter := &mockReporter{}
+	rt := New(reporter, nil, Options{ListenHost: "127.0.0.1", ReadTimeout: 500 * time.Millisecond})
+	defer rt.Stop(context.Background())
+
+	listenPort := freePort(t)
+	cfg := testConfig(listenPort, freePort(t))
+	policyID := uint(71)
+	cfg.ForwardRules[0].ProtocolPolicyID = &policyID
+	cfg.ProtocolPolicies = []client.ProtocolPolicy{{ID: policyID, Mode: "block", BlockTLS: true}}
+	if err := rt.Apply(context.Background(), cfg); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+
+	conn, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", itoa(listenPort)))
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+	defer conn.Close()
+	packet := testTLSClientHello()
+	if _, err := conn.Write(packet[:3]); err != nil {
+		t.Fatalf("Write(fragment 1) error = %v", err)
+	}
+	time.Sleep(50 * time.Millisecond)
+	if _, err := conn.Write(packet[3:]); err != nil {
+		t.Fatalf("Write(fragment 2) error = %v", err)
+	}
+	waitFor(t, func() bool { return reporter.violationCount() == 1 })
+	if violation := reporter.lastViolation(); violation.Action != "block" || violation.Protocol != "tls" {
+		t.Fatalf("violation = %#v, want fragmented tls block", violation)
+	}
+}
+
+func TestRuntimeDetectsServerFirstSSH(t *testing.T) {
+	reporter := &mockReporter{}
+	rt := New(reporter, nil, Options{ListenHost: "127.0.0.1", ReadTimeout: 50 * time.Millisecond})
+	defer rt.Stop(context.Background())
+
+	_, upstreamPort, stopUpstream := startSSHBannerServer(t)
+	defer stopUpstream()
+	listenPort := freePort(t)
+	cfg := testConfig(listenPort, upstreamPort)
+	policyID := uint(73)
+	cfg.ForwardRules[0].ProtocolPolicyID = &policyID
+	cfg.ProtocolPolicies = []client.ProtocolPolicy{{ID: policyID, Purpose: "gaming", Mode: "block"}}
+	if err := rt.Apply(context.Background(), cfg); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+
+	conn, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", itoa(listenPort)))
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+	defer conn.Close()
+	waitFor(t, func() bool { return reporter.violationCount() == 1 })
+	if violation := reporter.lastViolation(); violation.Action != "block" || violation.Protocol != "ssh" {
+		t.Fatalf("violation = %#v, want server-first ssh block", violation)
+	}
+}
+
 func TestRuntimeStartsAndStopsUDPListeners(t *testing.T) {
 	reporter := &mockReporter{}
 	rt := New(reporter, nil, Options{ListenHost: "127.0.0.1", ReadTimeout: 50 * time.Millisecond})
@@ -236,6 +407,40 @@ func TestRuntimeStartsAndStopsUDPListeners(t *testing.T) {
 	}
 	if status := rt.Status(); status["listeners"] != 0 {
 		t.Fatalf("listeners = %v, want 0", status["listeners"])
+	}
+}
+
+func TestUDPInspectsEarlySessionPackets(t *testing.T) {
+	reporter := &mockReporter{}
+	rt := New(reporter, nil, Options{ListenHost: "127.0.0.1"})
+	defer rt.Stop(context.Background())
+
+	_, upstreamPort, stopUpstream := startUDPEchoServer(t)
+	defer stopUpstream()
+	listenPort := freeUDPPort(t)
+	cfg := testConfig(listenPort, upstreamPort)
+	cfg.ForwardRules[0].Protocol = "udp"
+	policyID := uint(72)
+	cfg.ForwardRules[0].ProtocolPolicyID = &policyID
+	cfg.ProtocolPolicies = []client.ProtocolPolicy{{ID: policyID, Mode: "block", BlockQUIC: true}}
+	if err := rt.Apply(context.Background(), cfg); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+
+	conn, err := net.Dial("udp", net.JoinHostPort("127.0.0.1", itoa(listenPort)))
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+	defer conn.Close()
+	if got, err := udpRoundTripConn(conn, []byte("first harmless packet"), time.Second); err != nil || string(got) != "first harmless packet" {
+		t.Fatalf("first packet got %q err %v, want echo", got, err)
+	}
+	if _, err := udpRoundTripConn(conn, testQUICInitial(), 150*time.Millisecond); err == nil {
+		t.Fatal("QUIC packet was forwarded after harmless first datagram")
+	}
+	waitFor(t, func() bool { return reporter.violationCount() == 1 })
+	if violation := reporter.lastViolation(); violation.Action != "block" || violation.Protocol != "quic" {
+		t.Fatalf("violation = %#v, want quic block", violation)
 	}
 }
 
@@ -662,6 +867,35 @@ func startEchoServerOnPort(t *testing.T, port int) (string, int, func()) {
 	}()
 	_, portText, _ := net.SplitHostPort(ln.Addr().String())
 	port, _ = strconv.Atoi(portText)
+	return "127.0.0.1", port, func() {
+		_ = ln.Close()
+		<-done
+	}
+}
+
+func startSSHBannerServer(t *testing.T) (string, int, func()) {
+	t.Helper()
+	ln, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen() error = %v", err)
+	}
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		for {
+			conn, err := ln.Accept()
+			if err != nil {
+				return
+			}
+			go func() {
+				defer conn.Close()
+				_, _ = conn.Write([]byte("SSH-2.0-OpenSSH_9.6\r\n"))
+				time.Sleep(100 * time.Millisecond)
+			}()
+		}
+	}()
+	_, portText, _ := net.SplitHostPort(ln.Addr().String())
+	port, _ := strconv.Atoi(portText)
 	return "127.0.0.1", port, func() {
 		_ = ln.Close()
 		<-done

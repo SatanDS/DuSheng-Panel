@@ -11,7 +11,11 @@ Group=dusheng-agent
 WorkingDirectory=/opt/dusheng-agent
 RuntimeDirectory=dusheng-dpi
 RuntimeDirectoryMode=0750
-ExecStart=/opt/dusheng-agent/dusheng-dpi -listen unix:/run/dusheng-dpi/dpi.sock
+Environment=DUSHENG_DPI_ENGINE=auto
+Environment=DUSHENG_DPI_MAX_FLOWS=8192
+Environment=DUSHENG_DPI_FLOW_TTL=2m
+Environment=DUSHENG_DPI_MAX_PACKETS=12
+ExecStart=/opt/dusheng-agent/dusheng-dpi -listen unix:/run/dusheng-dpi/dpi.sock -engine ${DUSHENG_DPI_ENGINE} -max-flows ${DUSHENG_DPI_MAX_FLOWS} -flow-ttl ${DUSHENG_DPI_FLOW_TTL} -max-packets ${DUSHENG_DPI_MAX_PACKETS}
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true

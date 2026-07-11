@@ -36,6 +36,7 @@ func Open(cfg config.Config) (*gorm.DB, error) {
 		&models.ProtocolPolicy{},
 		&models.SpeedLimit{},
 		&models.TrafficSample{},
+		&models.AgentTrafficReport{},
 		&models.AuditLog{},
 		&models.InstallToken{},
 		&models.ProtocolViolation{},

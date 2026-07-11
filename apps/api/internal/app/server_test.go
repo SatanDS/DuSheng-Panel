@@ -33,6 +33,7 @@ func testServer(t *testing.T) *Server {
 		&models.ProtocolPolicy{},
 		&models.SpeedLimit{},
 		&models.TrafficSample{},
+		&models.AgentTrafficReport{},
 		&models.AuditLog{},
 		&models.InstallToken{},
 		&models.ProtocolViolation{},
@@ -248,6 +249,52 @@ func TestForwardRuleUniqueTunnelListenPort(t *testing.T) {
 	require.Error(t, s.db.Create(&second).Error)
 }
 
+func TestPrepareForwardRuleRejectsOverlappingEntryGroupPort(t *testing.T) {
+	s := testServer(t)
+	user, entry, tunnel, _ := seedForwardFixture(t, s)
+	user.ForwardLimit = 10
+	require.NoError(t, s.db.Save(&user).Error)
+	otherTunnel := models.Tunnel{
+		Name:              "other",
+		Mode:              "single",
+		EntryGroupID:      entry.ID,
+		Protocol:          "direct",
+		FlowAccounting:    "single",
+		EntryTrafficRatio: 1,
+		ExitTrafficRatio:  1,
+	}
+	require.NoError(t, s.db.Create(&otherTunnel).Error)
+	first := models.ForwardRule{
+		UserID:     user.ID,
+		TunnelID:   tunnel.ID,
+		Name:       "first",
+		Protocol:   "tcp",
+		Strategy:   "least_conn",
+		ListenPort: 20001,
+		RemoteHost: "127.0.0.1",
+		RemotePort: 8081,
+		Status:     "active",
+	}
+	require.NoError(t, s.db.Create(&first).Error)
+
+	udpSamePort := first
+	udpSamePort.ID = 0
+	udpSamePort.TunnelID = otherTunnel.ID
+	udpSamePort.Name = "udp-ok"
+	udpSamePort.Protocol = "udp"
+	require.NoError(t, s.prepareForwardRule(&udpSamePort, 0))
+
+	tcpSamePort := udpSamePort
+	tcpSamePort.Name = "tcp-conflict"
+	tcpSamePort.Protocol = "tcp"
+	require.ErrorContains(t, s.prepareForwardRule(&tcpSamePort, 0), "entry device group")
+
+	tcpUDPSamePort := udpSamePort
+	tcpUDPSamePort.Name = "tcp-udp-conflict"
+	tcpUDPSamePort.Protocol = "tcp_udp"
+	require.ErrorContains(t, s.prepareForwardRule(&tcpUDPSamePort, 0), "entry device group")
+}
+
 func TestDeleteNodeRequestsAgentUninstallAndAckDeletesNode(t *testing.T) {
 	s := testServer(t)
 	token := adminToken(t, s)
@@ -286,6 +333,13 @@ func TestDeleteNodeRequestsAgentUninstallAndAckDeletesNode(t *testing.T) {
 
 	rec = jsonRequest(t, router, http.MethodPost, "/api/v1/agent/commands/"+node.UninstallCommandID+"/ack", map[string]any{
 		"status": "accepted",
+	}, nodeToken)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	require.NoError(t, s.db.First(&node, node.ID).Error)
+	require.Equal(t, "uninstalling", node.Status)
+
+	rec = jsonRequest(t, router, http.MethodPost, "/api/v1/agent/commands/"+node.UninstallCommandID+"/ack", map[string]any{
+		"status": "done",
 	}, nodeToken)
 	require.Equal(t, http.StatusNoContent, rec.Code)
 	require.ErrorIs(t, s.db.First(&models.Node{}, node.ID).Error, gorm.ErrRecordNotFound)
@@ -427,6 +481,70 @@ func TestAgentTrafficExhaustsQuotaAndStopsConfig(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
 	require.Empty(t, payload.ForwardRules)
+}
+
+func TestAgentTrafficReportIDIsIdempotent(t *testing.T) {
+	s := testServer(t)
+	user, entry, tunnel, _ := seedForwardFixture(t, s)
+	user.FlowLimitBytes = 1000
+	require.NoError(t, s.db.Save(&user).Error)
+	rule := models.ForwardRule{
+		UserID:     user.ID,
+		TunnelID:   tunnel.ID,
+		Name:       "idempotent-rule",
+		Protocol:   "tcp",
+		Strategy:   "least_conn",
+		ListenPort: 20001,
+		RemoteHost: "127.0.0.1",
+		RemotePort: 8081,
+		Status:     "active",
+	}
+	require.NoError(t, s.db.Create(&rule).Error)
+	nodeToken := "node-token"
+	node := models.Node{
+		DeviceGroupID: entry.ID,
+		Name:          "node",
+		UUID:          "node-idempotent",
+		TokenHash:     auth.TokenHash(nodeToken),
+		Status:        "online",
+	}
+	require.NoError(t, s.db.Create(&node).Error)
+	router := testRouter(t, s)
+	body := map[string]any{
+		"reportId": "report-1",
+		"samples":  []map[string]any{{"ruleId": rule.ID, "inBytes": 3, "outBytes": 4}},
+	}
+
+	rec := jsonRequest(t, router, http.MethodPost, "/api/v1/agent/traffic", body, nodeToken)
+	require.Equal(t, http.StatusOK, rec.Code)
+	rec = jsonRequest(t, router, http.MethodPost, "/api/v1/agent/traffic", body, nodeToken)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Contains(t, rec.Body.String(), "duplicate")
+
+	require.NoError(t, s.db.First(&user, user.ID).Error)
+	require.Equal(t, int64(7), user.UsedBytes)
+	var sampleCount int64
+	require.NoError(t, s.db.Model(&models.TrafficSample{}).Where("rule_id = ?", rule.ID).Count(&sampleCount).Error)
+	require.Equal(t, int64(2), sampleCount)
+}
+
+func TestCreateForwardRuleRejectsDangerousRemoteForUser(t *testing.T) {
+	s := testServer(t)
+	user, _, tunnel, _ := seedForwardFixture(t, s)
+	token, err := auth.GenerateToken(user.ID, user.Role, auth.TokenTypeAccess, "test-secret-for-unit-tests", time.Hour)
+	require.NoError(t, err)
+
+	rec := jsonRequest(t, testRouter(t, s), http.MethodPost, "/api/v1/forward-rules", map[string]any{
+		"tunnelId":   tunnel.ID,
+		"name":       "metadata",
+		"protocol":   "tcp",
+		"listenPort": 20001,
+		"remoteHost": "169.254.169.254",
+		"remotePort": 80,
+		"strategy":   "least_conn",
+	}, token)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Contains(t, rec.Body.String(), "remoteHost")
 }
 
 func TestDashboardScopesNonAdminUser(t *testing.T) {
@@ -601,6 +719,35 @@ func TestDeleteInstallTokenRevokesAgentRegistration(t *testing.T) {
 	}, "")
 	require.Equal(t, http.StatusUnauthorized, rec.Code)
 	require.ErrorIs(t, s.db.First(&models.InstallToken{}, row.ID).Error, gorm.ErrRecordNotFound)
+}
+
+func TestInstallTokenCanRegisterOnlyOnce(t *testing.T) {
+	s := testServer(t)
+	group := models.DeviceGroup{Name: "entry", Role: "entry", PortStart: 20000, PortEnd: 30000, TrafficRatio: 1}
+	require.NoError(t, s.db.Create(&group).Error)
+	plain := "single-use-install-token"
+	row := models.InstallToken{
+		Label:         "single-use",
+		TokenHash:     auth.TokenHash(plain),
+		DeviceGroupID: group.ID,
+		ExpiresAt:     time.Now().Add(time.Hour),
+	}
+	require.NoError(t, s.db.Create(&row).Error)
+	router := testRouter(t, s)
+
+	rec := jsonRequest(t, router, http.MethodPost, "/api/v1/agent/register", map[string]any{
+		"installToken": plain,
+		"name":         "first",
+		"uuid":         "single-use-node-1",
+	}, "")
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	rec = jsonRequest(t, router, http.MethodPost, "/api/v1/agent/register", map[string]any{
+		"installToken": plain,
+		"name":         "second",
+		"uuid":         "single-use-node-2",
+	}, "")
+	require.Equal(t, http.StatusUnauthorized, rec.Code)
 }
 
 func ptrTime(value time.Time) *time.Time {

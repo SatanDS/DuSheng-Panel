@@ -14,6 +14,10 @@ GOST_URL="${DUSHENG_GOST_URL:-}"
 GOST_BIN="${DUSHENG_GOST_PATH:-${DUSHENG_GOST_BIN:-/usr/local/bin/gost}}"
 DPI_ENABLED="${DUSHENG_DPI_ENABLED:-1}"
 DPI_ADDR="${DUSHENG_DPI_ADDR:-unix:/run/dusheng-dpi/dpi.sock}"
+DPI_ENGINE="${DUSHENG_DPI_ENGINE:-auto}"
+DPI_MAX_FLOWS="${DUSHENG_DPI_MAX_FLOWS:-8192}"
+DPI_FLOW_TTL="${DUSHENG_DPI_FLOW_TTL:-2m}"
+DPI_MAX_PACKETS="${DUSHENG_DPI_MAX_PACKETS:-12}"
 
 need_root() {
   if [ "$(id -u)" -ne 0 ]; then
@@ -96,6 +100,19 @@ download_file() {
   curl -fL --retry 3 --connect-timeout 10 -o "$dest" "$url"
 }
 
+install_dpi_support_files() {
+  local base_dir="$1"
+  local lib_dir="${DUSHENG_DPI_LIB_DIR:-$base_dir/dusheng-dpi-lib}"
+  if [ -d "$lib_dir" ]; then
+    rm -rf "$INSTALL_DIR/dusheng-dpi-lib"
+    install -d -m 0755 "$INSTALL_DIR/dusheng-dpi-lib"
+    cp -a "$lib_dir/." "$INSTALL_DIR/dusheng-dpi-lib/"
+  fi
+  if [ -f "$base_dir/THIRD_PARTY_NOTICES.md" ]; then
+    install -m 0644 "$base_dir/THIRD_PARTY_NOTICES.md" "$INSTALL_DIR/THIRD_PARTY_NOTICES.md"
+  fi
+}
+
 install_agent_binary() {
   local arch="$1"
   local tmp
@@ -105,11 +122,13 @@ install_agent_binary() {
     install -m 0755 "$DUSHENG_AGENT_BINARY" "$INSTALL_DIR/dusheng-agent"
     if [ "$DPI_ENABLED" != "0" ] && [ -n "${DUSHENG_DPI_BINARY:-}" ]; then
       install -m 0755 "$DUSHENG_DPI_BINARY" "$INSTALL_DIR/dusheng-dpi"
+      install_dpi_support_files "$(dirname "$DUSHENG_DPI_BINARY")"
     fi
   elif [ -x ./dusheng-agent ]; then
     install -m 0755 ./dusheng-agent "$INSTALL_DIR/dusheng-agent"
     if [ "$DPI_ENABLED" != "0" ] && [ -x ./dusheng-dpi ]; then
       install -m 0755 ./dusheng-dpi "$INSTALL_DIR/dusheng-dpi"
+      install_dpi_support_files "."
     fi
   else
     if [ -z "$AGENT_URL" ]; then
@@ -131,6 +150,7 @@ install_agent_binary() {
         dpi_found="$(find "$tmp" -type f -name dusheng-dpi | head -n 1)"
         if [ -n "$dpi_found" ]; then
           install -m 0755 "$dpi_found" "$INSTALL_DIR/dusheng-dpi"
+          install_dpi_support_files "$(dirname "$dpi_found")"
         else
           echo "Archive does not contain dusheng-dpi; DPI sidecar will be disabled." >&2
         fi
@@ -143,6 +163,9 @@ install_agent_binary() {
   chown root:root "$INSTALL_DIR/dusheng-agent"
   if [ -x "$INSTALL_DIR/dusheng-dpi" ]; then
     chown root:root "$INSTALL_DIR/dusheng-dpi"
+    if [ -d "$INSTALL_DIR/dusheng-dpi-lib" ]; then
+      chown -R root:root "$INSTALL_DIR/dusheng-dpi-lib"
+    fi
   fi
   rm -rf "$tmp"
 }
@@ -204,10 +227,28 @@ if [ ! -f "\$MARKER" ]; then
 fi
 
 echo "DuSheng agent uninstall marker found; scheduling local agent cleanup."
+API_URL=""
+NODE_TOKEN=""
+COMMAND_ID=""
+if [ -f "${CONFIG_DIR}/agent.env" ]; then
+  # shellcheck disable=SC1091
+  . "${CONFIG_DIR}/agent.env"
+  API_URL="\${DUSHENG_API_URL:-}"
+fi
+if [ -f "\$MARKER" ]; then
+  COMMAND_ID="\$(sed -n 's/.*"id"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "\$MARKER" | head -n 1)"
+fi
+if [ -f "${DATA_DIR}/node-credentials.json" ]; then
+  NODE_TOKEN="\$(sed -n 's/.*"nodeToken"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' "${DATA_DIR}/node-credentials.json" | head -n 1)"
+fi
 CLEANUP="/tmp/${SERVICE_NAME}-cleanup.sh"
-cat > "\$CLEANUP" <<'CLEANUP_EOF'
+cat > "\$CLEANUP" <<CLEANUP_EOF
 #!/usr/bin/env bash
 set -u
+
+API_URL="\${API_URL}"
+NODE_TOKEN="\${NODE_TOKEN}"
+COMMAND_ID="\${COMMAND_ID}"
 
 systemctl disable "${SERVICE_NAME}" >/dev/null 2>&1 || true
 systemctl stop "${SERVICE_NAME}" >/dev/null 2>&1 || true
@@ -217,10 +258,16 @@ rm -f "/etc/systemd/system/${SERVICE_NAME}.service"
 rm -f "/etc/systemd/system/${DPI_SERVICE_NAME}.service"
 rm -f "${CONFIG_DIR}/agent.env"
 rmdir "${CONFIG_DIR}" >/dev/null 2>&1 || true
-rm -rf "${DATA_DIR}" "${LOG_DIR}" "${INSTALL_DIR}" >/dev/null 2>&1 || true
 systemctl daemon-reload >/dev/null 2>&1 || true
 systemctl reset-failed "${SERVICE_NAME}" >/dev/null 2>&1 || true
 systemctl reset-failed "${DPI_SERVICE_NAME}" >/dev/null 2>&1 || true
+if [ -n "\$API_URL" ] && [ -n "\$NODE_TOKEN" ] && [ -n "\$COMMAND_ID" ] && command -v curl >/dev/null 2>&1; then
+  curl -fsS -X POST "\${API_URL%/}/api/v1/agent/commands/\${COMMAND_ID}/ack" \
+    -H "Authorization: Bearer \$NODE_TOKEN" \
+    -H "Content-Type: application/json" \
+    --data '{"status":"done","message":"local cleanup completed"}' >/dev/null 2>&1 || true
+fi
+rm -rf "${DATA_DIR}" "${LOG_DIR}" "${INSTALL_DIR}" >/dev/null 2>&1 || true
 rm -f "\$0" >/dev/null 2>&1 || true
 CLEANUP_EOF
 chmod 0755 "\$CLEANUP"
@@ -291,7 +338,11 @@ Group=${AGENT_USER}
 WorkingDirectory=${INSTALL_DIR}
 RuntimeDirectory=dusheng-dpi
 RuntimeDirectoryMode=0750
-ExecStart=${INSTALL_DIR}/dusheng-dpi -listen ${DPI_ADDR}
+Environment=DUSHENG_DPI_ENGINE=${DPI_ENGINE}
+Environment=DUSHENG_DPI_MAX_FLOWS=${DPI_MAX_FLOWS}
+Environment=DUSHENG_DPI_FLOW_TTL=${DPI_FLOW_TTL}
+Environment=DUSHENG_DPI_MAX_PACKETS=${DPI_MAX_PACKETS}
+ExecStart=${INSTALL_DIR}/dusheng-dpi -listen ${DPI_ADDR} -engine \${DUSHENG_DPI_ENGINE} -max-flows \${DUSHENG_DPI_MAX_FLOWS} -flow-ttl \${DUSHENG_DPI_FLOW_TTL} -max-packets \${DUSHENG_DPI_MAX_PACKETS}
 Restart=on-failure
 RestartSec=3
 NoNewPrivileges=true

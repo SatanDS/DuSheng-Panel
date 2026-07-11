@@ -145,6 +145,13 @@ type TrafficSample struct {
 	SampledAt time.Time `gorm:"index;index:idx_traffic_user_sampled;index:idx_traffic_rule_sampled;index:idx_traffic_node_sampled" json:"sampledAt"`
 }
 
+type AgentTrafficReport struct {
+	BaseModel
+	NodeID   uint   `gorm:"index;uniqueIndex:idx_agent_traffic_report_node_report;not null" json:"nodeId"`
+	ReportID string `gorm:"size:120;uniqueIndex:idx_agent_traffic_report_node_report;not null" json:"reportId"`
+	Accepted int    `json:"accepted"`
+}
+
 type AuditLog struct {
 	BaseModel
 	ActorID      *uint  `gorm:"index" json:"actorId"`

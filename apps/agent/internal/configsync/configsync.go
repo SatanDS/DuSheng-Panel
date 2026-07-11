@@ -17,7 +17,10 @@ import (
 	"dusheng-panel/apps/agent/internal/client"
 )
 
-const renderedFile = "rendered-gost.json"
+const (
+	renderedFile       = "rendered-gost.json"
+	defaultConfigLease = 2 * time.Minute
+)
 
 type Supervisor interface {
 	Apply(ctx context.Context, configPath string) error
@@ -44,6 +47,8 @@ type Syncer struct {
 	mu              sync.RWMutex
 	appliedRevision int64
 	hasSynced       bool
+	leaseValidUntil time.Time
+	failClosed      bool
 }
 
 func New(api *client.Client, dataDir string, runtime Runtime, logger *log.Logger) *Syncer {
@@ -61,6 +66,7 @@ func New(api *client.Client, dataDir string, runtime Runtime, logger *log.Logger
 func (s *Syncer) SyncOnce(ctx context.Context) error {
 	cfg, err := s.api.GetConfig(ctx)
 	if err != nil {
+		s.failClosedIfLeaseExpired(ctx)
 		return err
 	}
 
@@ -81,6 +87,11 @@ func (s *Syncer) SyncOnce(ctx context.Context) error {
 	s.mu.Lock()
 	s.appliedRevision = cfg.Revision
 	s.hasSynced = true
+	s.failClosed = false
+	s.leaseValidUntil = cfg.ValidUntil
+	if s.leaseValidUntil.IsZero() {
+		s.leaseValidUntil = time.Now().Add(defaultConfigLease)
+	}
 	s.mu.Unlock()
 
 	return nil
@@ -103,7 +114,34 @@ func (s *Syncer) RuntimeStatus() map[string]any {
 	if s.runtime == nil {
 		return map[string]any{"running": false}
 	}
-	return s.runtime.Status()
+	status := s.runtime.Status()
+	s.mu.RLock()
+	status["configLeaseValidUntil"] = s.leaseValidUntil
+	status["configFailClosed"] = s.failClosed
+	s.mu.RUnlock()
+	return status
+}
+
+func (s *Syncer) failClosedIfLeaseExpired(ctx context.Context) {
+	s.mu.Lock()
+	expired := s.hasSynced && !s.leaseValidUntil.IsZero() && time.Now().After(s.leaseValidUntil) && !s.failClosed
+	validUntil := s.leaseValidUntil
+	if expired {
+		s.failClosed = true
+	}
+	s.mu.Unlock()
+	if !expired || s.runtime == nil {
+		return
+	}
+	s.logger.Printf("config lease expired at %s; stopping runtime listeners until config sync recovers", validUntil.Format(time.RFC3339))
+	stopCfg := client.AgentConfig{
+		Revision:    s.AppliedRevision(),
+		GeneratedAt: time.Now().UTC(),
+		ValidUntil:  time.Now().UTC(),
+	}
+	if err := s.runtime.Apply(ctx, stopCfg); err != nil {
+		s.logger.Printf("runtime fail-closed apply failed: %v", err)
+	}
 }
 
 type Renderer struct {

@@ -1,6 +1,8 @@
 param(
   [string]$Version = "dev",
   [string]$OutputDir = "release",
+  [ValidateSet("ndpi", "heuristic")]
+  [string]$DPIEngine = "ndpi",
   [switch]$Clean
 )
 
@@ -14,6 +16,10 @@ if ($Clean -and (Test-Path -LiteralPath $outputPath)) {
 }
 
 New-Item -ItemType Directory -Force -Path $outputPath | Out-Null
+
+if ($DPIEngine -eq "ndpi" -and -not (Get-Command docker -ErrorAction SilentlyContinue)) {
+  throw "Docker with buildx is required to build the real nDPI sidecar. Install Docker, or explicitly use -DPIEngine heuristic for a fallback-only release."
+}
 
 $targets = @(
   @{ OS = "linux"; Arch = "amd64" },
@@ -41,7 +47,15 @@ foreach ($target in $targets) {
   $env:GOARCH = $arch
   $env:CGO_ENABLED = "0"
   go build -trimpath -ldflags "-s -w -X main.version=$Version" -o $binaryPath ./apps/agent/cmd/agent
-  go build -trimpath -ldflags "-s -w -X main.version=$Version" -o $dpiBinaryPath ./apps/dpi/cmd/dpi
+  if ($DPIEngine -eq "ndpi") {
+    docker buildx build --platform "$os/$arch" --build-arg "VERSION=$Version" --output "type=local,dest=$workDir" -f deploy/dpi-release.Dockerfile .
+    if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $dpiBinaryPath)) {
+      throw "Failed to build real nDPI sidecar for $os/$arch"
+    }
+  } else {
+    Write-Warning "Building heuristic-only DPI sidecar for $os/$arch"
+    go build -trimpath -ldflags "-s -w -X main.version=$Version" -o $dpiBinaryPath ./apps/dpi/cmd/dpi
+  }
 
   if (Test-Path -LiteralPath $archivePath) {
     Remove-Item -LiteralPath $archivePath -Force
@@ -49,7 +63,14 @@ foreach ($target in $targets) {
 
   Push-Location $workDir
   try {
-    tar -czf $archivePath dusheng-agent dusheng-dpi
+    $archiveEntries = @("dusheng-agent", "dusheng-dpi")
+    if (Test-Path -LiteralPath (Join-Path $workDir "dusheng-dpi-lib")) {
+      $archiveEntries += "dusheng-dpi-lib"
+    }
+    if (Test-Path -LiteralPath (Join-Path $workDir "THIRD_PARTY_NOTICES.md")) {
+      $archiveEntries += "THIRD_PARTY_NOTICES.md"
+    }
+    tar -czf $archivePath @archiveEntries
   } finally {
     Pop-Location
   }

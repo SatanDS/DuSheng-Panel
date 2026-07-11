@@ -69,6 +69,7 @@ type Result struct {
 }
 
 type DPIResult struct {
+	Source     string
 	Protocol   string
 	Category   string
 	Confidence int
@@ -145,7 +146,7 @@ func ApplyDPI(result Result, policy Policy, dpi DPIResult) Result {
 	if strings.TrimSpace(dpi.Protocol) == "" && strings.TrimSpace(dpi.Category) == "" {
 		return result
 	}
-	result.Source = "ndpi"
+	result.Source = defaultString(normalizeToken(dpi.Source), "ndpi")
 	result.NDPIProtocol = normalizeToken(dpi.Protocol)
 	result.NDPICategory = normalizeToken(dpi.Category)
 	result.Confidence = dpi.Confidence

@@ -1,6 +1,7 @@
 package runtime
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -30,8 +31,14 @@ const (
 	defaultMaxTrafficFailures    = 5
 	defaultMaxUDPSessionsPerRule = 4096
 	defaultDPITimeout            = 300 * time.Millisecond
+	defaultInspectionIdleTimeout = 50 * time.Millisecond
+	defaultUDPInspectionPackets  = 12
+	defaultDPIInspectionPackets  = 12
+	defaultDPICloseQueueSize     = 1024
 	maxUDPPacketBytes            = 64 * 1024
 )
+
+var errDPIBlocked = errors.New("connection blocked by DPI policy")
 
 type Reporter interface {
 	ReportTraffic(context.Context, client.TrafficReport) (client.AcceptedResponse, error)
@@ -66,6 +73,7 @@ type Runtime struct {
 	lastApplyErr string
 	closed       bool
 	stopFlush    chan struct{}
+	dpiClose     chan string
 
 	acceptErrors        int64
 	dialErrors          int64
@@ -75,6 +83,8 @@ type Runtime struct {
 	upstreamWriteErrors int64
 	udpCleanedSessions  int64
 	dpiErrors           int64
+	dpiCloseDropped     int64
+	nextDPIFlowID       uint64
 }
 
 type listenerKey struct {
@@ -87,6 +97,8 @@ type managedListener interface {
 	active() int64
 	network() string
 	fingerprint() string
+	bind() string
+	update(ruleRuntimeConfig)
 }
 
 func New(reporter Reporter, logger *log.Logger, options Options) *Runtime {
@@ -129,6 +141,10 @@ func New(reporter Reporter, logger *log.Logger, options Options) *Runtime {
 		listeners: map[listenerKey]managedListener{},
 		trackers:  map[uint]*limitTracker{},
 		stopFlush: make(chan struct{}),
+		dpiClose:  make(chan string, defaultDPICloseQueueSize),
+	}
+	if rt.dpi != nil && rt.dpi.Enabled() {
+		go rt.probeDPI()
 	}
 	go rt.flushLoop()
 	return rt
@@ -165,7 +181,8 @@ func (r *Runtime) Apply(ctx context.Context, cfg client.AgentConfig) error {
 		}
 		desiredCfg.tracker = tracker
 
-		if existing := current[key]; existing != nil && existing.fingerprint() == desiredCfg.fingerprint {
+		if existing := current[key]; existing != nil && existing.bind() == listenerBind(desiredCfg) {
+			existing.update(desiredCfg)
 			next[key] = existing
 			continue
 		}
@@ -237,8 +254,10 @@ func (r *Runtime) Status() map[string]any {
 			"upstreamWrite":       atomic.LoadInt64(&r.upstreamWriteErrors),
 			"udpCleanedSessions":  atomic.LoadInt64(&r.udpCleanedSessions),
 			"dpi":                 atomic.LoadInt64(&r.dpiErrors),
+			"dpiCloseDropped":     atomic.LoadInt64(&r.dpiCloseDropped),
 		},
 		"dpiEnabled": r.dpi != nil && r.dpi.Enabled(),
+		"dpiStatus":  r.dpi.Status(),
 	}
 }
 
@@ -366,13 +385,41 @@ func (r *Runtime) setApplyError(err error) {
 func (r *Runtime) flushLoop() {
 	ticker := time.NewTicker(r.options.FlushInterval)
 	defer ticker.Stop()
+	dpiTicker := time.NewTicker(30 * time.Second)
+	defer dpiTicker.Stop()
 	for {
 		select {
 		case <-ticker.C:
 			r.traffic.flush(context.Background())
+		case <-dpiTicker.C:
+			r.probeDPI()
+		case flowID := <-r.dpiClose:
+			r.closeDPIFlow(flowID)
 		case <-r.stopFlush:
 			return
 		}
+	}
+}
+
+func (r *Runtime) closeDPIFlow(flowID string) {
+	if r.dpi == nil || !r.dpi.Enabled() {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), r.options.DPITimeout)
+	defer cancel()
+	if err := r.dpi.CloseFlow(ctx, flowID); err != nil {
+		atomic.AddInt64(&r.dpiErrors, 1)
+	}
+}
+
+func (r *Runtime) probeDPI() {
+	if r.dpi == nil || !r.dpi.Enabled() {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), r.options.DPITimeout)
+	defer cancel()
+	if err := r.dpi.Probe(ctx); err != nil {
+		atomic.AddInt64(&r.dpiErrors, 1)
 	}
 }
 
@@ -388,8 +435,115 @@ type ruleRuntimeConfig struct {
 	fingerprint string
 }
 
+type dpiFlow struct {
+	runtime         *Runtime
+	cfg             ruleRuntimeConfig
+	id              string
+	network         string
+	sourceIP        string
+	destinationIP   string
+	sourcePort      int
+	destinationPort int
+
+	mu            sync.Mutex
+	packets       int
+	final         bool
+	finalResult   protocol.Result
+	violationRank int
+	closed        bool
+}
+
+func (r *Runtime) newDPIFlow(cfg ruleRuntimeConfig, network string, sourceAddr net.Addr, destination string, destinationPort int) *dpiFlow {
+	sequence := atomic.AddUint64(&r.nextDPIFlowID, 1)
+	sourceIP, sourcePort := addrIPPort(sourceAddr)
+	return &dpiFlow{
+		runtime: r, cfg: cfg, id: fmt.Sprintf("%d-%s-%d", cfg.rule.ID, network, sequence), network: network,
+		sourceIP: sourceIP, destinationIP: destination, sourcePort: sourcePort, destinationPort: destinationPort,
+	}
+}
+
+func (f *dpiFlow) inspect(ctx context.Context, packet []byte, direction string) protocol.Result {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.final {
+		return f.finalResult
+	}
+	if len(packet) == 0 {
+		return protocol.Detect(packet, policyFromClient(f.cfg.policy, f.network))
+	}
+	f.packets++
+	result, final := f.runtime.detectProtocolFlow(ctx, packet, f.cfg, dpi.ClassifyRequest{
+		Network: f.network, FlowID: f.id, Direction: direction,
+		SourceIP: f.sourceIP, DestinationIP: f.destinationIP,
+		SourcePort: f.sourcePort, DestinationPort: f.destinationPort,
+		TimestampMs: time.Now().UnixMilli(),
+	})
+	if final || f.packets >= defaultDPIInspectionPackets {
+		f.final = true
+		f.finalResult = result
+	}
+	return result
+}
+
+func (f *dpiFlow) markViolation(action string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	rank := protocolActionRank(action)
+	if rank <= f.violationRank {
+		return false
+	}
+	f.violationRank = rank
+	return true
+}
+
+func protocolActionRank(action string) int {
+	switch action {
+	case protocol.ActionBlock:
+		return 4
+	case protocol.ActionLimit:
+		return 3
+	case protocol.ActionAlert:
+		return 2
+	case protocol.ActionObserve:
+		return 1
+	default:
+		return 0
+	}
+}
+
+func (f *dpiFlow) close() {
+	f.mu.Lock()
+	if f.closed {
+		f.mu.Unlock()
+		return
+	}
+	f.closed = true
+	f.mu.Unlock()
+	if f.runtime.dpi == nil || !f.runtime.dpi.Enabled() {
+		return
+	}
+	select {
+	case f.runtime.dpiClose <- f.id:
+	default:
+		atomic.AddInt64(&f.runtime.dpiCloseDropped, 1)
+	}
+}
+
+func addrIPPort(addr net.Addr) (string, int) {
+	if addr == nil {
+		return "", 0
+	}
+	host, portText, err := net.SplitHostPort(addr.String())
+	if err != nil {
+		return remoteIP(addr), 0
+	}
+	port, _ := strconv.Atoi(portText)
+	return strings.Trim(host, "[]"), port
+}
+
 type ruleListener struct {
 	runtime *Runtime
+	cfgMu   sync.RWMutex
 	cfg     ruleRuntimeConfig
 	ln      net.Listener
 	stopCh  chan struct{}
@@ -398,6 +552,35 @@ type ruleListener struct {
 	activeConns int64
 	mu          sync.Mutex
 	conns       map[net.Conn]struct{}
+}
+
+func (l *ruleListener) config() ruleRuntimeConfig {
+	l.cfgMu.RLock()
+	defer l.cfgMu.RUnlock()
+	return l.cfg
+}
+
+func (l *ruleListener) update(cfg ruleRuntimeConfig) {
+	old := l.config()
+	l.cfgMu.Lock()
+	l.cfg = cfg
+	l.cfgMu.Unlock()
+	if old.fingerprint != "" && old.fingerprint != cfg.fingerprint {
+		l.closeActiveConns()
+	}
+}
+
+func (l *ruleListener) bind() string {
+	cfg := l.config()
+	return listenerBind(cfg)
+}
+
+func (l *ruleListener) closeActiveConns() {
+	l.mu.Lock()
+	for conn := range l.conns {
+		_ = conn.Close()
+	}
+	l.mu.Unlock()
 }
 
 func (l *ruleListener) acceptLoop() {
@@ -410,7 +593,8 @@ func (l *ruleListener) acceptLoop() {
 				return
 			default:
 				atomic.AddInt64(&l.runtime.acceptErrors, 1)
-				l.runtime.logger.Printf("runtime accept failed rule=%d: %v", l.cfg.rule.ID, err)
+				cfg := l.config()
+				l.runtime.logger.Printf("runtime accept failed rule=%d: %v", cfg.rule.ID, err)
 				continue
 			}
 		}
@@ -423,64 +607,125 @@ func (l *ruleListener) acceptLoop() {
 }
 
 func (l *ruleListener) handle(conn net.Conn) {
+	cfg := l.config()
 	sourceIP := remoteIP(conn.RemoteAddr())
-	if !l.acquire(sourceIP) {
+	if !l.acquireConfig(cfg, sourceIP) {
 		_ = conn.Close()
 		return
 	}
 	l.trackConn(conn)
 	defer l.untrackConn(conn)
-	defer l.release(sourceIP)
+	defer l.releaseConfig(cfg, sourceIP)
 	defer conn.Close()
+	dpiFlow := l.runtime.newDPIFlow(cfg, "tcp", conn.RemoteAddr(), cfg.rule.RemoteHost, cfg.rule.RemotePort)
+	defer dpiFlow.close()
 
 	firstPacket, err := readFirstPacket(conn, l.runtime.options.FirstPacketBytes, l.runtime.options.ReadTimeout)
 	if err != nil && !isBenignFirstRead(err) {
-		l.runtime.logger.Printf("runtime first packet read failed rule=%d source=%s: %v", l.cfg.rule.ID, sourceIP, err)
+		l.runtime.logger.Printf("runtime first packet read failed rule=%d source=%s: %v", cfg.rule.ID, sourceIP, err)
 		return
 	}
 
-	result := l.runtime.detectProtocol(context.Background(), firstPacket, l.cfg, "tcp")
+	result := dpiFlow.inspect(context.Background(), firstPacket, "client_to_server")
 	if result.Action != protocol.ActionAllow {
 		if result.Action == protocol.ActionBlock {
-			l.reportViolation(context.Background(), result, sourceIP)
+			if dpiFlow.markViolation(result.Action) {
+				l.reportViolation(context.Background(), cfg, result, sourceIP)
+			}
 			return
 		}
-		go l.reportViolation(context.Background(), result, sourceIP)
+		if dpiFlow.markViolation(result.Action) {
+			go l.reportViolation(context.Background(), cfg, result, sourceIP)
+		}
 	}
 
-	target, err := net.DialTimeout("tcp", net.JoinHostPort(l.cfg.rule.RemoteHost, strconv.Itoa(l.cfg.rule.RemotePort)), 10*time.Second)
+	target, err := net.DialTimeout("tcp", net.JoinHostPort(cfg.rule.RemoteHost, strconv.Itoa(cfg.rule.RemotePort)), 10*time.Second)
 	if err != nil {
 		atomic.AddInt64(&l.runtime.dialErrors, 1)
-		l.runtime.logger.Printf("runtime dial failed rule=%d target=%s:%d: %v", l.cfg.rule.ID, l.cfg.rule.RemoteHost, l.cfg.rule.RemotePort, err)
+		l.runtime.logger.Printf("runtime dial failed rule=%d target=%s:%d: %v", cfg.rule.ID, cfg.rule.RemoteHost, cfg.rule.RemotePort, err)
 		return
 	}
 	defer target.Close()
+
+	var upstreamFirst []byte
+	if shouldProbeServerFirstSSH(cfg, firstPacket) {
+		upstreamFirst, err = readFirstPacket(target, l.runtime.options.FirstPacketBytes, minDuration(300*time.Millisecond, l.runtime.options.ReadTimeout))
+		if err != nil && !isBenignFirstRead(err) {
+			l.runtime.logger.Printf("runtime upstream first packet read failed rule=%d source=%s: %v", cfg.rule.ID, sourceIP, err)
+			return
+		}
+		if len(upstreamFirst) > 0 {
+			upstreamResult := dpiFlow.inspect(context.Background(), upstreamFirst, "server_to_client")
+			if upstreamResult.Action != protocol.ActionAllow {
+				if upstreamResult.Action == protocol.ActionBlock {
+					if dpiFlow.markViolation(upstreamResult.Action) {
+						l.reportViolation(context.Background(), cfg, upstreamResult, sourceIP)
+					}
+					return
+				}
+				if dpiFlow.markViolation(upstreamResult.Action) {
+					go l.reportViolation(context.Background(), cfg, upstreamResult, sourceIP)
+				}
+			}
+		}
+	}
 
 	if len(firstPacket) > 0 {
 		if _, err := target.Write(firstPacket); err != nil {
 			atomic.AddInt64(&l.runtime.upstreamWriteErrors, 1)
 			return
 		}
-		l.runtime.traffic.add(l.cfg.rule.ID, int64(len(firstPacket)), 0)
+		l.runtime.traffic.add(cfg.rule.ID, int64(len(firstPacket)), 0)
+	}
+	if len(upstreamFirst) > 0 {
+		if _, err := conn.Write(upstreamFirst); err != nil {
+			atomic.AddInt64(&l.runtime.upstreamWriteErrors, 1)
+			return
+		}
+		l.runtime.traffic.add(cfg.rule.ID, 0, int64(len(upstreamFirst)))
 	}
 
-	uploadLimiter := newTokenBucket(l.cfg.limit.UploadBps)
-	downloadLimiter := newTokenBucket(l.cfg.limit.DownloadBps)
+	uploadLimiter := newTokenBucket(cfg.limit.UploadBps)
+	downloadLimiter := newTokenBucket(cfg.limit.DownloadBps)
 	errc := make(chan error, 2)
 	go func() {
-		err := copyWithLimit(target, conn, uploadLimiter, func(n int64) {
-			l.runtime.traffic.add(l.cfg.rule.ID, n, 0)
+		err := copyWithLimit(target, conn, uploadLimiter, func(packet []byte) error {
+			result := dpiFlow.inspect(context.Background(), packet, "client_to_server")
+			if result.Action == protocol.ActionAllow {
+				return nil
+			}
+			if dpiFlow.markViolation(result.Action) {
+				go l.reportViolation(context.Background(), cfg, result, sourceIP)
+			}
+			if result.Action == protocol.ActionBlock {
+				return errDPIBlocked
+			}
+			return nil
+		}, func(n int64) {
+			l.runtime.traffic.add(cfg.rule.ID, n, 0)
 		})
-		if err != nil && !errors.Is(err, net.ErrClosed) {
+		if err != nil && !errors.Is(err, net.ErrClosed) && !errors.Is(err, errDPIBlocked) {
 			atomic.AddInt64(&l.runtime.upstreamWriteErrors, 1)
 		}
 		errc <- err
 	}()
 	go func() {
-		err := copyWithLimit(conn, target, downloadLimiter, func(n int64) {
-			l.runtime.traffic.add(l.cfg.rule.ID, 0, n)
+		err := copyWithLimit(conn, target, downloadLimiter, func(packet []byte) error {
+			result := dpiFlow.inspect(context.Background(), packet, "server_to_client")
+			if result.Action == protocol.ActionAllow {
+				return nil
+			}
+			if dpiFlow.markViolation(result.Action) {
+				go l.reportViolation(context.Background(), cfg, result, sourceIP)
+			}
+			if result.Action == protocol.ActionBlock {
+				return errDPIBlocked
+			}
+			return nil
+		}, func(n int64) {
+			l.runtime.traffic.add(cfg.rule.ID, 0, n)
 		})
-		if err != nil && !errors.Is(err, net.ErrClosed) {
+		if err != nil && !errors.Is(err, net.ErrClosed) && !errors.Is(err, errDPIBlocked) {
 			atomic.AddInt64(&l.runtime.upstreamWriteErrors, 1)
 		}
 		errc <- err
@@ -492,7 +737,11 @@ func (l *ruleListener) handle(conn net.Conn) {
 }
 
 func (l *ruleListener) acquire(sourceIP string) bool {
-	if l.cfg.tracker != nil && !l.cfg.tracker.acquire(sourceIP) {
+	return l.acquireConfig(l.config(), sourceIP)
+}
+
+func (l *ruleListener) acquireConfig(cfg ruleRuntimeConfig, sourceIP string) bool {
+	if cfg.tracker != nil && !cfg.tracker.acquire(sourceIP) {
 		return false
 	}
 	atomic.AddInt64(&l.activeConns, 1)
@@ -500,9 +749,13 @@ func (l *ruleListener) acquire(sourceIP string) bool {
 }
 
 func (l *ruleListener) release(sourceIP string) {
+	l.releaseConfig(l.config(), sourceIP)
+}
+
+func (l *ruleListener) releaseConfig(cfg ruleRuntimeConfig, sourceIP string) {
 	atomic.AddInt64(&l.activeConns, -1)
-	if l.cfg.tracker != nil {
-		l.cfg.tracker.release(sourceIP)
+	if cfg.tracker != nil {
+		cfg.tracker.release(sourceIP)
 	}
 }
 
@@ -527,7 +780,8 @@ func (l *ruleListener) network() string {
 }
 
 func (l *ruleListener) fingerprint() string {
-	return l.cfg.fingerprint
+	cfg := l.config()
+	return cfg.fingerprint
 }
 
 func (l *ruleListener) stop() {
@@ -537,26 +791,23 @@ func (l *ruleListener) stop() {
 	default:
 		close(l.stopCh)
 		_ = l.ln.Close()
-		l.mu.Lock()
-		for conn := range l.conns {
-			_ = conn.Close()
-		}
-		l.mu.Unlock()
+		l.closeActiveConns()
 		l.wg.Wait()
-		l.runtime.logger.Printf("runtime listener stopped rule=%d addr=%s", l.cfg.rule.ID, l.cfg.listenAddr)
+		cfg := l.config()
+		l.runtime.logger.Printf("runtime listener stopped rule=%d addr=%s", cfg.rule.ID, cfg.listenAddr)
 	}
 }
 
-func (l *ruleListener) reportViolation(ctx context.Context, result protocol.Result, sourceIP string) {
-	if l.runtime.reporter == nil || l.cfg.policy == nil {
+func (l *ruleListener) reportViolation(ctx context.Context, cfg ruleRuntimeConfig, result protocol.Result, sourceIP string) {
+	if l.runtime.reporter == nil || cfg.policy == nil {
 		return
 	}
 	detail, _ := json.Marshal(map[string]any{
 		"reason":       result.Reason,
 		"host":         result.Host,
 		"alpn":         result.ALPN,
-		"ruleId":       l.cfg.rule.ID,
-		"tunnelId":     l.cfg.tunnel.ID,
+		"ruleId":       cfg.rule.ID,
+		"tunnelId":     cfg.tunnel.ID,
 		"source":       "tcp_runtime",
 		"detector":     result.Source,
 		"matchedRule":  result.MatchedRule,
@@ -568,15 +819,15 @@ func (l *ruleListener) reportViolation(ctx context.Context, result protocol.Resu
 		"ndpiCategory": result.NDPICategory,
 	})
 	_, err := l.runtime.reporter.ReportViolation(ctx, client.ViolationReport{
-		RuleID:   l.cfg.rule.ID,
-		PolicyID: l.cfg.policy.ID,
+		RuleID:   cfg.rule.ID,
+		PolicyID: cfg.policy.ID,
 		Protocol: result.Protocol,
 		SourceIP: sourceIP,
 		Action:   result.Action,
 		Detail:   string(detail),
 	})
 	if err != nil {
-		l.runtime.logger.Printf("runtime violation report failed rule=%d: %v", l.cfg.rule.ID, err)
+		l.runtime.logger.Printf("runtime violation report failed rule=%d: %v", cfg.rule.ID, err)
 	}
 }
 
@@ -601,6 +852,7 @@ func (r *Runtime) startUDPListener(ctx context.Context, cfg ruleRuntimeConfig) (
 
 type udpListener struct {
 	runtime *Runtime
+	cfgMu   sync.RWMutex
 	cfg     ruleRuntimeConfig
 	conn    net.PacketConn
 	stopCh  chan struct{}
@@ -611,15 +863,39 @@ type udpListener struct {
 }
 
 type udpSession struct {
-	listener        *udpListener
-	key             string
-	clientAddr      net.Addr
-	sourceIP        string
-	upstream        net.Conn
-	uploadLimiter   *tokenBucket
-	downloadLimiter *tokenBucket
-	lastSeen        int64
-	closeOnce       sync.Once
+	listener         *udpListener
+	cfg              ruleRuntimeConfig
+	key              string
+	clientAddr       net.Addr
+	sourceIP         string
+	upstream         net.Conn
+	dpiFlow          *dpiFlow
+	uploadLimiter    *tokenBucket
+	downloadLimiter  *tokenBucket
+	lastSeen         int64
+	inspectedPackets int
+	closeOnce        sync.Once
+}
+
+func (l *udpListener) config() ruleRuntimeConfig {
+	l.cfgMu.RLock()
+	defer l.cfgMu.RUnlock()
+	return l.cfg
+}
+
+func (l *udpListener) update(cfg ruleRuntimeConfig) {
+	old := l.config()
+	l.cfgMu.Lock()
+	l.cfg = cfg
+	l.cfgMu.Unlock()
+	if old.fingerprint != "" && old.fingerprint != cfg.fingerprint {
+		l.closeAllSessions()
+	}
+}
+
+func (l *udpListener) bind() string {
+	cfg := l.config()
+	return listenerBind(cfg)
 }
 
 func (l *udpListener) readLoop() {
@@ -633,7 +909,8 @@ func (l *udpListener) readLoop() {
 				return
 			default:
 				atomic.AddInt64(&l.runtime.udpReadErrors, 1)
-				l.runtime.logger.Printf("runtime udp read failed rule=%d: %v", l.cfg.rule.ID, err)
+				cfg := l.config()
+				l.runtime.logger.Printf("runtime udp read failed rule=%d: %v", cfg.rule.ID, err)
 				continue
 			}
 		}
@@ -664,62 +941,80 @@ func (l *udpListener) cleanupLoop() {
 }
 
 func (l *udpListener) handleDatagram(clientAddr net.Addr, packet []byte) {
+	cfg := l.config()
 	key := clientAddr.String()
 	l.mu.Lock()
 	session := l.sessions[key]
 	if session == nil && l.runtime.options.MaxUDPSessionsPerRule > 0 && len(l.sessions) >= l.runtime.options.MaxUDPSessionsPerRule {
 		l.mu.Unlock()
 		atomic.AddInt64(&l.runtime.udpRejectedSessions, 1)
-		l.runtime.logger.Printf("runtime udp session rejected by runtime cap rule=%d client=%s", l.cfg.rule.ID, clientAddr.String())
+		l.runtime.logger.Printf("runtime udp session rejected by runtime cap rule=%d client=%s", cfg.rule.ID, clientAddr.String())
 		return
 	}
 	l.mu.Unlock()
 	if session != nil {
+		if !session.inspectPacket(packet) {
+			return
+		}
 		session.forwardClientPacket(packet)
 		return
 	}
 
 	sourceIP := remoteIP(clientAddr)
-	result := l.runtime.detectProtocol(context.Background(), packet, l.cfg, "udp")
+	dpiFlow := l.runtime.newDPIFlow(cfg, "udp", clientAddr, cfg.rule.RemoteHost, cfg.rule.RemotePort)
+	result := dpiFlow.inspect(context.Background(), packet, "client_to_server")
 	if result.Action != protocol.ActionAllow {
 		if result.Action == protocol.ActionBlock {
-			l.reportViolation(context.Background(), result, sourceIP, clientAddr.String())
+			if dpiFlow.markViolation(result.Action) {
+				l.reportViolation(context.Background(), cfg, result, sourceIP, clientAddr.String())
+			}
+			dpiFlow.close()
 			return
 		}
-		go l.reportViolation(context.Background(), result, sourceIP, clientAddr.String())
+		if dpiFlow.markViolation(result.Action) {
+			go l.reportViolation(context.Background(), cfg, result, sourceIP, clientAddr.String())
+		}
 	}
 
-	if l.cfg.tracker != nil && !l.cfg.tracker.acquire(sourceIP) {
+	if cfg.tracker != nil && !cfg.tracker.acquire(sourceIP) {
+		dpiFlow.close()
 		atomic.AddInt64(&l.runtime.udpRejectedSessions, 1)
-		l.runtime.logger.Printf("runtime udp session rejected by limit rule=%d client=%s", l.cfg.rule.ID, clientAddr.String())
+		l.runtime.logger.Printf("runtime udp session rejected by limit rule=%d client=%s", cfg.rule.ID, clientAddr.String())
 		return
 	}
-	upstream, err := net.DialTimeout("udp", net.JoinHostPort(l.cfg.rule.RemoteHost, strconv.Itoa(l.cfg.rule.RemotePort)), 10*time.Second)
+	upstream, err := net.DialTimeout("udp", net.JoinHostPort(cfg.rule.RemoteHost, strconv.Itoa(cfg.rule.RemotePort)), 10*time.Second)
 	if err != nil {
-		if l.cfg.tracker != nil {
-			l.cfg.tracker.release(sourceIP)
+		dpiFlow.close()
+		if cfg.tracker != nil {
+			cfg.tracker.release(sourceIP)
 		}
 		atomic.AddInt64(&l.runtime.udpDialErrors, 1)
-		l.runtime.logger.Printf("runtime udp dial failed rule=%d target=%s:%d: %v", l.cfg.rule.ID, l.cfg.rule.RemoteHost, l.cfg.rule.RemotePort, err)
+		l.runtime.logger.Printf("runtime udp dial failed rule=%d target=%s:%d: %v", cfg.rule.ID, cfg.rule.RemoteHost, cfg.rule.RemotePort, err)
 		return
 	}
 	session = &udpSession{
-		listener:        l,
-		key:             key,
-		clientAddr:      clientAddr,
-		sourceIP:        sourceIP,
-		upstream:        upstream,
-		uploadLimiter:   newTokenBucket(l.cfg.limit.UploadBps),
-		downloadLimiter: newTokenBucket(l.cfg.limit.DownloadBps),
-		lastSeen:        time.Now().UnixNano(),
+		listener:         l,
+		cfg:              cfg,
+		key:              key,
+		clientAddr:       clientAddr,
+		sourceIP:         sourceIP,
+		upstream:         upstream,
+		dpiFlow:          dpiFlow,
+		uploadLimiter:    newTokenBucket(cfg.limit.UploadBps),
+		downloadLimiter:  newTokenBucket(cfg.limit.DownloadBps),
+		lastSeen:         time.Now().UnixNano(),
+		inspectedPackets: 1,
 	}
 
 	l.mu.Lock()
 	if existing := l.sessions[key]; existing != nil {
 		l.mu.Unlock()
 		session.close()
-		if l.cfg.tracker != nil {
-			l.cfg.tracker.release(sourceIP)
+		if cfg.tracker != nil {
+			cfg.tracker.release(sourceIP)
+		}
+		if !existing.inspectPacket(packet) {
+			return
 		}
 		existing.forwardClientPacket(packet)
 		return
@@ -727,11 +1022,11 @@ func (l *udpListener) handleDatagram(clientAddr net.Addr, packet []byte) {
 	if l.runtime.options.MaxUDPSessionsPerRule > 0 && len(l.sessions) >= l.runtime.options.MaxUDPSessionsPerRule {
 		l.mu.Unlock()
 		session.close()
-		if l.cfg.tracker != nil {
-			l.cfg.tracker.release(sourceIP)
+		if cfg.tracker != nil {
+			cfg.tracker.release(sourceIP)
 		}
 		atomic.AddInt64(&l.runtime.udpRejectedSessions, 1)
-		l.runtime.logger.Printf("runtime udp session rejected by runtime cap rule=%d client=%s", l.cfg.rule.ID, clientAddr.String())
+		l.runtime.logger.Printf("runtime udp session rejected by runtime cap rule=%d client=%s", cfg.rule.ID, clientAddr.String())
 		return
 	}
 	l.sessions[key] = session
@@ -755,8 +1050,8 @@ func (l *udpListener) closeIdleSessions(now time.Time) {
 	l.mu.Unlock()
 	for _, session := range stale {
 		session.close()
-		if l.cfg.tracker != nil {
-			l.cfg.tracker.release(session.sourceIP)
+		if session.cfg.tracker != nil {
+			session.cfg.tracker.release(session.sourceIP)
 		}
 	}
 	if len(stale) > 0 {
@@ -770,16 +1065,16 @@ func (l *udpListener) removeSession(session *udpSession) {
 		delete(l.sessions, session.key)
 		l.mu.Unlock()
 		session.close()
-		if l.cfg.tracker != nil {
-			l.cfg.tracker.release(session.sourceIP)
+		if session.cfg.tracker != nil {
+			session.cfg.tracker.release(session.sourceIP)
 		}
 		return
 	}
 	l.mu.Unlock()
 }
 
-func (l *udpListener) reportViolation(ctx context.Context, result protocol.Result, sourceIP, clientAddr string) {
-	if l.runtime.reporter == nil || l.cfg.policy == nil {
+func (l *udpListener) reportViolation(ctx context.Context, cfg ruleRuntimeConfig, result protocol.Result, sourceIP, clientAddr string) {
+	if l.runtime.reporter == nil || cfg.policy == nil {
 		return
 	}
 	detail, _ := json.Marshal(map[string]any{
@@ -787,8 +1082,8 @@ func (l *udpListener) reportViolation(ctx context.Context, result protocol.Resul
 		"host":         result.Host,
 		"alpn":         result.ALPN,
 		"protocol":     result.Protocol,
-		"ruleId":       l.cfg.rule.ID,
-		"tunnelId":     l.cfg.tunnel.ID,
+		"ruleId":       cfg.rule.ID,
+		"tunnelId":     cfg.tunnel.ID,
 		"clientAddr":   clientAddr,
 		"source":       "udp_runtime",
 		"detector":     result.Source,
@@ -801,15 +1096,15 @@ func (l *udpListener) reportViolation(ctx context.Context, result protocol.Resul
 		"ndpiCategory": result.NDPICategory,
 	})
 	_, err := l.runtime.reporter.ReportViolation(ctx, client.ViolationReport{
-		RuleID:   l.cfg.rule.ID,
-		PolicyID: l.cfg.policy.ID,
+		RuleID:   cfg.rule.ID,
+		PolicyID: cfg.policy.ID,
 		Protocol: result.Protocol,
 		SourceIP: sourceIP,
 		Action:   result.Action,
 		Detail:   string(detail),
 	})
 	if err != nil {
-		l.runtime.logger.Printf("runtime udp violation report failed rule=%d: %v", l.cfg.rule.ID, err)
+		l.runtime.logger.Printf("runtime udp violation report failed rule=%d: %v", cfg.rule.ID, err)
 	}
 }
 
@@ -824,7 +1119,24 @@ func (l *udpListener) network() string {
 }
 
 func (l *udpListener) fingerprint() string {
-	return l.cfg.fingerprint
+	cfg := l.config()
+	return cfg.fingerprint
+}
+
+func (l *udpListener) closeAllSessions() {
+	l.mu.Lock()
+	sessions := make([]*udpSession, 0, len(l.sessions))
+	for key, session := range l.sessions {
+		delete(l.sessions, key)
+		sessions = append(sessions, session)
+	}
+	l.mu.Unlock()
+	for _, session := range sessions {
+		session.close()
+		if session.cfg.tracker != nil {
+			session.cfg.tracker.release(session.sourceIP)
+		}
+	}
 }
 
 func (l *udpListener) stop() {
@@ -834,21 +1146,10 @@ func (l *udpListener) stop() {
 	default:
 		close(l.stopCh)
 		_ = l.conn.Close()
-		l.mu.Lock()
-		sessions := make([]*udpSession, 0, len(l.sessions))
-		for key, session := range l.sessions {
-			delete(l.sessions, key)
-			sessions = append(sessions, session)
-		}
-		l.mu.Unlock()
-		for _, session := range sessions {
-			session.close()
-			if l.cfg.tracker != nil {
-				l.cfg.tracker.release(session.sourceIP)
-			}
-		}
+		l.closeAllSessions()
 		l.wg.Wait()
-		l.runtime.logger.Printf("runtime udp listener stopped rule=%d addr=%s", l.cfg.rule.ID, l.cfg.listenAddr)
+		cfg := l.config()
+		l.runtime.logger.Printf("runtime udp listener stopped rule=%d addr=%s", cfg.rule.ID, cfg.listenAddr)
 	}
 }
 
@@ -860,15 +1161,25 @@ func (s *udpSession) readLoop() {
 		n, err := s.upstream.Read(buf)
 		if n > 0 {
 			packet := append([]byte(nil), buf[:n]...)
+			result := s.dpiFlow.inspect(context.Background(), packet, "server_to_client")
+			if result.Action != protocol.ActionAllow {
+				if s.dpiFlow.markViolation(result.Action) {
+					go s.listener.reportViolation(context.Background(), s.cfg, result, s.sourceIP, s.clientAddr.String())
+				}
+				if result.Action == protocol.ActionBlock {
+					s.listener.removeSession(s)
+					return
+				}
+			}
 			s.downloadLimiter.wait(len(packet))
 			written, writeErr := s.listener.conn.WriteTo(packet, s.clientAddr)
 			if written > 0 {
-				s.listener.runtime.traffic.add(s.listener.cfg.rule.ID, 0, int64(written))
+				s.listener.runtime.traffic.add(s.cfg.rule.ID, 0, int64(written))
 			}
 			s.touch()
 			if writeErr != nil {
 				atomic.AddInt64(&s.listener.runtime.upstreamWriteErrors, 1)
-				s.listener.runtime.logger.Printf("runtime udp client write failed rule=%d client=%s: %v", s.listener.cfg.rule.ID, s.clientAddr.String(), writeErr)
+				s.listener.runtime.logger.Printf("runtime udp client write failed rule=%d client=%s: %v", s.cfg.rule.ID, s.clientAddr.String(), writeErr)
 				return
 			}
 		}
@@ -877,7 +1188,7 @@ func (s *udpSession) readLoop() {
 			case <-s.listener.stopCh:
 			default:
 				if !errors.Is(err, net.ErrClosed) {
-					s.listener.runtime.logger.Printf("runtime udp upstream read failed rule=%d client=%s: %v", s.listener.cfg.rule.ID, s.clientAddr.String(), err)
+					s.listener.runtime.logger.Printf("runtime udp upstream read failed rule=%d client=%s: %v", s.cfg.rule.ID, s.clientAddr.String(), err)
 				}
 			}
 			return
@@ -890,13 +1201,42 @@ func (s *udpSession) forwardClientPacket(packet []byte) {
 	s.uploadLimiter.wait(len(packet))
 	written, err := s.upstream.Write(packet)
 	if written > 0 {
-		s.listener.runtime.traffic.add(s.listener.cfg.rule.ID, int64(written), 0)
+		s.listener.runtime.traffic.add(s.cfg.rule.ID, int64(written), 0)
 	}
 	if err != nil {
 		atomic.AddInt64(&s.listener.runtime.upstreamWriteErrors, 1)
-		s.listener.runtime.logger.Printf("runtime udp upstream write failed rule=%d client=%s: %v", s.listener.cfg.rule.ID, s.clientAddr.String(), err)
+		s.listener.runtime.logger.Printf("runtime udp upstream write failed rule=%d client=%s: %v", s.cfg.rule.ID, s.clientAddr.String(), err)
 		s.listener.removeSession(s)
 	}
+}
+
+func (s *udpSession) inspectPacket(packet []byte) bool {
+	if s.inspectedPackets >= udpInspectionPackets(s.cfg) {
+		return true
+	}
+	s.inspectedPackets++
+	result := s.dpiFlow.inspect(context.Background(), packet, "client_to_server")
+	if result.Action == protocol.ActionAllow {
+		return true
+	}
+	if result.Action == protocol.ActionBlock {
+		if s.dpiFlow.markViolation(result.Action) {
+			s.listener.reportViolation(context.Background(), s.cfg, result, s.sourceIP, s.clientAddr.String())
+		}
+		s.listener.removeSession(s)
+		return false
+	}
+	if s.dpiFlow.markViolation(result.Action) {
+		go s.listener.reportViolation(context.Background(), s.cfg, result, s.sourceIP, s.clientAddr.String())
+	}
+	return true
+}
+
+func udpInspectionPackets(cfg ruleRuntimeConfig) int {
+	if cfg.policy == nil {
+		return 1
+	}
+	return defaultUDPInspectionPackets
 }
 
 func (s *udpSession) touch() {
@@ -910,14 +1250,26 @@ func (s *udpSession) lastSeenAt() int64 {
 func (s *udpSession) close() {
 	s.closeOnce.Do(func() {
 		_ = s.upstream.Close()
+		if s.dpiFlow != nil {
+			s.dpiFlow.close()
+		}
 	})
 }
 
 func (r *Runtime) detectProtocol(ctx context.Context, packet []byte, cfg ruleRuntimeConfig, network string) protocol.Result {
+	result, _ := r.detectProtocolFlow(ctx, packet, cfg, dpi.ClassifyRequest{Network: network})
+	return result
+}
+
+func (r *Runtime) detectProtocolFlow(ctx context.Context, packet []byte, cfg ruleRuntimeConfig, request dpi.ClassifyRequest) (protocol.Result, bool) {
+	network := request.Network
 	policy := policyFromClient(cfg.policy, network)
 	result := protocol.Detect(packet, policy)
+	if result.Action == protocol.ActionBlock && result.Protocol != protocol.NameUnknown {
+		return result, true
+	}
 	if !shouldUseDPI(cfg.policy, result) || r.dpi == nil || !r.dpi.Enabled() {
-		return result
+		return result, result.Protocol != protocol.NameUnknown
 	}
 	timeout := r.options.DPITimeout
 	if cfg.policy != nil && cfg.policy.DPITimeoutMs > 0 {
@@ -928,19 +1280,27 @@ func (r *Runtime) detectProtocol(ctx context.Context, packet []byte, cfg ruleRun
 	}
 	dpiCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	verdict, err := r.dpi.Classify(dpiCtx, dpi.ClassifyRequest{
-		Network:         network,
-		Payload:         packet,
-		BuiltinProtocol: result.Protocol,
-		Host:            result.Host,
-		ALPN:            result.ALPN,
-		RuleID:          cfg.rule.ID,
-	})
+	request.Network = network
+	request.Payload = packet
+	request.BuiltinProtocol = result.Protocol
+	request.Host = result.Host
+	request.ALPN = result.ALPN
+	request.RuleID = cfg.rule.ID
+	verdict, err := r.dpi.Classify(dpiCtx, request)
 	if err != nil {
 		atomic.AddInt64(&r.dpiErrors, 1)
-		return result
+		return result, false
 	}
-	return protocol.ApplyDPI(result, policy, protocol.DPIResult{
+	if !verdict.Final && (verdict.Protocol == "" || verdict.Protocol == protocol.NameUnknown || verdict.Confidence < 80) {
+		if result.Protocol == protocol.NameUnknown {
+			result.Action = protocol.ActionAllow
+			result.Reason = "nDPI multi-packet inspection is pending"
+			result.MatchedRule = "ndpi_pending"
+		}
+		return result, false
+	}
+	result = protocol.ApplyDPI(result, policy, protocol.DPIResult{
+		Source:     verdict.Engine,
 		Protocol:   verdict.Protocol,
 		Category:   verdict.Category,
 		Confidence: verdict.Confidence,
@@ -948,6 +1308,7 @@ func (r *Runtime) detectProtocol(ctx context.Context, packet []byte, cfg ruleRun
 		RiskLevel:  verdict.RiskLevel,
 		Tags:       verdict.Tags,
 	})
+	return result, verdict.Final
 }
 
 func shouldUseDPI(policy *client.ProtocolPolicy, result protocol.Result) bool {
@@ -976,10 +1337,18 @@ type trafficBuffer struct {
 
 	mu             sync.Mutex
 	samples        map[uint]client.TrafficSample
+	retryBatches   []trafficBatch
 	pendingBytes   int64
 	flushFailures  int
 	droppedSamples int64
 	droppedBytes   int64
+	nextReportSeq  uint64
+}
+
+type trafficBatch struct {
+	reportID string
+	samples  []client.TrafficSample
+	bytes    int64
 }
 
 func newTrafficBuffer(reporter Reporter, logger *log.Logger, options Options) *trafficBuffer {
@@ -1032,30 +1401,42 @@ func (b *trafficBuffer) flush(ctx context.Context) {
 		return
 	}
 	b.mu.Lock()
-	if len(b.samples) == 0 {
+	if len(b.samples) == 0 && len(b.retryBatches) == 0 {
 		b.mu.Unlock()
 		return
 	}
-	samples := make([]client.TrafficSample, 0, len(b.samples))
-	pendingBytes := b.pendingBytes
-	for _, sample := range b.samples {
-		samples = append(samples, sample)
+	var batch trafficBatch
+	if len(b.retryBatches) > 0 {
+		batch = b.retryBatches[0]
+		b.retryBatches = b.retryBatches[1:]
+	} else {
+		batch.samples = make([]client.TrafficSample, 0, len(b.samples))
+		batch.bytes = b.pendingBytes
+		batch.reportID = b.newReportIDLocked()
+		for _, sample := range b.samples {
+			batch.samples = append(batch.samples, sample)
+		}
+		b.samples = map[uint]client.TrafficSample{}
+		b.pendingBytes = 0
 	}
-	b.samples = map[uint]client.TrafficSample{}
-	b.pendingBytes = 0
 	b.mu.Unlock()
 
-	if _, err := b.reporter.ReportTraffic(ctx, client.TrafficReport{Samples: samples}); err != nil {
+	if _, err := b.reporter.ReportTraffic(ctx, client.TrafficReport{ReportID: batch.reportID, Samples: batch.samples}); err != nil {
 		b.logger.Printf("runtime traffic report failed: %v", err)
 		b.mu.Lock()
 		b.flushFailures++
 		if b.maxFailures > 0 && b.flushFailures >= b.maxFailures {
-			b.droppedSamples += int64(len(samples))
-			b.droppedBytes += pendingBytes
+			b.droppedSamples += int64(len(batch.samples))
+			b.droppedBytes += batch.bytes
 			b.mu.Unlock()
 			return
 		}
-		for _, sample := range samples {
+		if len(b.retryBatches) < b.maxFailures || b.maxFailures <= 0 {
+			b.retryBatches = append([]trafficBatch{batch}, b.retryBatches...)
+			b.mu.Unlock()
+			return
+		}
+		for _, sample := range batch.samples {
 			bytes := sample.InBytes + sample.OutBytes
 			if bytes < 0 {
 				bytes = 0
@@ -1090,6 +1471,7 @@ func (b *trafficBuffer) status() map[string]any {
 	defer b.mu.Unlock()
 	return map[string]any{
 		"pendingSamples": len(b.samples),
+		"retryBatches":   len(b.retryBatches),
 		"pendingBytes":   b.pendingBytes,
 		"flushFailures":  b.flushFailures,
 		"droppedSamples": b.droppedSamples,
@@ -1098,6 +1480,11 @@ func (b *trafficBuffer) status() map[string]any {
 		"maxBytes":       b.maxBytes,
 		"maxFailures":    b.maxFailures,
 	}
+}
+
+func (b *trafficBuffer) newReportIDLocked() string {
+	b.nextReportSeq++
+	return fmt.Sprintf("%d-%d", time.Now().UnixNano(), b.nextReportSeq)
 }
 
 type effectiveSpeedLimit struct {
@@ -1248,11 +1635,17 @@ func (b *tokenBucket) wait(n int) {
 	}
 }
 
-func copyWithLimit(dst net.Conn, src net.Conn, limiter *tokenBucket, count func(int64)) error {
+func copyWithLimit(dst net.Conn, src net.Conn, limiter *tokenBucket, inspect func([]byte) error, count func(int64)) error {
 	buf := make([]byte, 32*1024)
 	for {
 		n, readErr := src.Read(buf)
 		if n > 0 {
+			if inspect != nil {
+				packet := append([]byte(nil), buf[:n]...)
+				if err := inspect(packet); err != nil {
+					return err
+				}
+			}
 			limiter.wait(n)
 			if _, err := writeFull(dst, buf[:n]); err != nil {
 				return err
@@ -1285,19 +1678,95 @@ func readFirstPacket(conn net.Conn, maxBytes int, timeout time.Duration) ([]byte
 	if maxBytes <= 0 {
 		maxBytes = defaultFirstPacketBytes
 	}
-	if timeout > 0 {
-		_ = conn.SetReadDeadline(time.Now().Add(timeout))
-		defer conn.SetReadDeadline(time.Time{})
-	}
 	buf := make([]byte, maxBytes)
-	n, err := conn.Read(buf)
-	if n > 0 {
-		return buf[:n], nil
+	if timeout <= 0 {
+		timeout = defaultReadTimeout
 	}
-	if err != nil {
-		return nil, err
+	deadline := time.Now().Add(timeout)
+	defer conn.SetReadDeadline(time.Time{})
+
+	var used int
+	for used < maxBytes {
+		if used > 0 && !needsMoreInitialBytes(buf[:used]) {
+			return buf[:used], nil
+		}
+		readDeadline := deadline
+		if used > 0 && softMoreInitialBytes(buf[:used]) {
+			idleDeadline := time.Now().Add(defaultInspectionIdleTimeout)
+			if idleDeadline.Before(readDeadline) {
+				readDeadline = idleDeadline
+			}
+		}
+		_ = conn.SetReadDeadline(readDeadline)
+		n, err := conn.Read(buf[used:])
+		if n > 0 {
+			used += n
+			continue
+		}
+		if err != nil {
+			if used > 0 && isBenignFirstRead(err) {
+				return buf[:used], nil
+			}
+			return nil, err
+		}
+		if time.Now().After(deadline) {
+			break
+		}
+	}
+	if used > 0 {
+		return buf[:used], nil
 	}
 	return nil, nil
+}
+
+func needsMoreInitialBytes(packet []byte) bool {
+	if len(packet) == 0 {
+		return true
+	}
+	if packet[0] == 0x16 {
+		if len(packet) < 5 {
+			return true
+		}
+		recordLen := int(packet[3])<<8 | int(packet[4])
+		return recordLen > 0 && len(packet) < 5+recordLen
+	}
+	if isPrefixOf(packet, "SSH-") {
+		return !bytes.Contains(packet, []byte{'\n'}) && len(packet) < 255
+	}
+	if len(packet) > 0 && (packet[0] == 0x05 || packet[0] == 0x04) {
+		if packet[0] == 0x05 {
+			if len(packet) < 2 {
+				return true
+			}
+			return len(packet) < 2+int(packet[1])
+		}
+		return len(packet) < 9
+	}
+	if possibleHTTPPrefix(packet) {
+		return !bytes.Contains(packet, []byte("\r\n\r\n"))
+	}
+	return false
+}
+
+func softMoreInitialBytes(packet []byte) bool {
+	return possibleHTTPPrefix(packet) && !bytes.Contains(packet, []byte("\r\n\r\n"))
+}
+
+func possibleHTTPPrefix(packet []byte) bool {
+	methods := []string{"GET ", "POST ", "PUT ", "DELETE ", "PATCH ", "HEAD ", "OPTIONS ", "CONNECT ", "TRACE "}
+	for _, method := range methods {
+		if isPrefixOf(packet, method) {
+			return true
+		}
+	}
+	return false
+}
+
+func isPrefixOf(packet []byte, value string) bool {
+	if len(packet) > len(value) {
+		return bytes.HasPrefix(packet, []byte(value))
+	}
+	return bytes.HasPrefix([]byte(value), packet)
 }
 
 func isBenignFirstRead(err error) bool {
@@ -1308,12 +1777,24 @@ func isBenignFirstRead(err error) bool {
 	return errors.As(err, &netErr) && netErr.Timeout()
 }
 
+func shouldProbeServerFirstSSH(cfg ruleRuntimeConfig, firstPacket []byte) bool {
+	if len(firstPacket) > 0 || cfg.policy == nil {
+		return false
+	}
+	result := protocol.Detect([]byte("SSH-2.0-dusheng-probe\r\n"), policyFromClient(cfg.policy, "tcp"))
+	return result.Action != protocol.ActionAllow
+}
+
 func skipRule(rule client.ForwardRule) bool {
 	status := strings.ToLower(strings.TrimSpace(rule.Status))
 	if status == "paused" || status == "disabled" || status == "deleted" || status == "quota_exhausted" {
 		return true
 	}
 	return rule.ListenPort <= 0 || rule.RemoteHost == "" || rule.RemotePort <= 0
+}
+
+func listenerBind(cfg ruleRuntimeConfig) string {
+	return cfg.network + "|" + cfg.listenAddr
 }
 
 func isTCPRule(rule client.ForwardRule) bool {
@@ -1478,6 +1959,16 @@ func minPositive64(current, candidate int64) int64 {
 		return candidate
 	}
 	return current
+}
+
+func minDuration(a, b time.Duration) time.Duration {
+	if a <= 0 {
+		return b
+	}
+	if b <= 0 || a < b {
+		return a
+	}
+	return b
 }
 
 func errorString(err error) string {

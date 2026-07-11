@@ -85,6 +85,7 @@ type AgentConfig struct {
 	SpeedLimits      []SpeedLimit     `json:"speedLimits"`
 	Revision         int64            `json:"revision"`
 	GeneratedAt      time.Time        `json:"generatedAt"`
+	ValidUntil       time.Time        `json:"validUntil"`
 }
 
 type Node struct {
@@ -197,7 +198,8 @@ type TrafficSample struct {
 }
 
 type TrafficReport struct {
-	Samples []TrafficSample `json:"samples"`
+	ReportID string          `json:"reportId,omitempty"`
+	Samples  []TrafficSample `json:"samples"`
 }
 
 type AcceptedResponse struct {

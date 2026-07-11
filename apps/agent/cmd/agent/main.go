@@ -19,7 +19,7 @@ import (
 	"dusheng-panel/apps/agent/internal/supervisor"
 )
 
-const version = "dev"
+var version = "dev"
 
 func main() {
 	logger := log.New(os.Stdout, "dusheng-agent ", log.LstdFlags|log.Lmicroseconds)
@@ -139,7 +139,7 @@ func sendHeartbeat(ctx context.Context, api *client.Client, syncer *configsync.S
 			"dpiAddr":           dpiAddr,
 			"dpiEnabled":        dpiAddr != "",
 			"trafficReporting":  "tcp_udp_runtime",
-			"protocolDetection": "tcp_udp_runtime_ndpi",
+			"protocolDetection": "tcp_udp_runtime_dpi",
 		},
 	})
 	if err != nil {

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"net/netip"
 	"strconv"
 	"strings"
 	"sync"
@@ -25,6 +26,7 @@ type Server struct {
 }
 
 const nodeOfflineAfter = 90 * time.Second
+const agentConfigLease = 2 * time.Minute
 const (
 	defaultPageSize = 25
 	maxPageSize     = 200
@@ -1614,6 +1616,12 @@ func (s *Server) createForwardRule(c *gin.Context) {
 	if ctxRole(c) != "admin" {
 		rule.UserID = ctxUserID(c)
 	}
+	if ctxRole(c) != "admin" {
+		if forbidden, reason := forbiddenRemoteHost(rule.RemoteHost); forbidden {
+			bad(c, fmt.Errorf("remoteHost is not allowed: %s", reason))
+			return
+		}
+	}
 	if err := s.prepareForwardRule(&rule, 0); err != nil {
 		bad(c, err)
 		return
@@ -1652,6 +1660,12 @@ func (s *Server) updateForwardRule(c *gin.Context) {
 	}
 	if ctxRole(c) != "admin" {
 		existing.UserID = ctxUserID(c)
+	}
+	if ctxRole(c) != "admin" {
+		if forbidden, reason := forbiddenRemoteHost(existing.RemoteHost); forbidden {
+			bad(c, fmt.Errorf("remoteHost is not allowed: %s", reason))
+			return
+		}
 	}
 	if err := s.prepareForwardRule(&existing, existing.ID); err != nil {
 		bad(c, err)
@@ -1759,7 +1773,7 @@ func (s *Server) prepareForwardRule(rule *models.ForwardRule, excludeID uint) er
 		return errors.New("entry device group not found")
 	}
 	if rule.ListenPort == 0 {
-		port, err := s.allocatePort(tunnel.ID, entry.PortStart, entry.PortEnd)
+		port, err := s.allocatePort(entry.ID, rule.Protocol, entry.PortStart, entry.PortEnd, excludeID)
 		if err != nil {
 			return err
 		}
@@ -1771,16 +1785,12 @@ func (s *Server) prepareForwardRule(rule *models.ForwardRule, excludeID uint) er
 	if entry.PortStart > 0 && entry.PortEnd > 0 && (rule.ListenPort < entry.PortStart || rule.ListenPort > entry.PortEnd) {
 		return fmt.Errorf("listenPort must be within entry group range %d-%d", entry.PortStart, entry.PortEnd)
 	}
-	var duplicate int64
-	query := s.db.Model(&models.ForwardRule{}).Where("tunnel_id = ? AND listen_port = ?", rule.TunnelID, rule.ListenPort)
-	if excludeID != 0 {
-		query = query.Where("id <> ?", excludeID)
-	}
-	if err := query.Count(&duplicate).Error; err != nil {
+	duplicate, err := s.entryPortInUse(entry.ID, rule.ListenPort, rule.Protocol, excludeID)
+	if err != nil {
 		return err
 	}
-	if duplicate > 0 {
-		return errors.New("listenPort is already used in this tunnel")
+	if duplicate {
+		return errors.New("listenPort is already used by an overlapping rule in this entry device group")
 	}
 	if user.ForwardLimit > 0 {
 		var count int64
@@ -1813,24 +1823,95 @@ func (s *Server) prepareForwardRule(rule *models.ForwardRule, excludeID uint) er
 	return nil
 }
 
-func (s *Server) allocatePort(tunnelID uint, start, end int) (int, error) {
+func (s *Server) allocatePort(entryGroupID uint, protocol string, start, end int, excludeID uint) (int, error) {
 	if start <= 0 || end <= 0 || start > end {
 		start, end = 10000, 60000
 	}
-	var used []int
-	if err := s.db.Model(&models.ForwardRule{}).Where("tunnel_id = ?", tunnelID).Pluck("listen_port", &used).Error; err != nil {
-		return 0, err
-	}
-	seen := map[int]bool{}
-	for _, port := range used {
-		seen[port] = true
-	}
 	for port := start; port <= end; port++ {
-		if !seen[port] {
+		used, err := s.entryPortInUse(entryGroupID, port, protocol, excludeID)
+		if err != nil {
+			return 0, err
+		}
+		if !used {
 			return port, nil
 		}
 	}
 	return 0, errors.New("no free port in device group range")
+}
+
+func (s *Server) entryPortInUse(entryGroupID uint, port int, protocol string, excludeID uint) (bool, error) {
+	type existingRule struct {
+		ID       uint
+		Protocol string
+	}
+	var rows []existingRule
+	query := s.db.Table("forward_rules").
+		Select("forward_rules.id, forward_rules.protocol").
+		Joins("JOIN tunnels ON tunnels.id = forward_rules.tunnel_id").
+		Where("tunnels.entry_group_id = ? AND forward_rules.listen_port = ? AND forward_rules.status NOT IN ?", entryGroupID, port, []string{"deleted", "disabled"})
+	if excludeID != 0 {
+		query = query.Where("forward_rules.id <> ?", excludeID)
+	}
+	if err := query.Scan(&rows).Error; err != nil {
+		return false, err
+	}
+	for _, row := range rows {
+		if transportsOverlap(protocol, row.Protocol) {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func transportsOverlap(a, b string) bool {
+	left := transportSet(a)
+	right := transportSet(b)
+	for transport := range left {
+		if right[transport] {
+			return true
+		}
+	}
+	return false
+}
+
+func transportSet(protocol string) map[string]bool {
+	switch strings.ToLower(strings.TrimSpace(protocol)) {
+	case "udp":
+		return map[string]bool{"udp": true}
+	case "tcp_udp":
+		return map[string]bool{"tcp": true, "udp": true}
+	default:
+		return map[string]bool{"tcp": true}
+	}
+}
+
+func forbiddenRemoteHost(host string) (bool, string) {
+	host = strings.TrimSpace(strings.Trim(host, "[]"))
+	host = strings.TrimSuffix(host, ".")
+	switch strings.ToLower(host) {
+	case "", "localhost", "localhost.localdomain":
+		return true, "loopback host"
+	}
+	addr, err := netip.ParseAddr(host)
+	if err != nil {
+		return false, ""
+	}
+	switch {
+	case addr.IsLoopback():
+		return true, "loopback address"
+	case addr.IsUnspecified():
+		return true, "unspecified address"
+	case addr.IsMulticast():
+		return true, "multicast address"
+	case addr.IsLinkLocalUnicast():
+		return true, "link-local address"
+	case addr == netip.MustParseAddr("169.254.169.254"):
+		return true, "cloud metadata address"
+	case addr == netip.MustParseAddr("fd00:ec2::254"):
+		return true, "cloud metadata address"
+	default:
+		return false, ""
+	}
 }
 
 func (s *Server) effectivePolicy(rule *models.ForwardRule, tunnel *models.Tunnel, entry *models.DeviceGroup) (*models.ProtocolPolicy, error) {
@@ -1957,12 +2038,6 @@ func (s *Server) agentRegister(c *gin.Context) {
 		bad(c, err)
 		return
 	}
-	var token models.InstallToken
-	err := s.db.Where("token_hash = ? AND used_at IS NULL AND expires_at > ?", auth.TokenHash(req.InstallToken), time.Now()).First(&token).Error
-	if err != nil {
-		unauthorized(c)
-		return
-	}
 	if req.UUID == "" {
 		req.UUID = uuid.NewString()
 	}
@@ -1972,23 +2047,42 @@ func (s *Server) agentRegister(c *gin.Context) {
 		return
 	}
 	now := time.Now()
-	node := models.Node{
-		DeviceGroupID: token.DeviceGroupID,
-		Name:          defaultString(req.Name, "DuSheng Node"),
-		UUID:          req.UUID,
-		TokenHash:     auth.TokenHash(nodeToken),
-		Status:        "online",
-		Version:       req.Version,
-		PublicIP:      req.PublicIP,
-		ConnectHost:   req.ConnectHost,
-		LastSeenAt:    &now,
-	}
-	if err := s.db.Create(&node).Error; err != nil {
+	var node models.Node
+	err = s.db.Transaction(func(tx *gorm.DB) error {
+		var token models.InstallToken
+		if err := tx.Where("token_hash = ? AND used_at IS NULL AND expires_at > ?", auth.TokenHash(req.InstallToken), now).First(&token).Error; err != nil {
+			return err
+		}
+		result := tx.Model(&models.InstallToken{}).
+			Where("id = ? AND used_at IS NULL AND expires_at > ?", token.ID, now).
+			Update("used_at", &now)
+		if result.Error != nil {
+			return result.Error
+		}
+		if result.RowsAffected != 1 {
+			return gorm.ErrRecordNotFound
+		}
+		node = models.Node{
+			DeviceGroupID: token.DeviceGroupID,
+			Name:          defaultString(req.Name, "DuSheng Node"),
+			UUID:          req.UUID,
+			TokenHash:     auth.TokenHash(nodeToken),
+			Status:        "online",
+			Version:       req.Version,
+			PublicIP:      req.PublicIP,
+			ConnectHost:   req.ConnectHost,
+			LastSeenAt:    &now,
+		}
+		return tx.Create(&node).Error
+	})
+	if err != nil {
+		if errors.Is(err, gorm.ErrRecordNotFound) {
+			unauthorized(c)
+			return
+		}
 		fail(c, err)
 		return
 	}
-	token.UsedAt = &now
-	s.db.Save(&token)
 	s.audit(c, nil, "agent.register", "node", fmt.Sprint(node.ID), "{}")
 	c.JSON(http.StatusCreated, gin.H{"nodeId": node.ID, "nodeToken": nodeToken, "uuid": node.UUID})
 }
@@ -2081,13 +2175,15 @@ func (s *Server) agentConfig(c *gin.Context) {
 		"speedLimits":      limits,
 		"revision":         revision,
 		"generatedAt":      time.Now().UTC(),
+		"validUntil":       time.Now().UTC().Add(agentConfigLease),
 	})
 }
 
 func (s *Server) agentTraffic(c *gin.Context) {
 	node := ctxNode(c)
 	var req struct {
-		Samples []struct {
+		ReportID string `json:"reportId"`
+		Samples  []struct {
 			RuleID   uint  `json:"ruleId"`
 			InBytes  int64 `json:"inBytes"`
 			OutBytes int64 `json:"outBytes"`
@@ -2101,6 +2197,7 @@ func (s *Server) agentTraffic(c *gin.Context) {
 		bad(c, errors.New("samples must contain at most 1000 entries"))
 		return
 	}
+	req.ReportID = strings.TrimSpace(req.ReportID)
 	for _, sample := range req.Samples {
 		if sample.RuleID == 0 {
 			bad(c, errors.New("ruleId is required"))
@@ -2115,7 +2212,20 @@ func (s *Server) agentTraffic(c *gin.Context) {
 			return
 		}
 	}
+	duplicateAccepted := -1
+	accepted := len(req.Samples)
 	err := s.db.Transaction(func(tx *gorm.DB) error {
+		if req.ReportID != "" {
+			marker := models.AgentTrafficReport{NodeID: node.ID, ReportID: req.ReportID, Accepted: accepted}
+			if err := tx.Create(&marker).Error; err != nil {
+				var existing models.AgentTrafficReport
+				if lookupErr := tx.Where("node_id = ? AND report_id = ?", node.ID, marker.ReportID).First(&existing).Error; lookupErr == nil {
+					duplicateAccepted = existing.Accepted
+					return nil
+				}
+				return err
+			}
+		}
 		exhaustedUsers := map[uint]struct{}{}
 		now := time.Now()
 		for _, sample := range req.Samples {
@@ -2172,7 +2282,11 @@ func (s *Server) agentTraffic(c *gin.Context) {
 		fail(c, err)
 		return
 	}
-	c.JSON(http.StatusOK, gin.H{"accepted": len(req.Samples)})
+	if duplicateAccepted >= 0 {
+		c.JSON(http.StatusOK, gin.H{"accepted": duplicateAccepted, "duplicate": true})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"accepted": accepted})
 }
 
 func (s *Server) exhaustUserQuota(tx *gorm.DB, userID uint, revision int64) error {
@@ -2295,7 +2409,18 @@ func (s *Server) agentCommandAck(c *gin.Context) {
 		return
 	}
 	metadata, _ := json.Marshal(map[string]any{"commandId": commandID, "status": req.Status, "message": req.Message})
-	s.audit(c, nil, "node.uninstall.ack", "node", fmt.Sprint(node.ID), string(metadata))
+	if req.Status == "accepted" {
+		node.Status = "uninstalling"
+		if err := s.db.Save(&node).Error; err != nil {
+			fail(c, err)
+			return
+		}
+		s.audit(c, nil, "node.uninstall.accepted", "node", fmt.Sprint(node.ID), string(metadata))
+		c.Status(http.StatusNoContent)
+		return
+	}
+	node.UninstallConfirmedAt = &now
+	s.audit(c, nil, "node.uninstall.done", "node", fmt.Sprint(node.ID), string(metadata))
 	if err := s.db.Delete(&models.Node{}, node.ID).Error; err != nil {
 		fail(c, err)
 		return
