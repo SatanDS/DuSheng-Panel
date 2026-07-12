@@ -63,6 +63,17 @@ export interface AuditLog extends Entity {
   metadataJson: string;
 }
 
+export interface AgentEvent extends Entity {
+	id: number;
+	nodeId: number;
+	type: string;
+	severity: string;
+	status: string;
+	message: string;
+	detailJson: string;
+	occurredAt: string;
+}
+
 export interface DashboardPayload {
   users: number;
   nodes: number;

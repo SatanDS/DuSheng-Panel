@@ -31,6 +31,22 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/HealthResponse"
+        "503":
+          description: API process is running but its database is unavailable.
+
+  /metrics:
+    get:
+      tags: [System]
+      operationId: getPrometheusMetrics
+      summary: Internal Prometheus metrics endpoint
+      description: Aggregate, low-cardinality metrics. The default Caddy configuration does not expose this route publicly.
+      security: []
+      responses:
+        "200":
+          description: Prometheus text exposition.
+          content:
+            text/plain:
+              schema: { type: string }
 
   /install-agent.sh:
     get:
@@ -381,6 +397,252 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+
+  /api/v1/line-providers:
+    get:
+      tags: [Admin]
+      operationId: listLineProviders
+      summary: List IEPL/IPLC providers
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - $ref: "#/components/parameters/Search"
+        - $ref: "#/components/parameters/Status"
+      responses:
+        "200": { description: Line providers, content: { application/json: { schema: { $ref: "#/components/schemas/LineProviderPage" } } } }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [Admin]
+      operationId: createLineProvider
+      summary: Create a line provider
+      security: [{ BearerAuth: [] }]
+      requestBody: { $ref: "#/components/requestBodies/LineProviderWrite" }
+      responses:
+        "201": { description: Line provider created, content: { application/json: { schema: { $ref: "#/components/schemas/LineProvider" } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /api/v1/line-providers/{id}:
+    put:
+      tags: [Admin]
+      operationId: updateLineProvider
+      summary: Update a line provider
+      security: [{ BearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody: { $ref: "#/components/requestBodies/LineProviderWrite" }
+      responses:
+        "200": { description: Line provider updated, content: { application/json: { schema: { $ref: "#/components/schemas/LineProvider" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Admin]
+      operationId: deleteLineProvider
+      summary: Delete an unused line provider
+      security: [{ BearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "204": { $ref: "#/components/responses/NoContent" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /api/v1/line-sites:
+    get:
+      tags: [Admin]
+      operationId: listLineSites
+      summary: List line endpoint sites
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - $ref: "#/components/parameters/Search"
+        - $ref: "#/components/parameters/Status"
+      responses:
+        "200": { description: Line sites, content: { application/json: { schema: { $ref: "#/components/schemas/LineSitePage" } } } }
+    post:
+      tags: [Admin]
+      operationId: createLineSite
+      summary: Create a line site
+      security: [{ BearerAuth: [] }]
+      requestBody: { $ref: "#/components/requestBodies/LineSiteWrite" }
+      responses:
+        "201": { description: Line site created, content: { application/json: { schema: { $ref: "#/components/schemas/LineSite" } } } }
+
+  /api/v1/line-sites/{id}:
+    put:
+      tags: [Admin]
+      operationId: updateLineSite
+      summary: Update a line site
+      security: [{ BearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody: { $ref: "#/components/requestBodies/LineSiteWrite" }
+      responses:
+        "200": { description: Line site updated, content: { application/json: { schema: { $ref: "#/components/schemas/LineSite" } } } }
+    delete:
+      tags: [Admin]
+      operationId: deleteLineSite
+      summary: Delete an unused line site
+      security: [{ BearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "204": { $ref: "#/components/responses/NoContent" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /api/v1/line-circuits:
+    get:
+      tags: [Admin]
+      operationId: listLineCircuits
+      summary: List physical IEPL/IPLC circuits
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - $ref: "#/components/parameters/Search"
+        - $ref: "#/components/parameters/Status"
+      responses:
+        "200": { description: Line circuits, content: { application/json: { schema: { $ref: "#/components/schemas/LineCircuitPage" } } } }
+    post:
+      tags: [Admin]
+      operationId: createLineCircuit
+      summary: Create a physical line circuit
+      security: [{ BearerAuth: [] }]
+      requestBody: { $ref: "#/components/requestBodies/LineCircuitWrite" }
+      responses:
+        "201": { description: Line circuit created, content: { application/json: { schema: { $ref: "#/components/schemas/LineCircuit" } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /api/v1/line-circuits/{id}:
+    put:
+      tags: [Admin]
+      operationId: updateLineCircuit
+      summary: Update a physical line circuit
+      security: [{ BearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody: { $ref: "#/components/requestBodies/LineCircuitWrite" }
+      responses:
+        "200": { description: Line circuit updated, content: { application/json: { schema: { $ref: "#/components/schemas/LineCircuit" } } } }
+    delete:
+      tags: [Admin]
+      operationId: deleteLineCircuit
+      summary: Delete an unused line circuit
+      security: [{ BearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "204": { $ref: "#/components/responses/NoContent" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /api/v1/line-endpoints:
+    get:
+      tags: [Admin]
+      operationId: listLineEndpoints
+      summary: List A/Z line endpoints
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - $ref: "#/components/parameters/Search"
+      responses:
+        "200": { description: Line endpoints, content: { application/json: { schema: { $ref: "#/components/schemas/LineEndpointPage" } } } }
+    post:
+      tags: [Admin]
+      operationId: createLineEndpoint
+      summary: Create an A or Z endpoint
+      security: [{ BearerAuth: [] }]
+      requestBody: { $ref: "#/components/requestBodies/LineEndpointWrite" }
+      responses:
+        "201": { description: Line endpoint created, content: { application/json: { schema: { $ref: "#/components/schemas/LineEndpoint" } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /api/v1/line-endpoints/{id}:
+    put:
+      tags: [Admin]
+      operationId: updateLineEndpoint
+      summary: Update an A or Z endpoint
+      security: [{ BearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody: { $ref: "#/components/requestBodies/LineEndpointWrite" }
+      responses:
+        "200": { description: Line endpoint updated, content: { application/json: { schema: { $ref: "#/components/schemas/LineEndpoint" } } } }
+    delete:
+      tags: [Admin]
+      operationId: deleteLineEndpoint
+      summary: Delete a line endpoint
+      security: [{ BearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "204": { $ref: "#/components/responses/NoContent" }
+
+  /api/v1/line-probes:
+    get:
+      tags: [Admin]
+      operationId: listLineProbes
+      summary: List node-executed line probes
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - $ref: "#/components/parameters/Search"
+        - $ref: "#/components/parameters/Status"
+        - $ref: "#/components/parameters/NodeId"
+      responses:
+        "200": { description: Line probes, content: { application/json: { schema: { $ref: "#/components/schemas/LineProbePage" } } } }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [Admin]
+      operationId: createLineProbe
+      summary: Create a node-executed line probe
+      security: [{ BearerAuth: [] }]
+      requestBody: { $ref: "#/components/requestBodies/LineProbeWrite" }
+      responses:
+        "201": { description: Line probe created, content: { application/json: { schema: { $ref: "#/components/schemas/LineProbe" } } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /api/v1/line-probes/{id}:
+    put:
+      tags: [Admin]
+      operationId: updateLineProbe
+      summary: Update a line probe
+      security: [{ BearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody: { $ref: "#/components/requestBodies/LineProbeWrite" }
+      responses:
+        "200": { description: Line probe updated, content: { application/json: { schema: { $ref: "#/components/schemas/LineProbe" } } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Admin]
+      operationId: deleteLineProbe
+      summary: Delete a line probe and its raw samples
+      security: [{ BearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "204": { $ref: "#/components/responses/NoContent" }
+
+  /api/v1/line-probe-samples:
+    get:
+      tags: [Admin]
+      operationId: listLineProbeSamples
+      summary: List raw line probe samples
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - $ref: "#/components/parameters/NodeId"
+        - $ref: "#/components/parameters/DateFrom"
+        - $ref: "#/components/parameters/DateTo"
+      responses:
+        "200": { description: Probe samples, content: { application/json: { schema: { $ref: "#/components/schemas/LineProbeSamplePage" } } } }
+
+  /api/v1/agent/probes:
+    post:
+      tags: [Agent]
+      operationId: reportLineProbe
+      summary: Report a node-executed line probe result
+      security: [{ AgentBearerAuth: [] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema: { $ref: "#/components/schemas/AgentProbeReport" }
+      responses:
+        "204": { $ref: "#/components/responses/NoContent" }
+        "403": { $ref: "#/components/responses/Forbidden" }
 
   /api/v1/tunnels:
     get:
@@ -797,6 +1059,30 @@ paths:
         "403":
           $ref: "#/components/responses/Forbidden"
 
+  /api/v1/node-events:
+    get:
+      tags: [Admin]
+      operationId: listNodeEvents
+      summary: List agent lifecycle and configuration events
+      security:
+        - BearerAuth: []
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - $ref: "#/components/parameters/Search"
+        - $ref: "#/components/parameters/NodeId"
+        - $ref: "#/components/parameters/DateFrom"
+        - $ref: "#/components/parameters/DateTo"
+      responses:
+        "200":
+          description: Node events.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AgentEventPage"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
   /api/v1/protocol-violations:
     get:
       tags: [Admin]
@@ -881,6 +1167,27 @@ paths:
             application/json:
               schema:
                 $ref: "#/components/schemas/AgentConfig"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/agent/config/ack:
+    post:
+      tags: [Agent]
+      operationId: acknowledgeAgentConfig
+      summary: Acknowledge, reject, or report rollback of a configuration revision
+      security:
+        - AgentBearerAuth: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AgentConfigAck"
+      responses:
+        "204":
+          $ref: "#/components/responses/NoContent"
+        "400":
+          description: Revision, nonce, or status is invalid.
         "401":
           $ref: "#/components/responses/Unauthorized"
 
@@ -1072,6 +1379,36 @@ components:
         application/json:
           schema:
             $ref: "#/components/schemas/DeviceGroupWrite"
+    LineProviderWrite:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/LineProviderWrite"
+    LineSiteWrite:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/LineSiteWrite"
+    LineCircuitWrite:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/LineCircuitWrite"
+    LineEndpointWrite:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/LineEndpointWrite"
+    LineProbeWrite:
+      required: true
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/LineProbeWrite"
     TunnelWrite:
       required: true
       content:
@@ -1197,6 +1534,48 @@ components:
               items:
                 $ref: "#/components/schemas/DeviceGroup"
 
+    LineProviderPage:
+      allOf:
+        - $ref: "#/components/schemas/PageMeta"
+        - type: object
+          properties:
+            items: { type: array, items: { $ref: "#/components/schemas/LineProvider" } }
+
+    LineSitePage:
+      allOf:
+        - $ref: "#/components/schemas/PageMeta"
+        - type: object
+          properties:
+            items: { type: array, items: { $ref: "#/components/schemas/LineSite" } }
+
+    LineCircuitPage:
+      allOf:
+        - $ref: "#/components/schemas/PageMeta"
+        - type: object
+          properties:
+            items: { type: array, items: { $ref: "#/components/schemas/LineCircuit" } }
+
+    LineEndpointPage:
+      allOf:
+        - $ref: "#/components/schemas/PageMeta"
+        - type: object
+          properties:
+            items: { type: array, items: { $ref: "#/components/schemas/LineEndpoint" } }
+
+    LineProbePage:
+      allOf:
+        - $ref: "#/components/schemas/PageMeta"
+        - type: object
+          properties:
+            items: { type: array, items: { $ref: "#/components/schemas/LineProbe" } }
+
+    LineProbeSamplePage:
+      allOf:
+        - $ref: "#/components/schemas/PageMeta"
+        - type: object
+          properties:
+            items: { type: array, items: { $ref: "#/components/schemas/LineProbeSample" } }
+
     TunnelPage:
       allOf:
         - $ref: "#/components/schemas/PageMeta"
@@ -1236,6 +1615,16 @@ components:
               type: array
               items:
                 $ref: "#/components/schemas/Node"
+
+    AgentEventPage:
+      allOf:
+        - $ref: "#/components/schemas/PageMeta"
+        - type: object
+          properties:
+            items:
+              type: array
+              items:
+                $ref: "#/components/schemas/AgentEvent"
 
     InstallTokenPage:
       allOf:
@@ -1435,6 +1824,133 @@ components:
           type: string
           description: Raw JSON string reserved for agent-specific options.
 
+    LineProvider:
+      allOf:
+        - $ref: "#/components/schemas/BaseModel"
+        - $ref: "#/components/schemas/LineProviderWrite"
+
+    LineProviderWrite:
+      type: object
+      required: [name, status]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120 }
+        code: { type: string, maxLength: 60 }
+        status: { type: string, enum: [active, inactive, suspended] }
+        supportContact: { type: string, maxLength: 120 }
+        supportPhone: { type: string, maxLength: 80 }
+        supportEmail: { type: string, maxLength: 160 }
+        portalUrl: { type: string, format: uri, maxLength: 255 }
+        notes: { type: string }
+
+    LineProbe:
+      allOf:
+        - $ref: "#/components/schemas/BaseModel"
+        - $ref: "#/components/schemas/LineProbeWrite"
+        - type: object
+          required: [revision, status, lastLatencyMs, consecutiveFailures]
+          properties:
+            revision: { type: integer, format: int64 }
+            status: { type: string, enum: [pending, up, down] }
+            lastLatencyMs: { type: number, minimum: 0 }
+            lastError: { type: string }
+            lastCheckedAt: { type: [string, "null"], format: date-time }
+            consecutiveFailures: { type: integer, minimum: 0 }
+
+    LineProbeWrite:
+      type: object
+      required: [circuitId, nodeId, name, type, target]
+      properties:
+        circuitId: { type: integer, minimum: 1 }
+        nodeId:
+          type: integer
+          minimum: 1
+          description: The selected node must advertise the line_probe_v1 capability.
+        name: { type: string, minLength: 1, maxLength: 120 }
+        type: { type: string, enum: [tcp, http, udp_echo] }
+        target: { type: string, minLength: 1, maxLength: 255 }
+        payload: { type: string }
+        intervalSeconds: { type: integer, minimum: 5, maximum: 3600, default: 30 }
+        timeoutMs: { type: integer, minimum: 100, maximum: 30000, default: 3000 }
+        enabled: { type: boolean, default: true }
+
+    LineProbeSample:
+      allOf:
+        - $ref: "#/components/schemas/BaseModel"
+        - type: object
+          required: [probeId, circuitId, nodeId, success, latencyMs, checkedAt]
+          properties:
+            probeId: { type: integer, minimum: 1 }
+            circuitId: { type: integer, minimum: 1 }
+            nodeId: { type: integer, minimum: 1 }
+            success: { type: boolean }
+            latencyMs: { type: number, minimum: 0 }
+            error: { type: string }
+            checkedAt: { type: string, format: date-time }
+
+    LineSite:
+      allOf:
+        - $ref: "#/components/schemas/BaseModel"
+        - $ref: "#/components/schemas/LineSiteWrite"
+
+    LineSiteWrite:
+      type: object
+      required: [name, status]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120 }
+        code: { type: string, maxLength: 60 }
+        status: { type: string, enum: [planned, active, maintenance, retired] }
+        country: { type: string, maxLength: 80 }
+        region: { type: string, maxLength: 120 }
+        city: { type: string, maxLength: 120 }
+        address: { type: string, maxLength: 255 }
+        notes: { type: string }
+
+    LineCircuit:
+      allOf:
+        - $ref: "#/components/schemas/BaseModel"
+        - $ref: "#/components/schemas/LineCircuitWrite"
+
+    LineCircuitWrite:
+      type: object
+      required: [providerId, name, serviceType, status]
+      properties:
+        providerId: { type: integer, minimum: 1 }
+        name: { type: string, minLength: 1, maxLength: 120 }
+        circuitCode: { type: string, maxLength: 100 }
+        serviceType: { type: string, enum: [iepl, iplc, mpls, internet, custom] }
+        status: { type: string, enum: [planned, provisioning, active, maintenance, suspended, terminated] }
+        bandwidthMbps: { type: integer, minimum: 0 }
+        committedMbps: { type: integer, minimum: 0 }
+        latencySlaMs: { type: number, minimum: 0 }
+        packetLossSlaPct: { type: number, minimum: 0, maximum: 100 }
+        monthlyCost: { type: number, minimum: 0 }
+        currency: { type: string, maxLength: 10 }
+        startsAt: { type: [string, "null"], format: date-time }
+        expiresAt: { type: [string, "null"], format: date-time }
+        maintenanceStart: { type: [string, "null"], format: date-time }
+        maintenanceEnd: { type: [string, "null"], format: date-time }
+        tags: { type: string }
+        notes: { type: string }
+
+    LineEndpoint:
+      allOf:
+        - $ref: "#/components/schemas/BaseModel"
+        - $ref: "#/components/schemas/LineEndpointWrite"
+
+    LineEndpointWrite:
+      type: object
+      required: [circuitId, side]
+      properties:
+        circuitId: { type: integer, minimum: 1 }
+        side: { type: string, enum: [a, z] }
+        siteId: { type: [integer, "null"], minimum: 1 }
+        deviceGroupId: { type: [integer, "null"], minimum: 1 }
+        address: { type: string, maxLength: 255 }
+        interface: { type: string, maxLength: 120 }
+        vlan: { type: integer, minimum: 0, maximum: 4094 }
+        ipCidrs: { type: string, description: Newline-separated normalized IP addresses or CIDR prefixes. }
+        notes: { type: string }
+
     Node:
       allOf:
         - $ref: "#/components/schemas/BaseModel"
@@ -1462,6 +1978,10 @@ components:
             version:
               type: string
               maxLength: 80
+            capabilities:
+              type: array
+              items:
+                type: string
             publicIp:
               type: string
               maxLength: 80
@@ -1479,6 +1999,22 @@ components:
             desiredRevision:
               type: integer
               format: int64
+            lastGoodRevision:
+              type: integer
+              format: int64
+            configAckRevision:
+              type: integer
+              format: int64
+            configNonce:
+              type: string
+            configStatus:
+              type: string
+              enum: [applied, rejected, rolled_back, lease_expired]
+            configMessage:
+              type: string
+            configAckAt:
+              type: [string, "null"]
+              format: date-time
             uninstallRequestedAt:
               type: [string, "null"]
               format: date-time
@@ -1553,6 +2089,9 @@ components:
           minimum: 0
           default: 1
         protocolPolicyId:
+          type: [integer, "null"]
+          minimum: 1
+        lineCircuitId:
           type: [integer, "null"]
           minimum: 1
         advancedJson:
@@ -1851,6 +2390,30 @@ components:
             metadataJson:
               type: string
 
+    AgentEvent:
+      allOf:
+        - $ref: "#/components/schemas/BaseModel"
+        - type: object
+          required: [nodeId, type, severity, status, occurredAt]
+          properties:
+            nodeId:
+              type: integer
+              minimum: 1
+            type:
+              type: string
+            severity:
+              type: string
+              enum: [info, warning, error]
+            status:
+              type: string
+            message:
+              type: string
+            detailJson:
+              type: string
+            occurredAt:
+              type: string
+              format: date-time
+
     InstallToken:
       allOf:
         - $ref: "#/components/schemas/BaseModel"
@@ -2014,6 +2577,10 @@ components:
         connectHost:
           type: string
           maxLength: 160
+        capabilities:
+          type: array
+          items:
+            type: string
 
     AgentRegisterResponse:
       type: object
@@ -2043,6 +2610,10 @@ components:
         appliedRevision:
           type: integer
           format: int64
+        capabilities:
+          type: array
+          items:
+            type: string
         system:
           type: object
           additionalProperties: true
@@ -2094,8 +2665,11 @@ components:
         - forwardRules
         - protocolPolicies
         - speedLimits
+        - lineProbes
         - revision
+        - nonce
         - generatedAt
+        - validUntil
       properties:
         node:
           $ref: "#/components/schemas/Node"
@@ -2117,12 +2691,51 @@ components:
           type: array
           items:
             $ref: "#/components/schemas/SpeedLimit"
+        lineProbes:
+          type: array
+          items:
+            $ref: "#/components/schemas/LineProbe"
         revision:
           type: integer
           format: int64
+        nonce:
+          type: string
+          description: Stable nonce for this node and revision, echoed by AgentConfigAck.
         generatedAt:
           type: string
           format: date-time
+        validUntil:
+          type: string
+          format: date-time
+          description: Lease expiry. The agent stops listeners if it cannot refresh configuration before this time.
+
+    AgentConfigAck:
+      type: object
+      required: [revision, nonce, status]
+      properties:
+        revision:
+          type: integer
+          format: int64
+        nonce:
+          type: string
+        status:
+          type: string
+          enum: [applied, rejected, rolled_back, lease_expired]
+        message:
+          type: string
+        runtime:
+          type: object
+          additionalProperties: true
+
+    AgentProbeReport:
+      type: object
+      required: [probeId, revision, success, latencyMs]
+      properties:
+        probeId: { type: integer, minimum: 1 }
+        revision: { type: integer, format: int64 }
+        success: { type: boolean }
+        latencyMs: { type: number, minimum: 0 }
+        error: { type: string }
 
     AgentTrafficRequest:
       type: object

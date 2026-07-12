@@ -13,8 +13,9 @@ Environment=DUSHENG_DATA_DIR=/var/lib/dusheng-agent
 Environment=DUSHENG_GOST_PATH=/usr/local/bin/gost
 Environment=DUSHENG_GOST_BIN=/usr/local/bin/gost
 Environment=DUSHENG_DPI_ADDR=unix:/run/dusheng-dpi/dpi.sock
+Environment=DUSHENG_METRICS_LISTEN=127.0.0.1:19090
 EnvironmentFile=-/etc/dusheng/agent.env
-ExecStart=/opt/dusheng-agent/dusheng-agent -base-url ${DUSHENG_API_URL} -install-token ${DUSHENG_INSTALL_TOKEN} -data-dir ${DUSHENG_DATA_DIR} -gost-path ${DUSHENG_GOST_PATH} -dpi-addr ${DUSHENG_DPI_ADDR}
+ExecStart=/opt/dusheng-agent/dusheng-agent -base-url ${DUSHENG_API_URL} -data-dir ${DUSHENG_DATA_DIR} -gost-path ${DUSHENG_GOST_PATH} -dpi-addr ${DUSHENG_DPI_ADDR}
 ExecStopPost=+/bin/bash /opt/dusheng-agent/uninstall-agent.sh
 Restart=on-failure
 RestartSec=3

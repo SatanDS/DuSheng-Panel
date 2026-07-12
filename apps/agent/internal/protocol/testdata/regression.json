@@ -1,0 +1,68 @@
+[
+  {
+    "name": "authorized ss2022 random tcp remains allowed",
+    "network": "tcp",
+    "payloadHex": "133700ff4299a1b2c3d4",
+    "policy": { "purpose": "authorized_ss", "authorizedProtocols": "ss,shadowsocks,ss2022", "unknownTcpAction": "block" },
+    "protocol": "unknown",
+    "action": "allow"
+  },
+  {
+    "name": "gaming unknown udp remains allowed",
+    "network": "udp",
+    "payloadHex": "0102030405060708",
+    "policy": { "purpose": "gaming", "unknownUdpAction": "allow" },
+    "protocol": "unknown",
+    "action": "allow"
+  },
+  {
+    "name": "gaming quic remains allowed",
+    "network": "udp",
+    "payloadHex": "c300000001088394c8f0",
+    "policy": { "purpose": "gaming", "quicAction": "allow" },
+    "protocol": "quic",
+    "action": "allow"
+  },
+  {
+    "name": "ssh operations explicitly allow ssh",
+    "network": "tcp",
+    "payload": "SSH-2.0-OpenSSH_9.6\r\n",
+    "policy": { "purpose": "ssh_ops", "sshAction": "allow" },
+    "protocol": "ssh",
+    "action": "allow"
+  },
+  {
+    "name": "ordinary forwarding blocks http connect",
+    "network": "tcp",
+    "payload": "CONNECT proxy.example:443 HTTP/1.1\r\nHost: proxy.example\r\n\r\n",
+    "policy": { "mode": "block", "blockProxyLike": true },
+    "protocol": "http_connect",
+    "action": "block"
+  },
+  {
+    "name": "strict tls policy blocks client hello",
+    "network": "tcp",
+    "payloadHex": "160301002f0100002b",
+    "policy": { "mode": "block", "blockTls": true },
+    "protocol": "tls",
+    "action": "block"
+  },
+  {
+    "name": "low confidence vpn dpi only alerts gaming",
+    "network": "udp",
+    "payloadHex": "01020304",
+    "policy": { "purpose": "gaming", "blockedProtocolGroups": "vpn", "ndpiLowConfidenceAction": "alert" },
+    "dpi": { "protocol": "openvpn", "category": "vpn", "confidence": 35, "riskScore": 45 },
+    "protocol": "unknown",
+    "action": "alert"
+  },
+  {
+    "name": "high confidence wireguard blocks strict policy",
+    "network": "udp",
+    "payloadHex": "01020304",
+    "policy": { "purpose": "strict", "blockedProtocolGroups": "vpn", "mode": "block" },
+    "dpi": { "protocol": "wireguard", "category": "vpn", "confidence": 95, "riskScore": 90 },
+    "protocol": "unknown",
+    "action": "block"
+  }
+]

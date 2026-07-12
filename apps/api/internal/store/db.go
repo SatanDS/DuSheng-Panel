@@ -26,21 +26,7 @@ func Open(cfg config.Config) (*gorm.DB, error) {
 	if err != nil {
 		return nil, err
 	}
-	if err := db.AutoMigrate(
-		&models.SchemaMigration{},
-		&models.User{},
-		&models.DeviceGroup{},
-		&models.Node{},
-		&models.Tunnel{},
-		&models.ForwardRule{},
-		&models.ProtocolPolicy{},
-		&models.SpeedLimit{},
-		&models.TrafficSample{},
-		&models.AgentTrafficReport{},
-		&models.AuditLog{},
-		&models.InstallToken{},
-		&models.ProtocolViolation{},
-	); err != nil {
+	if err := db.AutoMigrate(&models.SchemaMigration{}); err != nil {
 		return nil, err
 	}
 	if err := runMigrations(db); err != nil {
@@ -75,6 +61,31 @@ func dialector(databaseURL string) (gorm.Dialector, error) {
 }
 
 func runMigrations(db *gorm.DB) error {
+	if err := applyMigration(db, "2026071201_initial_commercial_schema", func(tx *gorm.DB) error {
+		return tx.AutoMigrate(
+			&models.User{},
+			&models.DeviceGroup{},
+			&models.LineProvider{},
+			&models.LineSite{},
+			&models.LineCircuit{},
+			&models.LineEndpoint{},
+			&models.LineProbe{},
+			&models.LineProbeSample{},
+			&models.Node{},
+			&models.Tunnel{},
+			&models.ForwardRule{},
+			&models.ProtocolPolicy{},
+			&models.SpeedLimit{},
+			&models.TrafficSample{},
+			&models.AgentTrafficReport{},
+			&models.AuditLog{},
+			&models.AgentEvent{},
+			&models.InstallToken{},
+			&models.ProtocolViolation{},
+		)
+	}); err != nil {
+		return err
+	}
 	return applyMigration(db, "2026071001_forward_rule_unique_port", func(tx *gorm.DB) error {
 		if tx.Migrator().HasIndex(&models.ForwardRule{}, "idx_forward_rules_tunnel_listen") {
 			return nil

@@ -1,0 +1,68 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_DB: dusheng_test
+          POSTGRES_USER: dusheng
+          POSTGRES_PASSWORD: integration-password
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U dusheng -d dusheng_test"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+    env:
+      DUSHENG_TEST_POSTGRES_URL: postgres://dusheng:integration-password@127.0.0.1:5432/dusheng_test?sslmode=disable
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: "1.25.0"
+          cache-dependency-path: |
+            apps/api/go.sum
+            apps/agent/go.sum
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10.6.2
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "22"
+          cache: pnpm
+      - name: Install frontend dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Go vet
+        run: go vet ./apps/api/... ./apps/agent/... ./apps/dpi/...
+      - name: Go tests with race detector and PostgreSQL
+        run: go test -race -count=1 ./apps/api/... ./apps/agent/... ./apps/dpi/...
+      - name: Frontend typecheck and build
+        run: |
+          pnpm --dir apps/web lint
+          pnpm build:web
+      - name: Validate OpenAPI
+        run: pnpm --package=@redocly/cli@latest dlx redocly lint packages/shared/openapi.yaml --max-problems 100
+      - name: Validate installer shell
+        run: shellcheck deploy/scripts/install-agent.sh
+      - uses: raven-actions/actionlint@v2
+        with:
+          files: ".github/workflows/*.yml"
+      - uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: fs
+          scan-ref: .
+          severity: HIGH,CRITICAL
+          ignore-unfixed: true
+          exit-code: "1"

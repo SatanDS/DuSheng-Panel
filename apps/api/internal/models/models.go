@@ -39,6 +39,94 @@ type DeviceGroup struct {
 	AdvancedJSON     string  `gorm:"type:text" json:"advancedJson"`
 }
 
+type LineProvider struct {
+	BaseModel
+	Name           string `gorm:"size:120;not null" json:"name"`
+	Code           string `gorm:"index;size:60" json:"code"`
+	Status         string `gorm:"index;size:30;not null;default:active" json:"status"`
+	SupportContact string `gorm:"size:120" json:"supportContact"`
+	SupportPhone   string `gorm:"size:80" json:"supportPhone"`
+	SupportEmail   string `gorm:"size:160" json:"supportEmail"`
+	PortalURL      string `gorm:"size:255" json:"portalUrl"`
+	Notes          string `gorm:"type:text" json:"notes"`
+}
+
+type LineSite struct {
+	BaseModel
+	Name    string `gorm:"size:120;not null" json:"name"`
+	Code    string `gorm:"index;size:60" json:"code"`
+	Status  string `gorm:"index;size:30;not null;default:active" json:"status"`
+	Country string `gorm:"size:80" json:"country"`
+	Region  string `gorm:"size:120" json:"region"`
+	City    string `gorm:"size:120" json:"city"`
+	Address string `gorm:"size:255" json:"address"`
+	Notes   string `gorm:"type:text" json:"notes"`
+}
+
+type LineCircuit struct {
+	BaseModel
+	ProviderID       uint       `gorm:"index;not null" json:"providerId"`
+	Name             string     `gorm:"size:120;not null" json:"name"`
+	CircuitCode      string     `gorm:"index;size:100" json:"circuitCode"`
+	ServiceType      string     `gorm:"index;size:40;not null;default:iepl" json:"serviceType"`
+	Status           string     `gorm:"index;size:30;not null;default:planned" json:"status"`
+	BandwidthMbps    int        `json:"bandwidthMbps"`
+	CommittedMbps    int        `json:"committedMbps"`
+	LatencySLAms     float64    `gorm:"column:latency_sla_ms" json:"latencySlaMs"`
+	PacketLossSLAPct float64    `gorm:"column:packet_loss_sla_pct" json:"packetLossSlaPct"`
+	MonthlyCost      float64    `json:"monthlyCost"`
+	Currency         string     `gorm:"size:10" json:"currency"`
+	StartsAt         *time.Time `json:"startsAt"`
+	ExpiresAt        *time.Time `gorm:"index" json:"expiresAt"`
+	MaintenanceStart *time.Time `json:"maintenanceStart"`
+	MaintenanceEnd   *time.Time `json:"maintenanceEnd"`
+	Tags             string     `gorm:"type:text" json:"tags"`
+	Notes            string     `gorm:"type:text" json:"notes"`
+}
+
+type LineEndpoint struct {
+	BaseModel
+	CircuitID     uint   `gorm:"index;uniqueIndex:idx_line_endpoint_side;not null" json:"circuitId"`
+	Side          string `gorm:"size:10;uniqueIndex:idx_line_endpoint_side;not null" json:"side"`
+	SiteID        *uint  `gorm:"index" json:"siteId"`
+	DeviceGroupID *uint  `gorm:"index" json:"deviceGroupId"`
+	Address       string `gorm:"size:255" json:"address"`
+	Interface     string `gorm:"size:120" json:"interface"`
+	VLAN          int    `json:"vlan"`
+	IPCIDRs       string `gorm:"column:ip_cidrs;type:text" json:"ipCidrs"`
+	Notes         string `gorm:"type:text" json:"notes"`
+}
+
+type LineProbe struct {
+	BaseModel
+	CircuitID           uint       `gorm:"index;not null" json:"circuitId"`
+	NodeID              uint       `gorm:"index;not null" json:"nodeId"`
+	Name                string     `gorm:"size:120;not null" json:"name"`
+	Type                string     `gorm:"index;size:30;not null" json:"type"`
+	Target              string     `gorm:"size:255;not null" json:"target"`
+	Payload             string     `gorm:"type:text" json:"payload"`
+	IntervalSeconds     int        `gorm:"not null;default:30" json:"intervalSeconds"`
+	TimeoutMs           int        `gorm:"not null;default:3000" json:"timeoutMs"`
+	Enabled             bool       `gorm:"index;not null;default:true" json:"enabled"`
+	Revision            int64      `gorm:"index;not null" json:"revision"`
+	Status              string     `gorm:"index;size:20;not null;default:pending" json:"status"`
+	LastLatencyMs       float64    `json:"lastLatencyMs"`
+	LastError           string     `gorm:"type:text" json:"lastError"`
+	LastCheckedAt       *time.Time `gorm:"index" json:"lastCheckedAt"`
+	ConsecutiveFailures int        `json:"consecutiveFailures"`
+}
+
+type LineProbeSample struct {
+	BaseModel
+	ProbeID   uint      `gorm:"index;index:idx_probe_sample_time;not null" json:"probeId"`
+	CircuitID uint      `gorm:"index;not null" json:"circuitId"`
+	NodeID    uint      `gorm:"index;not null" json:"nodeId"`
+	Success   bool      `gorm:"index;not null" json:"success"`
+	LatencyMs float64   `json:"latencyMs"`
+	Error     string    `gorm:"type:text" json:"error"`
+	CheckedAt time.Time `gorm:"index;index:idx_probe_sample_time;not null" json:"checkedAt"`
+}
+
 type Node struct {
 	BaseModel
 	DeviceGroupID        uint       `gorm:"index;not null" json:"deviceGroupId"`
@@ -47,12 +135,19 @@ type Node struct {
 	TokenHash            string     `gorm:"index;size:128;not null" json:"-"`
 	Status               string     `gorm:"index;size:20;not null;default:offline" json:"status"`
 	Version              string     `gorm:"size:80" json:"version"`
+	Capabilities         []string   `gorm:"serializer:json;type:text" json:"capabilities"`
 	PublicIP             string     `gorm:"size:80" json:"publicIp"`
 	ConnectHost          string     `gorm:"size:160" json:"connectHost"`
 	LastSeenAt           *time.Time `gorm:"index" json:"lastSeenAt"`
 	SystemJSON           string     `gorm:"type:text" json:"systemJson"`
 	AppliedRevision      int64      `json:"appliedRevision"`
 	DesiredRevision      int64      `json:"desiredRevision"`
+	LastGoodRevision     int64      `json:"lastGoodRevision"`
+	ConfigAckRevision    int64      `json:"configAckRevision"`
+	ConfigNonce          string     `gorm:"size:80" json:"configNonce"`
+	ConfigStatus         string     `gorm:"index;size:30" json:"configStatus"`
+	ConfigMessage        string     `gorm:"type:text" json:"configMessage"`
+	ConfigAckAt          *time.Time `gorm:"index" json:"configAckAt"`
 	UninstallRequestedAt *time.Time `json:"uninstallRequestedAt"`
 	UninstallConfirmedAt *time.Time `json:"uninstallConfirmedAt"`
 	UninstallCommandID   string     `gorm:"index;size:120" json:"uninstallCommandId"`
@@ -73,6 +168,7 @@ type Tunnel struct {
 	EntryTrafficRatio float64 `gorm:"not null;default:1" json:"entryTrafficRatio"`
 	ExitTrafficRatio  float64 `gorm:"not null;default:1" json:"exitTrafficRatio"`
 	ProtocolPolicyID  *uint   `json:"protocolPolicyId"`
+	LineCircuitID     *uint   `gorm:"index" json:"lineCircuitId"`
 	AdvancedJSON      string  `gorm:"type:text" json:"advancedJson"`
 }
 
@@ -163,6 +259,17 @@ type AuditLog struct {
 	ResourceType string `gorm:"index;size:80;not null" json:"resourceType"`
 	ResourceID   string `gorm:"index;size:80" json:"resourceId"`
 	MetadataJSON string `gorm:"type:text" json:"metadataJson"`
+}
+
+type AgentEvent struct {
+	BaseModel
+	NodeID     uint      `gorm:"index;not null" json:"nodeId"`
+	Type       string    `gorm:"index;size:80;not null" json:"type"`
+	Severity   string    `gorm:"index;size:20;not null" json:"severity"`
+	Status     string    `gorm:"index;size:30" json:"status"`
+	Message    string    `gorm:"type:text" json:"message"`
+	DetailJSON string    `gorm:"type:text" json:"detailJson"`
+	OccurredAt time.Time `gorm:"index" json:"occurredAt"`
 }
 
 type InstallToken struct {

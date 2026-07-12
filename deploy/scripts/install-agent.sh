@@ -10,6 +10,9 @@ LOG_DIR="${DUSHENG_LOG_DIR:-/var/log/dusheng-agent}"
 AGENT_USER="${DUSHENG_AGENT_USER:-dusheng-agent}"
 RELEASE_BASE="${DUSHENG_RELEASE_BASE:-https://github.com/SatanDS/DuSheng-Panel/releases/latest/download}"
 AGENT_URL="${DUSHENG_AGENT_URL:-}"
+AGENT_SHA256="${DUSHENG_AGENT_SHA256:-}"
+CHECKSUMS_URL="${DUSHENG_CHECKSUMS_URL:-${RELEASE_BASE}/checksums.txt}"
+SKIP_VERIFY="${DUSHENG_SKIP_VERIFY:-0}"
 GOST_URL="${DUSHENG_GOST_URL:-}"
 GOST_BIN="${DUSHENG_GOST_PATH:-${DUSHENG_GOST_BIN:-/usr/local/bin/gost}}"
 DPI_ENABLED="${DUSHENG_DPI_ENABLED:-1}"
@@ -18,6 +21,7 @@ DPI_ENGINE="${DUSHENG_DPI_ENGINE:-auto}"
 DPI_MAX_FLOWS="${DUSHENG_DPI_MAX_FLOWS:-8192}"
 DPI_FLOW_TTL="${DUSHENG_DPI_FLOW_TTL:-2m}"
 DPI_MAX_PACKETS="${DUSHENG_DPI_MAX_PACKETS:-12}"
+METRICS_LISTEN="${DUSHENG_METRICS_LISTEN-127.0.0.1:19090}"
 
 need_root() {
   if [ "$(id -u)" -ne 0 ]; then
@@ -40,6 +44,8 @@ detect_os() {
     exit 1
   fi
 
+  # /etc/os-release is provided by every supported distribution.
+  # shellcheck disable=SC1091
   . /etc/os-release
   case "${ID:-}" in
     debian)
@@ -100,6 +106,39 @@ download_file() {
   curl -fL --retry 3 --connect-timeout 10 -o "$dest" "$url"
 }
 
+verify_agent_archive() {
+  local archive="$1"
+  local asset_name="$2"
+  if [ "$SKIP_VERIFY" = "1" ]; then
+    echo "WARNING: agent checksum verification was explicitly disabled." >&2
+    return
+  fi
+  local expected="$AGENT_SHA256"
+  if [ -z "$expected" ]; then
+    local checksum_file
+    checksum_file="$(mktemp)"
+    if ! download_file "$CHECKSUMS_URL" "$checksum_file"; then
+      rm -f "$checksum_file"
+      echo "Unable to download release checksums from $CHECKSUMS_URL." >&2
+      echo "Set DUSHENG_AGENT_SHA256 explicitly, or use DUSHENG_SKIP_VERIFY=1 only for trusted development builds." >&2
+      exit 1
+    fi
+    expected="$(awk -v name="$asset_name" '$2 == name { print $1; exit }' "$checksum_file")"
+    rm -f "$checksum_file"
+  fi
+  if ! printf '%s' "$expected" | grep -Eq '^[0-9a-fA-F]{64}$'; then
+    echo "No valid SHA256 checksum was found for $asset_name." >&2
+    exit 1
+  fi
+  local actual
+  actual="$(sha256sum "$archive" | awk '{print $1}')"
+  if [ "$(printf '%s' "$actual" | tr 'A-F' 'a-f')" != "$(printf '%s' "$expected" | tr 'A-F' 'a-f')" ]; then
+    echo "SHA256 verification failed for $asset_name." >&2
+    exit 1
+  fi
+  echo "Verified SHA256 for $asset_name"
+}
+
 install_dpi_support_files() {
   local base_dir="$1"
   local lib_dir="${DUSHENG_DPI_LIB_DIR:-$base_dir/dusheng-dpi-lib}"
@@ -136,6 +175,7 @@ install_agent_binary() {
     fi
     echo "Downloading DuSheng agent from $AGENT_URL"
     download_file "$AGENT_URL" "$tmp/agent"
+    verify_agent_archive "$tmp/agent" "dusheng-agent-linux-$arch.tar.gz"
     if tar -tzf "$tmp/agent" >/dev/null 2>&1; then
       tar -xzf "$tmp/agent" -C "$tmp"
       local found
@@ -212,6 +252,7 @@ DUSHENG_DATA_DIR=${DATA_DIR}
 DUSHENG_GOST_PATH=${GOST_BIN}
 DUSHENG_GOST_BIN=${GOST_BIN}
 DUSHENG_DPI_ADDR=${dpi_env}
+DUSHENG_METRICS_LISTEN=${METRICS_LISTEN}
 EOF
   chown root:"$AGENT_USER" "$CONFIG_DIR/agent.env"
 }
@@ -301,8 +342,9 @@ Environment=DUSHENG_DATA_DIR=${DATA_DIR}
 Environment=DUSHENG_GOST_PATH=${GOST_BIN}
 Environment=DUSHENG_GOST_BIN=${GOST_BIN}
 Environment=DUSHENG_DPI_ADDR=${DPI_ADDR}
+Environment=DUSHENG_METRICS_LISTEN=${METRICS_LISTEN}
 EnvironmentFile=-${CONFIG_DIR}/agent.env
-ExecStart=${INSTALL_DIR}/dusheng-agent -base-url \${DUSHENG_API_URL} -install-token \${DUSHENG_INSTALL_TOKEN} -data-dir \${DUSHENG_DATA_DIR} -gost-path \${DUSHENG_GOST_PATH} -dpi-addr \${DUSHENG_DPI_ADDR}
+ExecStart=${INSTALL_DIR}/dusheng-agent -base-url \${DUSHENG_API_URL} -data-dir \${DUSHENG_DATA_DIR} -gost-path \${DUSHENG_GOST_PATH} -dpi-addr \${DUSHENG_DPI_ADDR}
 ExecStopPost=+/bin/bash ${INSTALL_DIR}/uninstall-agent.sh
 Restart=on-failure
 RestartSec=3

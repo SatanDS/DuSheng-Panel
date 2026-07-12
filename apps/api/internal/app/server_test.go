@@ -27,6 +27,12 @@ func testServer(t *testing.T) *Server {
 	require.NoError(t, db.AutoMigrate(
 		&models.User{},
 		&models.DeviceGroup{},
+		&models.LineProvider{},
+		&models.LineSite{},
+		&models.LineCircuit{},
+		&models.LineEndpoint{},
+		&models.LineProbe{},
+		&models.LineProbeSample{},
 		&models.Node{},
 		&models.Tunnel{},
 		&models.ForwardRule{},
@@ -35,6 +41,7 @@ func testServer(t *testing.T) *Server {
 		&models.TrafficSample{},
 		&models.AgentTrafficReport{},
 		&models.AuditLog{},
+		&models.AgentEvent{},
 		&models.InstallToken{},
 		&models.ProtocolViolation{},
 	))
@@ -112,6 +119,64 @@ func adminToken(t *testing.T, s *Server) string {
 	token, err := auth.GenerateToken(admin.ID, admin.Role, auth.TokenTypeAccess, "test-secret-for-unit-tests", time.Hour)
 	require.NoError(t, err)
 	return token
+}
+
+func TestHealthAndMetricsEndpoints(t *testing.T) {
+	s := testServer(t)
+	router := testRouter(t, s)
+	rec := jsonRequest(t, router, http.MethodGet, "/healthz", nil, "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Contains(t, rec.Body.String(), `"status":"ok"`)
+
+	req := httptest.NewRequest(http.MethodGet, "/metrics", nil)
+	req.Header.Set("Accept", "text/plain")
+	rec = httptest.NewRecorder()
+	router.ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Contains(t, rec.Body.String(), "dusheng_panel_accounted_bytes")
+	require.Contains(t, rec.Body.String(), "dusheng_api_http_requests_total")
+}
+
+func TestRequestBodyLimitRejectsOversizedPayload(t *testing.T) {
+	s := testServer(t)
+	rec := jsonRequest(t, testRouter(t, s), http.MethodPost, "/api/v1/auth/login", map[string]any{
+		"username": strings.Repeat("x", int(maxRequestBodyBytes)), "password": "secret",
+	}, "")
+	require.Equal(t, http.StatusRequestEntityTooLarge, rec.Code)
+}
+
+func TestLoginLimiterHasBoundedMemory(t *testing.T) {
+	limiter := newLoginLimiter()
+	now := time.Now()
+	for index := 0; index < maxLoginLimiterEntries+100; index++ {
+		limiter.fail(fmt.Sprintf("client-%d", index), now.Add(time.Duration(index)*time.Nanosecond))
+	}
+	require.LessOrEqual(t, len(limiter.attempts), maxLoginLimiterEntries)
+}
+
+func TestExpiredUserCannotAuthenticateOrRefresh(t *testing.T) {
+	s := testServer(t)
+	hash, err := auth.HashPassword("secret")
+	require.NoError(t, err)
+	expiresAt := time.Now().Add(-time.Minute)
+	user := models.User{
+		Username: "expired-user", PasswordHash: hash, Role: "user", Status: "active", ExpiresAt: &expiresAt,
+	}
+	require.NoError(t, s.db.Create(&user).Error)
+	router := testRouter(t, s)
+	rec := jsonRequest(t, router, http.MethodPost, "/api/v1/auth/login", map[string]any{
+		"username": user.Username, "password": "secret",
+	}, "")
+	require.Equal(t, http.StatusUnauthorized, rec.Code)
+
+	access, err := auth.GenerateToken(user.ID, user.Role, auth.TokenTypeAccess, "test-secret-for-unit-tests", time.Hour)
+	require.NoError(t, err)
+	rec = jsonRequest(t, router, http.MethodGet, "/api/v1/me", nil, access)
+	require.Equal(t, http.StatusUnauthorized, rec.Code)
+	refresh, err := auth.GenerateToken(user.ID, user.Role, auth.TokenTypeRefresh, "test-secret-for-unit-tests", time.Hour)
+	require.NoError(t, err)
+	rec = jsonRequest(t, router, http.MethodPost, "/api/v1/auth/refresh", nil, refresh)
+	require.Equal(t, http.StatusUnauthorized, rec.Code)
 }
 
 func TestCreateGamingProtocolPolicyAppliesSafeDefaults(t *testing.T) {
@@ -436,6 +501,126 @@ func TestForceDeleteNodeRemovesRecordAndAudits(t *testing.T) {
 	require.Contains(t, audit.MetadataJSON, "uninstall-test")
 }
 
+func TestLineAssetLifecycleAndReferenceGuards(t *testing.T) {
+	s := testServer(t)
+	token := adminToken(t, s)
+	router := testRouter(t, s)
+	group := models.DeviceGroup{Name: "entry", Role: "entry", PortStart: 20000, PortEnd: 30000, TrafficRatio: 1}
+	require.NoError(t, s.db.Create(&group).Error)
+
+	rec := jsonRequest(t, router, http.MethodPost, "/api/v1/line-providers", map[string]any{
+		"name": "Carrier A", "code": "carrier-a", "status": "active", "portalUrl": "https://carrier.example.com",
+	}, token)
+	require.Equal(t, http.StatusCreated, rec.Code)
+	var provider models.LineProvider
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &provider))
+
+	rec = jsonRequest(t, router, http.MethodPost, "/api/v1/line-sites", map[string]any{
+		"name": "Tokyo POP", "code": "tyo", "status": "active", "country": "JP", "city": "Tokyo",
+	}, token)
+	require.Equal(t, http.StatusCreated, rec.Code)
+	var site models.LineSite
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &site))
+
+	rec = jsonRequest(t, router, http.MethodPost, "/api/v1/line-circuits", map[string]any{
+		"providerId": provider.ID, "name": "IEPL-TYO-01", "serviceType": "iepl", "status": "active",
+		"bandwidthMbps": 100, "committedMbps": 200,
+	}, token)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+
+	rec = jsonRequest(t, router, http.MethodPost, "/api/v1/line-circuits", map[string]any{
+		"providerId": provider.ID, "name": "IEPL-TYO-01", "circuitCode": "C-1001",
+		"serviceType": "iepl", "status": "active", "bandwidthMbps": 1000, "committedMbps": 500,
+		"latencySlaMs": 60, "packetLossSlaPct": 0.5, "currency": "USD",
+	}, token)
+	require.Equal(t, http.StatusCreated, rec.Code)
+	var circuit models.LineCircuit
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &circuit))
+
+	endpoint := map[string]any{
+		"circuitId": circuit.ID, "side": "a", "siteId": site.ID, "deviceGroupId": group.ID,
+		"interface": "eth1", "vlan": 101, "ipCidrs": "10.0.0.1/30, 2001:db8::1/126",
+	}
+	rec = jsonRequest(t, router, http.MethodPost, "/api/v1/line-endpoints", endpoint, token)
+	require.Equal(t, http.StatusCreated, rec.Code)
+	var lineEndpoint models.LineEndpoint
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &lineEndpoint))
+	require.Contains(t, lineEndpoint.IPCIDRs, "10.0.0.0/30")
+
+	rec = jsonRequest(t, router, http.MethodPost, "/api/v1/line-endpoints", endpoint, token)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+
+	rec = jsonRequest(t, router, http.MethodDelete, fmt.Sprintf("/api/v1/line-circuits/%d", circuit.ID), nil, token)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	rec = jsonRequest(t, router, http.MethodDelete, fmt.Sprintf("/api/v1/line-endpoints/%d", lineEndpoint.ID), nil, token)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	rec = jsonRequest(t, router, http.MethodDelete, fmt.Sprintf("/api/v1/line-circuits/%d", circuit.ID), nil, token)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+}
+
+func TestLineProbeConfigAndAgentResult(t *testing.T) {
+	s := testServer(t)
+	admin := adminToken(t, s)
+	router := testRouter(t, s)
+	provider := models.LineProvider{Name: "Carrier", Status: "active"}
+	require.NoError(t, s.db.Create(&provider).Error)
+	circuit := models.LineCircuit{ProviderID: provider.ID, Name: "IEPL", ServiceType: "iepl", Status: "active", BandwidthMbps: 100}
+	require.NoError(t, s.db.Create(&circuit).Error)
+	group := models.DeviceGroup{Name: "entry", Role: "entry", PortStart: 20000, PortEnd: 30000, TrafficRatio: 1}
+	require.NoError(t, s.db.Create(&group).Error)
+	nodeToken := "probe-node-token"
+	node := models.Node{
+		DeviceGroupID: group.ID, Name: "probe-node", UUID: "probe-node", TokenHash: auth.TokenHash(nodeToken),
+		Status: "online", Capabilities: []string{"line_probe_v1"},
+	}
+	require.NoError(t, s.db.Create(&node).Error)
+
+	rec := jsonRequest(t, router, http.MethodPost, "/api/v1/line-probes", map[string]any{
+		"circuitId": circuit.ID, "nodeId": node.ID, "name": "TCP SLA", "type": "tcp",
+		"target": "127.0.0.1:443", "intervalSeconds": 15, "timeoutMs": 1000, "enabled": true,
+	}, admin)
+	require.Equal(t, http.StatusCreated, rec.Code)
+	var probe models.LineProbe
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &probe))
+	require.Greater(t, probe.ID, uint(0))
+	require.NoError(t, s.db.First(&node, node.ID).Error)
+	require.Greater(t, node.DesiredRevision, int64(0))
+
+	rec = jsonRequest(t, router, http.MethodGet, "/api/v1/agent/config", nil, nodeToken)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var configPayload struct {
+		LineProbes []models.LineProbe `json:"lineProbes"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &configPayload))
+	require.Len(t, configPayload.LineProbes, 1)
+	require.Equal(t, probe.ID, configPayload.LineProbes[0].ID)
+
+	rec = jsonRequest(t, router, http.MethodPost, "/api/v1/agent/probes", map[string]any{
+		"probeId": probe.ID, "revision": probe.Revision, "success": true, "latencyMs": 12.5,
+	}, nodeToken)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	require.NoError(t, s.db.First(&probe, probe.ID).Error)
+	require.Equal(t, "up", probe.Status)
+	require.Equal(t, 12.5, probe.LastLatencyMs)
+	require.NotNil(t, probe.LastCheckedAt)
+
+	var sample models.LineProbeSample
+	require.NoError(t, s.db.Where("probe_id = ?", probe.ID).First(&sample).Error)
+	require.True(t, sample.Success)
+	var event models.AgentEvent
+	require.NoError(t, s.db.Where("node_id = ? AND type = ?", node.ID, "line_probe.up").First(&event).Error)
+	legacyNode := models.Node{
+		DeviceGroupID: group.ID, Name: "legacy-node", UUID: "legacy-probe-node", TokenHash: "legacy-token", Status: "online",
+	}
+	require.NoError(t, s.db.Create(&legacyNode).Error)
+	rec = jsonRequest(t, router, http.MethodPost, "/api/v1/line-probes", map[string]any{
+		"circuitId": circuit.ID, "nodeId": legacyNode.ID, "name": "unsupported probe", "type": "tcp",
+		"target": "127.0.0.1:443", "intervalSeconds": 15, "timeoutMs": 1000, "enabled": true,
+	}, admin)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	require.Contains(t, rec.Body.String(), "line_probe_v1")
+}
+
 func TestAgentTrafficRejectsNegativeBytes(t *testing.T) {
 	s := testServer(t)
 	user, entry, tunnel, _ := seedForwardFixture(t, s)
@@ -548,6 +733,245 @@ func TestAgentTrafficExhaustsQuotaAndStopsConfig(t *testing.T) {
 	require.Empty(t, payload.ForwardRules)
 }
 
+func TestAgentConfigFiltersInactiveAndExpiredUsers(t *testing.T) {
+	s := testServer(t)
+	admin := adminToken(t, s)
+	user, entry, tunnel, _ := seedForwardFixture(t, s)
+	rule := models.ForwardRule{
+		UserID: user.ID, TunnelID: tunnel.ID, Name: "effective-user-rule", Protocol: "tcp", Strategy: "least_conn",
+		ListenPort: 20001, RemoteHost: "127.0.0.1", RemotePort: 8081, Status: "active", Revision: 1,
+	}
+	require.NoError(t, s.db.Create(&rule).Error)
+	nodeToken := "effective-user-node-token"
+	node := models.Node{
+		DeviceGroupID: entry.ID, Name: "node", UUID: "effective-user-node",
+		TokenHash: auth.TokenHash(nodeToken), Status: "online",
+	}
+	require.NoError(t, s.db.Create(&node).Error)
+	router := testRouter(t, s)
+
+	readConfig := func() (int64, []models.ForwardRule) {
+		rec := jsonRequest(t, router, http.MethodGet, "/api/v1/agent/config", nil, nodeToken)
+		require.Equal(t, http.StatusOK, rec.Code)
+		var payload struct {
+			Revision     int64                `json:"revision"`
+			ForwardRules []models.ForwardRule `json:"forwardRules"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
+		return payload.Revision, payload.ForwardRules
+	}
+
+	activeRevision, rules := readConfig()
+	require.Len(t, rules, 1)
+	rec := jsonRequest(t, router, http.MethodPut, fmt.Sprintf("/api/v1/users/%d", user.ID), map[string]any{
+		"username": user.Username, "displayName": user.DisplayName, "role": user.Role, "status": "disabled",
+		"flowLimitBytes": user.FlowLimitBytes, "forwardLimit": user.ForwardLimit,
+	}, admin)
+	require.Equal(t, http.StatusOK, rec.Code)
+	disabledRevision, rules := readConfig()
+	require.Empty(t, rules)
+	require.Greater(t, disabledRevision, activeRevision)
+
+	expiredAt := time.Now().Add(-time.Second).UTC()
+	rec = jsonRequest(t, router, http.MethodPut, fmt.Sprintf("/api/v1/users/%d", user.ID), map[string]any{
+		"username": user.Username, "displayName": user.DisplayName, "role": user.Role, "status": "active",
+		"flowLimitBytes": user.FlowLimitBytes, "forwardLimit": user.ForwardLimit, "expiresAt": expiredAt,
+	}, admin)
+	require.Equal(t, http.StatusOK, rec.Code)
+	expiredRevision, rules := readConfig()
+	require.Empty(t, rules)
+	require.Greater(t, expiredRevision, disabledRevision)
+}
+
+func TestAgentConfigOnlyStartsRulesOnEntryNodes(t *testing.T) {
+	s := testServer(t)
+	user, entry, tunnel, _ := seedForwardFixture(t, s)
+	exit := models.DeviceGroup{Name: "exit", Role: "exit", PortStart: 20000, PortEnd: 30000, TrafficRatio: 1}
+	require.NoError(t, s.db.Create(&exit).Error)
+	tunnel.ExitGroupID = &exit.ID
+	require.NoError(t, s.db.Save(&tunnel).Error)
+	rule := models.ForwardRule{
+		UserID: user.ID, TunnelID: tunnel.ID, Name: "entry-only-rule", Protocol: "tcp", Strategy: "least_conn",
+		ListenPort: 20001, RemoteHost: "127.0.0.1", RemotePort: 8081, Status: "active", Revision: 1,
+	}
+	require.NoError(t, s.db.Create(&rule).Error)
+	entryToken := "entry-config-token"
+	exitToken := "exit-config-token"
+	require.NoError(t, s.db.Create(&models.Node{
+		DeviceGroupID: entry.ID, Name: "entry-node", UUID: "entry-config-node", TokenHash: auth.TokenHash(entryToken), Status: "online",
+	}).Error)
+	require.NoError(t, s.db.Create(&models.Node{
+		DeviceGroupID: exit.ID, Name: "exit-node", UUID: "exit-config-node", TokenHash: auth.TokenHash(exitToken), Status: "online",
+	}).Error)
+	router := testRouter(t, s)
+	readRules := func(token string) []models.ForwardRule {
+		rec := jsonRequest(t, router, http.MethodGet, "/api/v1/agent/config", nil, token)
+		require.Equal(t, http.StatusOK, rec.Code)
+		var payload struct {
+			ForwardRules []models.ForwardRule `json:"forwardRules"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
+		return payload.ForwardRules
+	}
+	require.Len(t, readRules(entryToken), 1)
+	require.Empty(t, readRules(exitToken))
+}
+
+func TestResourceMovesBumpOldAndNewNodeRevisions(t *testing.T) {
+	s := testServer(t)
+	token := adminToken(t, s)
+	router := testRouter(t, s)
+	groups := []models.DeviceGroup{
+		{Name: "entry-a", Role: "entry", PortStart: 20000, PortEnd: 20999, TrafficRatio: 1},
+		{Name: "entry-b", Role: "entry", PortStart: 21000, PortEnd: 21999, TrafficRatio: 1},
+		{Name: "entry-c", Role: "entry", PortStart: 22000, PortEnd: 22999, TrafficRatio: 1},
+	}
+	for index := range groups {
+		require.NoError(t, s.db.Create(&groups[index]).Error)
+	}
+	nodes := []models.Node{
+		{DeviceGroupID: groups[0].ID, Name: "node-a", UUID: "move-node-a", TokenHash: "a", Status: "online"},
+		{DeviceGroupID: groups[1].ID, Name: "node-b", UUID: "move-node-b", TokenHash: "b", Status: "online"},
+		{DeviceGroupID: groups[2].ID, Name: "node-c", UUID: "move-node-c", TokenHash: "c", Status: "online"},
+	}
+	for index := range nodes {
+		require.NoError(t, s.db.Create(&nodes[index]).Error)
+	}
+	tunnelA := models.Tunnel{
+		Name: "tunnel-a", Mode: "single", EntryGroupID: groups[0].ID, Protocol: "direct",
+		FlowAccounting: "single", EntryTrafficRatio: 1, ExitTrafficRatio: 1,
+	}
+	require.NoError(t, s.db.Create(&tunnelA).Error)
+	rec := jsonRequest(t, router, http.MethodPut, fmt.Sprintf("/api/v1/tunnels/%d", tunnelA.ID), map[string]any{
+		"name": "tunnel-a", "mode": "single", "entryGroupId": groups[1].ID, "protocol": "direct",
+		"flowAccounting": "single", "entryTrafficRatio": 1, "exitTrafficRatio": 1,
+	}, token)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NoError(t, s.db.First(&nodes[0], nodes[0].ID).Error)
+	require.NoError(t, s.db.First(&nodes[1], nodes[1].ID).Error)
+	require.Greater(t, nodes[0].DesiredRevision, int64(0))
+	require.Greater(t, nodes[1].DesiredRevision, int64(0))
+
+	user := models.User{Username: "move-user", PasswordHash: "hash", Role: "user", Status: "active", ForwardLimit: 10}
+	require.NoError(t, s.db.Create(&user).Error)
+	tunnelB := models.Tunnel{
+		Name: "tunnel-b", Mode: "single", EntryGroupID: groups[2].ID, Protocol: "direct",
+		FlowAccounting: "single", EntryTrafficRatio: 1, ExitTrafficRatio: 1,
+	}
+	require.NoError(t, s.db.Create(&tunnelB).Error)
+	rule := models.ForwardRule{
+		UserID: user.ID, TunnelID: tunnelA.ID, Name: "move-rule", Protocol: "tcp", ListenPort: 21500,
+		RemoteHost: "198.51.100.10", RemotePort: 443, Status: "active", Strategy: "least_conn",
+	}
+	require.NoError(t, s.db.Create(&rule).Error)
+	require.NoError(t, s.db.Model(&models.Node{}).Where("id IN ?", []uint{nodes[1].ID, nodes[2].ID}).Update("desired_revision", 0).Error)
+	rec = jsonRequest(t, router, http.MethodPut, fmt.Sprintf("/api/v1/forward-rules/%d", rule.ID), map[string]any{
+		"userId": user.ID, "tunnelId": tunnelB.ID, "name": "move-rule", "protocol": "tcp",
+		"listenPort": 22500, "remoteHost": "198.51.100.10", "remotePort": 443, "status": "active", "strategy": "least_conn",
+	}, token)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NoError(t, s.db.First(&nodes[1], nodes[1].ID).Error)
+	require.NoError(t, s.db.First(&nodes[2], nodes[2].ID).Error)
+	require.Greater(t, nodes[1].DesiredRevision, int64(0))
+	require.Greater(t, nodes[2].DesiredRevision, int64(0))
+
+	previousRevision := nodes[0].DesiredRevision
+	rec = jsonRequest(t, router, http.MethodPut, fmt.Sprintf("/api/v1/nodes/%d", nodes[0].ID), map[string]any{
+		"deviceGroupId": groups[2].ID, "name": nodes[0].Name, "status": "online",
+	}, token)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NoError(t, s.db.First(&nodes[0], nodes[0].ID).Error)
+	require.Equal(t, groups[2].ID, nodes[0].DeviceGroupID)
+	require.Greater(t, nodes[0].DesiredRevision, previousRevision)
+}
+
+func TestDesiredRevisionBumpsNeverRegress(t *testing.T) {
+	s := testServer(t)
+	group := models.DeviceGroup{Name: "revision-group", Role: "entry", TrafficRatio: 1}
+	require.NoError(t, s.db.Create(&group).Error)
+	node := models.Node{
+		DeviceGroupID: group.ID, Name: "revision-node", UUID: "revision-node", TokenHash: "revision-token",
+		Status: "online", DesiredRevision: 200,
+	}
+	require.NoError(t, s.db.Create(&node).Error)
+	require.NoError(t, bumpNodesByGroupWithDB(s.db, []uint{group.ID}, 100))
+	require.NoError(t, bumpNodeRevisionWithDB(s.db, node.ID, 150))
+	require.NoError(t, s.db.First(&node, node.ID).Error)
+	require.Equal(t, int64(200), node.DesiredRevision)
+	require.NoError(t, bumpNodeRevisionWithDB(s.db, node.ID, 250))
+	require.NoError(t, s.db.First(&node, node.ID).Error)
+	require.Equal(t, int64(250), node.DesiredRevision)
+}
+
+func TestAgentCapabilitiesAndConfigAcknowledgement(t *testing.T) {
+	s := testServer(t)
+	group := models.DeviceGroup{Name: "entry", Role: "entry", PortStart: 20000, PortEnd: 30000, TrafficRatio: 1}
+	require.NoError(t, s.db.Create(&group).Error)
+	nodeToken := "capability-node-token"
+	node := models.Node{
+		DeviceGroupID: group.ID, Name: "capable", UUID: "capability-node",
+		TokenHash: auth.TokenHash(nodeToken), Status: "online", Version: "dev", DesiredRevision: 42,
+	}
+	require.NoError(t, s.db.Create(&node).Error)
+	router := testRouter(t, s)
+
+	rec := jsonRequest(t, router, http.MethodPost, "/api/v1/agent/heartbeat", map[string]any{
+		"version": "dev", "appliedRevision": 0,
+		"capabilities": []string{"tcp_runtime", "final_uninstall_ack", "tcp_runtime"},
+		"system":       map[string]any{"runtime": map[string]any{"listeners": 1}},
+	}, nodeToken)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.NoError(t, s.db.First(&node, node.ID).Error)
+	require.Equal(t, []string{"tcp_runtime", "final_uninstall_ack"}, node.Capabilities)
+	require.True(t, nodeSupportsFinalUninstallAck(node))
+
+	rec = jsonRequest(t, router, http.MethodGet, "/api/v1/agent/config", nil, nodeToken)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var configPayload struct {
+		Revision int64  `json:"revision"`
+		Nonce    string `json:"nonce"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &configPayload))
+	require.GreaterOrEqual(t, configPayload.Revision, int64(42))
+	require.NotEmpty(t, configPayload.Nonce)
+
+	rec = jsonRequest(t, router, http.MethodPost, "/api/v1/agent/config/ack", map[string]any{
+		"revision": configPayload.Revision, "nonce": configPayload.Nonce, "status": "applied",
+		"runtime": map[string]any{"listeners": 1},
+	}, nodeToken)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	require.NoError(t, s.db.First(&node, node.ID).Error)
+	require.Equal(t, "applied", node.ConfigStatus)
+	require.Equal(t, configPayload.Revision, node.AppliedRevision)
+	require.Equal(t, configPayload.Revision, node.LastGoodRevision)
+	require.NotNil(t, node.ConfigAckAt)
+
+	rec = jsonRequest(t, router, http.MethodPost, "/api/v1/agent/config/ack", map[string]any{
+		"revision": configPayload.Revision - 1, "nonce": configNonce(node, configPayload.Revision-1), "status": "rejected", "message": "stale error",
+	}, nodeToken)
+	require.Equal(t, http.StatusNoContent, rec.Code)
+	require.NoError(t, s.db.First(&node, node.ID).Error)
+	require.Equal(t, "applied", node.ConfigStatus, "stale ack must not replace newer state")
+	require.Equal(t, configPayload.Revision, node.ConfigAckRevision)
+
+	var events []models.AgentEvent
+	require.NoError(t, s.db.Where("node_id = ?", node.ID).Order("id asc").Find(&events).Error)
+	require.Len(t, events, 2)
+	require.Equal(t, "config.applied", events[0].Type)
+	require.Equal(t, "config.rejected", events[1].Type)
+}
+
+func TestConfigAckRejectsMismatchedNonce(t *testing.T) {
+	s := testServer(t)
+	nodeToken := "nonce-node-token"
+	node := models.Node{DeviceGroupID: 1, Name: "node", UUID: "nonce-node", TokenHash: auth.TokenHash(nodeToken), Status: "online"}
+	require.NoError(t, s.db.Create(&node).Error)
+	rec := jsonRequest(t, testRouter(t, s), http.MethodPost, "/api/v1/agent/config/ack", map[string]any{
+		"revision": 1, "nonce": "wrong", "status": "applied",
+	}, nodeToken)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+}
+
 func TestAgentTrafficReportIDIsIdempotent(t *testing.T) {
 	s := testServer(t)
 	user, entry, tunnel, _ := seedForwardFixture(t, s)
@@ -575,6 +999,16 @@ func TestAgentTrafficReportIDIsIdempotent(t *testing.T) {
 	}
 	require.NoError(t, s.db.Create(&node).Error)
 	router := testRouter(t, s)
+	readRevision := func() int64 {
+		rec := jsonRequest(t, router, http.MethodGet, "/api/v1/agent/config", nil, nodeToken)
+		require.Equal(t, http.StatusOK, rec.Code)
+		var payload struct {
+			Revision int64 `json:"revision"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &payload))
+		return payload.Revision
+	}
+	configRevision := readRevision()
 	body := map[string]any{
 		"reportId": "report-1",
 		"samples":  []map[string]any{{"ruleId": rule.ID, "inBytes": 3, "outBytes": 4}},
@@ -591,6 +1025,7 @@ func TestAgentTrafficReportIDIsIdempotent(t *testing.T) {
 	var sampleCount int64
 	require.NoError(t, s.db.Model(&models.TrafficSample{}).Where("rule_id = ?", rule.ID).Count(&sampleCount).Error)
 	require.Equal(t, int64(2), sampleCount)
+	require.Equal(t, configRevision, readRevision(), "usage accounting must not churn the agent configuration revision")
 }
 
 func TestCreateForwardRuleRejectsDangerousRemoteForUser(t *testing.T) {

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"log"
 	"net"
@@ -44,11 +45,18 @@ type Syncer struct {
 	runtime  Runtime
 	logger   *log.Logger
 
-	mu              sync.RWMutex
-	appliedRevision int64
-	hasSynced       bool
-	leaseValidUntil time.Time
-	failClosed      bool
+	mu               sync.RWMutex
+	appliedRevision  int64
+	hasSynced        bool
+	leaseValidUntil  time.Time
+	failClosed       bool
+	configRevision   int64
+	configNonce      string
+	configStatus     string
+	configMessage    string
+	configUpdatedAt  time.Time
+	configAckPending bool
+	appliedConfig    client.AgentConfig
 }
 
 func New(api *client.Client, dataDir string, runtime Runtime, logger *log.Logger) *Syncer {
@@ -69,10 +77,16 @@ func (s *Syncer) SyncOnce(ctx context.Context) error {
 		s.failClosedIfLeaseExpired(ctx)
 		return err
 	}
+	if !cfg.ValidUntil.IsZero() && !cfg.ValidUntil.After(time.Now()) {
+		return s.rejectAndEnforceLease(ctx, cfg, errors.New("received an expired configuration lease"))
+	}
+	if s.refreshCurrentLease(cfg) {
+		return s.ackAppliedIfPending(ctx, cfg)
+	}
 
 	result, err := s.renderer.Render(cfg)
 	if err != nil {
-		return err
+		return s.rejectAndEnforceLease(ctx, cfg, err)
 	}
 
 	if result.Changed {
@@ -80,7 +94,10 @@ func (s *Syncer) SyncOnce(ctx context.Context) error {
 	}
 	if s.runtime != nil {
 		if err := s.runtime.Apply(ctx, cfg); err != nil {
-			return err
+			if restoreErr := s.restoreRenderedConfig(); restoreErr != nil {
+				err = errors.Join(err, fmt.Errorf("restore previous rendered config: %w", restoreErr))
+			}
+			return s.rejectAndEnforceLease(ctx, cfg, err)
 		}
 	}
 
@@ -92,9 +109,99 @@ func (s *Syncer) SyncOnce(ctx context.Context) error {
 	if s.leaseValidUntil.IsZero() {
 		s.leaseValidUntil = time.Now().Add(defaultConfigLease)
 	}
+	s.configRevision = cfg.Revision
+	s.configNonce = cfg.Nonce
+	s.configStatus = "applied"
+	s.configMessage = ""
+	s.configUpdatedAt = time.Now().UTC()
+	s.configAckPending = true
+	s.appliedConfig = cfg
 	s.mu.Unlock()
 
+	return s.ackAppliedIfPending(ctx, cfg)
+}
+
+func (s *Syncer) restoreRenderedConfig() error {
+	s.mu.RLock()
+	hasApplied := s.hasSynced
+	applied := s.appliedConfig
+	s.mu.RUnlock()
+	if !hasApplied {
+		return s.renderer.Remove()
+	}
+	_, err := s.renderer.Render(applied)
+	return err
+}
+
+func (s *Syncer) rejectAndEnforceLease(ctx context.Context, cfg client.AgentConfig, applyErr error) error {
+	err := s.rejectConfig(ctx, cfg, applyErr)
+	s.failClosedIfLeaseExpired(ctx)
+	return err
+}
+
+func (s *Syncer) refreshCurrentLease(cfg client.AgentConfig) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if !s.hasSynced || s.failClosed || s.appliedRevision != cfg.Revision || s.configNonce != cfg.Nonce {
+		return false
+	}
+	s.leaseValidUntil = cfg.ValidUntil
+	if s.leaseValidUntil.IsZero() {
+		s.leaseValidUntil = time.Now().Add(defaultConfigLease)
+	}
+	return true
+}
+
+func (s *Syncer) ackAppliedIfPending(ctx context.Context, cfg client.AgentConfig) error {
+	s.mu.RLock()
+	pending := s.configAckPending
+	s.mu.RUnlock()
+	if !pending || cfg.Nonce == "" {
+		return nil
+	}
+	if err := s.api.AckConfig(ctx, client.ConfigAck{
+		Revision: cfg.Revision,
+		Nonce:    cfg.Nonce,
+		Status:   "applied",
+		Runtime:  s.RuntimeStatus(),
+	}); err != nil {
+		return fmt.Errorf("ack applied config: %w", err)
+	}
+	s.mu.Lock()
+	if s.configRevision == cfg.Revision && s.configNonce == cfg.Nonce {
+		s.configAckPending = false
+	}
+	s.mu.Unlock()
 	return nil
+}
+
+func (s *Syncer) rejectConfig(ctx context.Context, cfg client.AgentConfig, applyErr error) error {
+	s.mu.Lock()
+	status := "rejected"
+	if s.hasSynced {
+		status = "rolled_back"
+	}
+	s.configRevision = cfg.Revision
+	s.configNonce = cfg.Nonce
+	s.configStatus = status
+	s.configMessage = applyErr.Error()
+	s.configUpdatedAt = time.Now().UTC()
+	s.configAckPending = false
+	s.mu.Unlock()
+	if cfg.Nonce == "" {
+		return applyErr
+	}
+	ackErr := s.api.AckConfig(ctx, client.ConfigAck{
+		Revision: cfg.Revision,
+		Nonce:    cfg.Nonce,
+		Status:   status,
+		Message:  applyErr.Error(),
+		Runtime:  s.RuntimeStatus(),
+	})
+	if ackErr != nil {
+		return errors.Join(applyErr, fmt.Errorf("ack rejected config: %w", ackErr))
+	}
+	return applyErr
 }
 
 func (s *Syncer) AppliedRevision() int64 {
@@ -118,6 +225,12 @@ func (s *Syncer) RuntimeStatus() map[string]any {
 	s.mu.RLock()
 	status["configLeaseValidUntil"] = s.leaseValidUntil
 	status["configFailClosed"] = s.failClosed
+	status["configRevision"] = s.configRevision
+	status["configNonce"] = s.configNonce
+	status["configStatus"] = s.configStatus
+	status["configMessage"] = s.configMessage
+	status["configUpdatedAt"] = s.configUpdatedAt
+	status["configAckPending"] = s.configAckPending
 	s.mu.RUnlock()
 	return status
 }
@@ -142,10 +255,36 @@ func (s *Syncer) failClosedIfLeaseExpired(ctx context.Context) {
 	if err := s.runtime.Apply(ctx, stopCfg); err != nil {
 		s.logger.Printf("runtime fail-closed apply failed: %v", err)
 	}
+	s.mu.Lock()
+	s.configStatus = "lease_expired"
+	s.configMessage = "configuration lease expired; runtime listeners stopped"
+	s.configUpdatedAt = time.Now().UTC()
+	revision := s.configRevision
+	nonce := s.configNonce
+	s.mu.Unlock()
+	if nonce != "" {
+		if err := s.api.AckConfig(ctx, client.ConfigAck{
+			Revision: revision,
+			Nonce:    nonce,
+			Status:   "lease_expired",
+			Message:  "configuration lease expired; runtime listeners stopped",
+			Runtime:  s.RuntimeStatus(),
+		}); err != nil {
+			s.logger.Printf("config lease expiry ack failed: %v", err)
+		}
+	}
 }
 
 type Renderer struct {
 	dataDir string
+}
+
+func (r *Renderer) Remove() error {
+	err := os.Remove(filepath.Join(r.dataDir, renderedFile))
+	if os.IsNotExist(err) {
+		return nil
+	}
+	return err
 }
 
 func NewRenderer(dataDir string) *Renderer {
@@ -268,7 +407,28 @@ func (r *Renderer) Render(cfg client.AgentConfig) (RenderResult, error) {
 	if err != nil && !os.IsNotExist(err) {
 		return RenderResult{}, err
 	}
-	if err := os.WriteFile(path, content, 0o644); err != nil {
+	temporary, err := os.CreateTemp(r.dataDir, ".rendered-gost-*")
+	if err != nil {
+		return RenderResult{}, err
+	}
+	temporaryPath := temporary.Name()
+	defer os.Remove(temporaryPath)
+	if err := temporary.Chmod(0o644); err != nil {
+		_ = temporary.Close()
+		return RenderResult{}, err
+	}
+	if _, err := temporary.Write(content); err != nil {
+		_ = temporary.Close()
+		return RenderResult{}, err
+	}
+	if err := temporary.Sync(); err != nil {
+		_ = temporary.Close()
+		return RenderResult{}, err
+	}
+	if err := temporary.Close(); err != nil {
+		return RenderResult{}, err
+	}
+	if err := os.Rename(temporaryPath, path); err != nil {
 		return RenderResult{}, err
 	}
 	return RenderResult{Path: path, Changed: true, ServiceCount: len(gostCfg.Services)}, nil

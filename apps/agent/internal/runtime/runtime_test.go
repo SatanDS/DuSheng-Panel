@@ -214,6 +214,152 @@ func TestRuntimeHotUpdatesPolicyWithoutDroppingListener(t *testing.T) {
 	}
 }
 
+func TestRuntimeHotUpdateDrainsExistingTCPGeneration(t *testing.T) {
+	reporter := &mockReporter{}
+	rt := New(reporter, nil, Options{
+		ListenHost: "127.0.0.1", ReadTimeout: 50 * time.Millisecond, DrainTimeout: 120 * time.Millisecond,
+	})
+	defer rt.Stop(context.Background())
+
+	_, upstreamPort, stopUpstream := startEchoServer(t)
+	defer stopUpstream()
+	listenPort := freePort(t)
+	cfg := testConfig(listenPort, upstreamPort)
+	cfg.Revision = 1
+	if err := rt.Apply(context.Background(), cfg); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+	conn, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", itoa(listenPort)))
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+	defer conn.Close()
+	if _, err := conn.Write([]byte("before")); err != nil {
+		t.Fatalf("write before update: %v", err)
+	}
+	buf := make([]byte, len("before"))
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		t.Fatalf("read before update: %v", err)
+	}
+
+	cfg.Revision = 2
+	cfg.ForwardRules[0].RemotePort = upstreamPort
+	cfg.ForwardRules[0].Strategy = "round_robin"
+	if err := rt.Apply(context.Background(), cfg); err != nil {
+		t.Fatalf("Apply(update) error = %v", err)
+	}
+	if got := rt.Status()["drainingConnections"]; got != int64(1) {
+		t.Fatalf("drainingConnections = %v, want 1", got)
+	}
+	if _, err := conn.Write([]byte("during")); err != nil {
+		t.Fatalf("existing connection dropped before drain timeout: %v", err)
+	}
+	buf = make([]byte, len("during"))
+	if _, err := io.ReadFull(conn, buf); err != nil {
+		t.Fatalf("existing connection read before drain timeout: %v", err)
+	}
+	waitFor(t, func() bool { return rt.Status()["drainingConnections"] == int64(0) })
+}
+
+func TestRuntimeHotUpdateDoesNotReuseOldGeneration(t *testing.T) {
+	reporter := &mockReporter{}
+	rt := New(reporter, nil, Options{
+		ListenHost: "127.0.0.1", ReadTimeout: 50 * time.Millisecond, DrainTimeout: 300 * time.Millisecond,
+	})
+	defer rt.Stop(context.Background())
+
+	_, upstreamPort, stopUpstream := startEchoServer(t)
+	defer stopUpstream()
+	listenPort := freePort(t)
+	cfg := testConfig(listenPort, upstreamPort)
+	cfg.Revision = 1
+	if err := rt.Apply(context.Background(), cfg); err != nil {
+		t.Fatalf("Apply(A) error = %v", err)
+	}
+	cfg.Revision = 2
+	cfg.ForwardRules[0].Strategy = "round_robin"
+	if err := rt.Apply(context.Background(), cfg); err != nil {
+		t.Fatalf("Apply(B) error = %v", err)
+	}
+	cfg.Revision = 3
+	cfg.ForwardRules[0].Strategy = "least_conn"
+	if err := rt.Apply(context.Background(), cfg); err != nil {
+		t.Fatalf("Apply(A again) error = %v", err)
+	}
+
+	conn, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", itoa(listenPort)))
+	if err != nil {
+		t.Fatalf("Dial() error = %v", err)
+	}
+	defer conn.Close()
+	_ = conn.SetDeadline(time.Now().Add(2 * time.Second))
+	for _, payload := range []string{"before-old-drain", "after-old-drain"} {
+		if payload == "after-old-drain" {
+			time.Sleep(400 * time.Millisecond)
+		}
+		if _, err := conn.Write([]byte(payload)); err != nil {
+			t.Fatalf("write %q: %v", payload, err)
+		}
+		buf := make([]byte, len(payload))
+		if _, err := io.ReadFull(conn, buf); err != nil {
+			t.Fatalf("read %q: %v", payload, err)
+		}
+		if string(buf) != payload {
+			t.Fatalf("echo = %q, want %q", buf, payload)
+		}
+	}
+}
+
+func TestRuntimeApplyRollsBackWhenAnyListenerFailsToWarm(t *testing.T) {
+	reporter := &mockReporter{}
+	rt := New(reporter, nil, Options{ListenHost: "127.0.0.1", ReadTimeout: 50 * time.Millisecond})
+	defer rt.Stop(context.Background())
+
+	_, upstreamPort, stopUpstream := startEchoServer(t)
+	defer stopUpstream()
+	listenPort := freePort(t)
+	cfg := testConfig(listenPort, upstreamPort)
+	cfg.Revision = 1
+	if err := rt.Apply(context.Background(), cfg); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+
+	occupied, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("occupy listener: %v", err)
+	}
+	defer occupied.Close()
+	occupiedPort := occupied.Addr().(*net.TCPAddr).Port
+	cfg.Revision = 2
+	cfg.ForwardRules[0].RemotePort = freePort(t)
+	second := cfg.ForwardRules[0]
+	second.ID = 2
+	second.Name = "cannot-warm"
+	second.ListenPort = occupiedPort
+	cfg.ForwardRules = append(cfg.ForwardRules, second)
+	if err := rt.Apply(context.Background(), cfg); err == nil {
+		t.Fatal("Apply() succeeded with occupied listener")
+	}
+
+	conn, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", itoa(listenPort)))
+	if err != nil {
+		t.Fatalf("old listener unavailable after rollback: %v", err)
+	}
+	defer conn.Close()
+	message := []byte("still-old-config")
+	if _, err := conn.Write(message); err != nil {
+		t.Fatalf("write old listener: %v", err)
+	}
+	got := make([]byte, len(message))
+	if _, err := io.ReadFull(conn, got); err != nil {
+		t.Fatalf("old config was not retained: %v", err)
+	}
+	status := rt.Status()
+	if status["lastApplyStatus"] != "rejected" || status["lastApplyRevision"] != int64(2) {
+		t.Fatalf("status = %#v, want rejected revision 2", status)
+	}
+}
+
 func TestTCPRuntimeBlocksAfterMultiPacketDPIClassification(t *testing.T) {
 	reporter := &mockReporter{}
 	var mu sync.Mutex

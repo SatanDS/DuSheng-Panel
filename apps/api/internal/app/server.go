@@ -1,6 +1,8 @@
 package app
 
 import (
+	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -17,17 +19,23 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/google/uuid"
 	"gorm.io/gorm"
+	"gorm.io/gorm/clause"
 )
 
 type Server struct {
-	cfg          config.Config
-	db           *gorm.DB
-	loginLimiter *loginLimiter
+	cfg            config.Config
+	db             *gorm.DB
+	loginLimiter   *loginLimiter
+	maintenanceMu  sync.Mutex
+	lastProbePrune time.Time
 }
 
 const nodeOfflineAfter = 90 * time.Second
 const nodeUninstallAckTimeout = 5 * time.Minute
 const agentConfigLease = 2 * time.Minute
+const maxRequestBodyBytes = int64(2 << 20)
+const loginAttemptWindow = 10 * time.Minute
+const maxLoginLimiterEntries = 10000
 const (
 	defaultPageSize = 25
 	maxPageSize     = 200
@@ -63,12 +71,20 @@ func newLoginLimiter() *loginLimiter {
 func NewServer(cfg config.Config, db *gorm.DB) *gin.Engine {
 	gin.SetMode(gin.ReleaseMode)
 	s := &Server{cfg: cfg, db: db, loginLimiter: newLoginLimiter()}
+	metrics := newAPIMetrics(db)
 	router := gin.New()
-	router.Use(gin.Logger(), gin.Recovery(), cors(cfg.CORSOrigins))
+	router.Use(gin.Logger(), gin.Recovery(), limitRequestBody(maxRequestBodyBytes), metrics.middleware(), cors(cfg.CORSOrigins))
 
 	router.GET("/healthz", func(c *gin.Context) {
+		ctx, cancel := context.WithTimeout(c.Request.Context(), 2*time.Second)
+		defer cancel()
+		if err := db.WithContext(ctx).Exec("SELECT 1").Error; err != nil {
+			c.JSON(http.StatusServiceUnavailable, gin.H{"status": "degraded", "database": "unavailable", "time": time.Now().UTC()})
+			return
+		}
 		c.JSON(http.StatusOK, gin.H{"status": "ok", "time": time.Now().UTC()})
 	})
+	router.GET("/metrics", gin.WrapH(metrics.handler()))
 	router.GET("/install-agent.sh", s.installAgentScript)
 
 	api := router.Group("/api/v1")
@@ -79,6 +95,8 @@ func NewServer(cfg config.Config, db *gorm.DB) *gin.Engine {
 	agent := api.Group("/agent", s.agentAuth())
 	agent.POST("/heartbeat", s.agentHeartbeat)
 	agent.GET("/config", s.agentConfig)
+	agent.POST("/config/ack", s.agentConfigAck)
+	agent.POST("/probes", s.agentProbeResult)
 	agent.POST("/traffic", s.agentTraffic)
 	agent.POST("/violations", s.agentViolation)
 	agent.POST("/commands/:id/ack", s.agentCommandAck)
@@ -95,11 +113,32 @@ func NewServer(cfg config.Config, db *gorm.DB) *gin.Engine {
 	admin.GET("/users", s.listUsers)
 	admin.POST("/users", s.createUser)
 	admin.PUT("/users/:id", s.updateUser)
-	admin.DELETE("/users/:id", s.deleteByID(&models.User{}))
+	admin.DELETE("/users/:id", s.deleteUser)
 	admin.GET("/device-groups", s.listDeviceGroups)
 	admin.POST("/device-groups", s.createDeviceGroup)
 	admin.PUT("/device-groups/:id", s.updateDeviceGroup)
 	admin.DELETE("/device-groups/:id", s.deleteDeviceGroup)
+	admin.GET("/line-providers", s.listLineProviders)
+	admin.POST("/line-providers", s.createLineProvider)
+	admin.PUT("/line-providers/:id", s.updateLineProvider)
+	admin.DELETE("/line-providers/:id", s.deleteLineProvider)
+	admin.GET("/line-sites", s.listLineSites)
+	admin.POST("/line-sites", s.createLineSite)
+	admin.PUT("/line-sites/:id", s.updateLineSite)
+	admin.DELETE("/line-sites/:id", s.deleteLineSite)
+	admin.GET("/line-circuits", s.listLineCircuits)
+	admin.POST("/line-circuits", s.createLineCircuit)
+	admin.PUT("/line-circuits/:id", s.updateLineCircuit)
+	admin.DELETE("/line-circuits/:id", s.deleteLineCircuit)
+	admin.GET("/line-endpoints", s.listLineEndpoints)
+	admin.POST("/line-endpoints", s.createLineEndpoint)
+	admin.PUT("/line-endpoints/:id", s.updateLineEndpoint)
+	admin.DELETE("/line-endpoints/:id", s.deleteLineEndpoint)
+	admin.GET("/line-probes", s.listLineProbes)
+	admin.POST("/line-probes", s.createLineProbe)
+	admin.PUT("/line-probes/:id", s.updateLineProbe)
+	admin.DELETE("/line-probes/:id", s.deleteLineProbe)
+	admin.GET("/line-probe-samples", s.listLineProbeSamples)
 	admin.GET("/tunnels", s.listTunnels)
 	admin.POST("/tunnels", s.createTunnel)
 	admin.PUT("/tunnels/:id", s.updateTunnel)
@@ -114,6 +153,7 @@ func NewServer(cfg config.Config, db *gorm.DB) *gin.Engine {
 	admin.PUT("/speed-limits/:id", s.updateSpeedLimit)
 	admin.DELETE("/speed-limits/:id", s.deleteSpeedLimit)
 	admin.GET("/nodes", s.listNodes)
+	admin.GET("/node-events", s.listNodeEvents)
 	admin.PUT("/nodes/:id", s.updateNode)
 	admin.DELETE("/nodes/:id", s.requestNodeUninstall)
 	admin.POST("/install-tokens", s.createInstallToken)
@@ -153,6 +193,21 @@ func cors(origins []string) gin.HandlerFunc {
 	}
 }
 
+func limitRequestBody(maxBytes int64) gin.HandlerFunc {
+	return func(c *gin.Context) {
+		if c.Request.Body == nil || maxBytes <= 0 {
+			c.Next()
+			return
+		}
+		if c.Request.ContentLength > maxBytes {
+			c.AbortWithStatusJSON(http.StatusRequestEntityTooLarge, gin.H{"error": "request body is too large"})
+			return
+		}
+		c.Request.Body = http.MaxBytesReader(c.Writer, c.Request.Body, maxBytes)
+		c.Next()
+	}
+}
+
 func (s *Server) limiter() *loginLimiter {
 	if s.loginLimiter == nil {
 		s.loginLimiter = newLoginLimiter()
@@ -164,7 +219,7 @@ func (l *loginLimiter) allow(key string, now time.Time) bool {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 	attempt := l.attempts[key]
-	if now.Sub(attempt.FirstSeen) > 10*time.Minute {
+	if now.Sub(attempt.FirstSeen) > loginAttemptWindow {
 		delete(l.attempts, key)
 		return true
 	}
@@ -174,8 +229,14 @@ func (l *loginLimiter) allow(key string, now time.Time) bool {
 func (l *loginLimiter) fail(key string, now time.Time) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
+	if _, exists := l.attempts[key]; !exists && len(l.attempts) >= maxLoginLimiterEntries {
+		l.pruneLocked(now)
+		if len(l.attempts) >= maxLoginLimiterEntries {
+			l.evictOldestLocked()
+		}
+	}
 	attempt := l.attempts[key]
-	if attempt.FirstSeen.IsZero() || now.Sub(attempt.FirstSeen) > 10*time.Minute {
+	if attempt.FirstSeen.IsZero() || now.Sub(attempt.FirstSeen) > loginAttemptWindow {
 		attempt = loginAttempt{FirstSeen: now}
 	}
 	attempt.Count++
@@ -183,6 +244,28 @@ func (l *loginLimiter) fail(key string, now time.Time) {
 		attempt.BlockedAt = now
 	}
 	l.attempts[key] = attempt
+}
+
+func (l *loginLimiter) pruneLocked(now time.Time) {
+	for key, attempt := range l.attempts {
+		if now.Sub(attempt.FirstSeen) > loginAttemptWindow {
+			delete(l.attempts, key)
+		}
+	}
+}
+
+func (l *loginLimiter) evictOldestLocked() {
+	var oldestKey string
+	var oldest time.Time
+	for key, attempt := range l.attempts {
+		if oldestKey == "" || attempt.FirstSeen.Before(oldest) {
+			oldestKey = key
+			oldest = attempt.FirstSeen
+		}
+	}
+	if oldestKey != "" {
+		delete(l.attempts, oldestKey)
+	}
 }
 
 func (l *loginLimiter) success(key string) {
@@ -215,7 +298,7 @@ func (s *Server) login(c *gin.Context) {
 		unauthorized(c)
 		return
 	}
-	if user.Status != "active" || !auth.CheckPassword(user.PasswordHash, req.Password) {
+	if !userActiveAt(user, now) || !auth.CheckPassword(user.PasswordHash, req.Password) {
 		s.limiter().fail(key, now)
 		s.audit(c, &user.ID, "auth.login.failed", "user", fmt.Sprint(user.ID), "{}")
 		unauthorized(c)
@@ -248,7 +331,7 @@ func (s *Server) refresh(c *gin.Context) {
 		return
 	}
 	var user models.User
-	if err := s.db.First(&user, claims.UserID).Error; err != nil || user.Status != "active" {
+	if err := s.db.First(&user, claims.UserID).Error; err != nil || !userActiveAt(user, time.Now()) {
 		unauthorized(c)
 		return
 	}
@@ -276,8 +359,9 @@ func (s *Server) dashboard(c *gin.Context) {
 	var todayBytes int64
 	var recentViolations []models.ProtocolViolation
 	var recentRules []models.ForwardRule
-	since := time.Now().Add(-24 * time.Hour)
-	dayStart := time.Now().Truncate(24 * time.Hour)
+	now := time.Now()
+	since := now.Add(-24 * time.Hour)
+	dayStart := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
 
 	if ctxRole(c) == "admin" {
 		s.db.Model(&models.User{}).Count(&users)
@@ -337,7 +421,7 @@ func (s *Server) userAuth() gin.HandlerFunc {
 			return
 		}
 		var user models.User
-		if err := s.db.First(&user, claims.UserID).Error; err != nil || user.Status != "active" {
+		if err := s.db.First(&user, claims.UserID).Error; err != nil || !userActiveAt(user, time.Now()) {
 			unauthorized(c)
 			return
 		}
@@ -345,6 +429,10 @@ func (s *Server) userAuth() gin.HandlerFunc {
 		c.Set("role", user.Role)
 		c.Next()
 	}
+}
+
+func userActiveAt(user models.User, now time.Time) bool {
+	return user.Status == "active" && (user.ExpiresAt == nil || user.ExpiresAt.After(now))
 }
 
 func requireRole(role string) gin.HandlerFunc {
@@ -571,12 +659,60 @@ func (s *Server) updateUser(c *gin.Context) {
 		}
 		user.PasswordHash = hash
 	}
-	if err := s.db.Save(&user).Error; err != nil {
+	revision := time.Now().UnixNano()
+	if err := s.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Save(&user).Error; err != nil {
+			return err
+		}
+		return s.bumpUserRevisionWithDB(tx, user.ID, revision)
+	}); err != nil {
 		fail(c, err)
 		return
 	}
 	s.audit(c, actor(c), "user.update", "user", fmt.Sprint(user.ID), "{}")
 	c.JSON(http.StatusOK, user)
+}
+
+func (s *Server) deleteUser(c *gin.Context) {
+	var user models.User
+	if err := s.db.First(&user, c.Param("id")).Error; err != nil {
+		notFound(c)
+		return
+	}
+	if user.ID == ctxUserID(c) {
+		bad(c, errors.New("the current account cannot delete itself"))
+		return
+	}
+	if user.Role == "admin" {
+		var admins int64
+		if err := s.db.Model(&models.User{}).Where("role = ?", "admin").Count(&admins).Error; err != nil {
+			fail(c, err)
+			return
+		}
+		if admins <= 1 {
+			bad(c, errors.New("the last administrator cannot be deleted"))
+			return
+		}
+	}
+	var rules, limits int64
+	if err := s.db.Model(&models.ForwardRule{}).Where("user_id = ?", user.ID).Count(&rules).Error; err != nil {
+		fail(c, err)
+		return
+	}
+	if err := s.db.Model(&models.SpeedLimit{}).Where("user_id = ?", user.ID).Count(&limits).Error; err != nil {
+		fail(c, err)
+		return
+	}
+	if rules+limits > 0 {
+		bad(c, errors.New("user is still referenced by forwarding rules or speed limits"))
+		return
+	}
+	if err := s.db.Delete(&user).Error; err != nil {
+		fail(c, err)
+		return
+	}
+	s.audit(c, actor(c), "user.delete", "user", fmt.Sprint(user.ID), "{}")
+	c.Status(http.StatusNoContent)
 }
 
 func (s *Server) listNodes(c *gin.Context) {
@@ -605,7 +741,7 @@ func (s *Server) markStaleNodesOffline(now time.Time) {
 			"uninstall_ack_message": "agent did not confirm cleanup before the uninstall timeout",
 			"uninstall_ack_at":      now.UTC(),
 		}
-		if !agentSupportsFinalUninstallAck(node.Version) && node.LastSeenAt != nil && node.UninstallRequestedAt != nil && !node.LastSeenAt.Before(*node.UninstallRequestedAt) {
+		if !nodeSupportsFinalUninstallAck(node) && node.LastSeenAt != nil && node.UninstallRequestedAt != nil && !node.LastSeenAt.Before(*node.UninstallRequestedAt) {
 			updates["status"] = "uninstall_legacy"
 			updates["uninstall_ack_status"] = "legacy"
 			updates["uninstall_ack_message"] = "legacy agent received the command but cannot confirm final cleanup"
@@ -649,6 +785,7 @@ func (s *Server) updateNode(c *gin.Context) {
 		node.Status = req.Status
 	}
 	node.ConnectHost = req.ConnectHost
+	node.DesiredRevision = time.Now().UnixNano()
 	if err := s.db.Save(&node).Error; err != nil {
 		fail(c, err)
 		return
@@ -768,6 +905,26 @@ func (s *Server) deleteDeviceGroup(c *gin.Context) {
 		notFound(c)
 		return
 	}
+	var nodes, tunnels, endpoints, tokens int64
+	checks := []struct {
+		query *gorm.DB
+		count *int64
+	}{
+		{s.db.Model(&models.Node{}).Where("device_group_id = ?", row.ID), &nodes},
+		{s.db.Model(&models.Tunnel{}).Where("entry_group_id = ? OR exit_group_id = ?", row.ID, row.ID), &tunnels},
+		{s.db.Model(&models.LineEndpoint{}).Where("device_group_id = ?", row.ID), &endpoints},
+		{s.db.Model(&models.InstallToken{}).Where("device_group_id = ?", row.ID), &tokens},
+	}
+	for _, check := range checks {
+		if err := check.query.Count(check.count).Error; err != nil {
+			fail(c, err)
+			return
+		}
+	}
+	if nodes+tunnels+endpoints+tokens > 0 {
+		bad(c, errors.New("device group is still referenced by nodes, tunnels, line endpoints, or install tokens"))
+		return
+	}
 	if err := s.db.Delete(&row).Error; err != nil {
 		fail(c, err)
 		return
@@ -828,6 +985,7 @@ type tunnelPayload struct {
 	EntryTrafficRatio float64 `json:"entryTrafficRatio"`
 	ExitTrafficRatio  float64 `json:"exitTrafficRatio"`
 	ProtocolPolicyID  *uint   `json:"protocolPolicyId"`
+	LineCircuitID     *uint   `json:"lineCircuitId"`
 	AdvancedJSON      string  `json:"advancedJson"`
 }
 
@@ -837,6 +995,7 @@ func (s *Server) listTunnels(c *gin.Context) {
 	query = filterString(query, c, "mode", "mode")
 	query = filterUint(query, c, "entry_group_id", "entryGroupId")
 	query = filterUint(query, c, "exit_group_id", "exitGroupId")
+	query = filterUint(query, c, "line_circuit_id", "lineCircuitId")
 	respondPage[models.Tunnel](c, query, "id desc")
 }
 
@@ -865,6 +1024,7 @@ func (s *Server) updateTunnel(c *gin.Context) {
 		notFound(c)
 		return
 	}
+	previous := row
 	var req tunnelPayload
 	if err := c.ShouldBindJSON(&req); err != nil {
 		bad(c, err)
@@ -878,7 +1038,7 @@ func (s *Server) updateTunnel(c *gin.Context) {
 		fail(c, err)
 		return
 	}
-	s.afterTunnelChange(c, s.db, &row, "update")
+	s.afterTunnelUpdate(c, s.db, &previous, &row)
 	c.JSON(http.StatusOK, row)
 }
 
@@ -886,6 +1046,19 @@ func (s *Server) deleteTunnel(c *gin.Context) {
 	var row models.Tunnel
 	if err := s.db.First(&row, c.Param("id")).Error; err != nil {
 		notFound(c)
+		return
+	}
+	var rules, limits int64
+	if err := s.db.Model(&models.ForwardRule{}).Where("tunnel_id = ?", row.ID).Count(&rules).Error; err != nil {
+		fail(c, err)
+		return
+	}
+	if err := s.db.Model(&models.SpeedLimit{}).Where("tunnel_id = ?", row.ID).Count(&limits).Error; err != nil {
+		fail(c, err)
+		return
+	}
+	if rules+limits > 0 {
+		bad(c, errors.New("tunnel is still referenced by forwarding rules or speed limits"))
 		return
 	}
 	if err := s.db.Delete(&row).Error; err != nil {
@@ -931,6 +1104,9 @@ func (s *Server) applyTunnelPayload(row *models.Tunnel, req tunnelPayload) error
 	if err := s.requireOptionalID(&models.ProtocolPolicy{}, req.ProtocolPolicyID, "protocol policy"); err != nil {
 		return err
 	}
+	if err := s.requireOptionalID(&models.LineCircuit{}, req.LineCircuitID, "line circuit"); err != nil {
+		return err
+	}
 	if req.EntryTrafficRatio == 0 {
 		req.EntryTrafficRatio = 1
 	}
@@ -949,6 +1125,7 @@ func (s *Server) applyTunnelPayload(row *models.Tunnel, req tunnelPayload) error
 	row.EntryTrafficRatio = req.EntryTrafficRatio
 	row.ExitTrafficRatio = req.ExitTrafficRatio
 	row.ProtocolPolicyID = req.ProtocolPolicyID
+	row.LineCircuitID = req.LineCircuitID
 	row.AdvancedJSON = req.AdvancedJSON
 	return nil
 }
@@ -1039,6 +1216,23 @@ func (s *Server) deleteProtocolPolicy(c *gin.Context) {
 	var row models.ProtocolPolicy
 	if err := s.db.First(&row, c.Param("id")).Error; err != nil {
 		notFound(c)
+		return
+	}
+	var groups, tunnels, rules int64
+	if err := s.db.Model(&models.DeviceGroup{}).Where("protocol_policy_id = ?", row.ID).Count(&groups).Error; err != nil {
+		fail(c, err)
+		return
+	}
+	if err := s.db.Model(&models.Tunnel{}).Where("protocol_policy_id = ?", row.ID).Count(&tunnels).Error; err != nil {
+		fail(c, err)
+		return
+	}
+	if err := s.db.Model(&models.ForwardRule{}).Where("protocol_policy_id = ?", row.ID).Count(&rules).Error; err != nil {
+		fail(c, err)
+		return
+	}
+	if groups+tunnels+rules > 0 {
+		bad(c, errors.New("protocol policy is still referenced by device groups, tunnels, or forwarding rules"))
 		return
 	}
 	if err := s.db.Delete(&row).Error; err != nil {
@@ -1578,26 +1772,45 @@ func (s *Server) requireOptionalID(model any, id *uint, name string) error {
 
 func (s *Server) afterTunnelChange(c *gin.Context, db *gorm.DB, tunnel *models.Tunnel, action string) {
 	revision := time.Now().UnixNano()
+	ids := tunnelGroupIDs(tunnel)
+	_ = bumpNodesByGroupWithDB(db, ids, revision)
+	s.audit(c, actor(c), "tunnel."+action, "tunnel", fmt.Sprint(tunnel.ID), "{}")
+}
+
+func (s *Server) afterTunnelUpdate(c *gin.Context, db *gorm.DB, previous, tunnel *models.Tunnel) {
+	revision := time.Now().UnixNano()
+	groups := map[uint]struct{}{}
+	for _, id := range append(tunnelGroupIDs(previous), tunnelGroupIDs(tunnel)...) {
+		groups[id] = struct{}{}
+	}
+	_ = bumpNodesByGroupWithDB(db, uintSetValues(groups), revision)
+	s.audit(c, actor(c), "tunnel.update", "tunnel", fmt.Sprint(tunnel.ID), "{}")
+}
+
+func tunnelGroupIDs(tunnel *models.Tunnel) []uint {
 	ids := []uint{tunnel.EntryGroupID}
 	if tunnel.ExitGroupID != nil {
 		ids = append(ids, *tunnel.ExitGroupID)
 	}
-	db.Model(&models.Node{}).Where("device_group_id IN ?", ids).Update("desired_revision", revision)
-	s.audit(c, actor(c), "tunnel."+action, "tunnel", fmt.Sprint(tunnel.ID), "{}")
+	return ids
 }
 
 func (s *Server) afterDeviceGroupChange(c *gin.Context, db *gorm.DB, group *models.DeviceGroup, action string) {
-	db.Model(&models.Node{}).Where("device_group_id = ?", group.ID).Update("desired_revision", time.Now().UnixNano())
+	_ = bumpNodesByGroupWithDB(db, []uint{group.ID}, time.Now().UnixNano())
 	s.audit(c, actor(c), "device_group."+action, "device_group", fmt.Sprint(group.ID), "{}")
 }
 
 func (s *Server) afterProtocolPolicyChange(c *gin.Context, db *gorm.DB, policy *models.ProtocolPolicy, action string) {
-	db.Model(&models.Node{}).Where("id > ?", 0).Update("desired_revision", time.Now().UnixNano())
+	revision := time.Now().UnixNano()
+	db.Model(&models.Node{}).Where("id > ?", 0).
+		Update("desired_revision", desiredRevisionExpr(revision))
 	s.audit(c, actor(c), "protocol_policy."+action, "protocol_policy", fmt.Sprint(policy.ID), "{}")
 }
 
 func (s *Server) afterSpeedLimitChange(c *gin.Context, db *gorm.DB, limit *models.SpeedLimit, action string) {
-	db.Model(&models.Node{}).Where("id > ?", 0).Update("desired_revision", time.Now().UnixNano())
+	revision := time.Now().UnixNano()
+	db.Model(&models.Node{}).Where("id > ?", 0).
+		Update("desired_revision", desiredRevisionExpr(revision))
 	s.audit(c, actor(c), "speed_limit."+action, "speed_limit", fmt.Sprint(limit.ID), "{}")
 }
 
@@ -1672,6 +1885,7 @@ func (s *Server) updateForwardRule(c *gin.Context) {
 		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "forbidden"})
 		return
 	}
+	previousTunnelID := existing.TunnelID
 	var req forwardRulePayload
 	if err := c.ShouldBindJSON(&req); err != nil {
 		bad(c, err)
@@ -1703,6 +1917,9 @@ func (s *Server) updateForwardRule(c *gin.Context) {
 		return
 	}
 	s.bumpTunnelRevision(existing.TunnelID, existing.Revision)
+	if previousTunnelID != existing.TunnelID {
+		s.bumpTunnelRevision(previousTunnelID, existing.Revision)
+	}
 	s.audit(c, actor(c), "forward_rule.update", "forward_rule", fmt.Sprint(existing.ID), "{}")
 	c.JSON(http.StatusOK, existing)
 }
@@ -1749,6 +1966,15 @@ func (s *Server) deleteForwardRule(c *gin.Context) {
 	}
 	if ctxRole(c) != "admin" && rule.UserID != ctxUserID(c) {
 		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "forbidden"})
+		return
+	}
+	var limits int64
+	if err := s.db.Model(&models.SpeedLimit{}).Where("rule_id = ?", rule.ID).Count(&limits).Error; err != nil {
+		fail(c, err)
+		return
+	}
+	if limits > 0 {
+		bad(c, errors.New("forwarding rule is still referenced by speed limits"))
 		return
 	}
 	if err := s.db.Delete(&rule).Error; err != nil {
@@ -1964,19 +2190,48 @@ func encryptedTunnelProtocol(protocol string) bool {
 }
 
 func (s *Server) bumpTunnelRevision(tunnelID uint, revision int64) {
-	s.bumpTunnelRevisionWithDB(s.db, tunnelID, revision)
+	_ = s.bumpTunnelRevisionWithDB(s.db, tunnelID, revision)
 }
 
-func (s *Server) bumpTunnelRevisionWithDB(db *gorm.DB, tunnelID uint, revision int64) {
+func (s *Server) bumpUserRevisionWithDB(db *gorm.DB, userID uint, revision int64) error {
+	var tunnelIDs []uint
+	if err := db.Model(&models.ForwardRule{}).
+		Where("user_id = ?", userID).
+		Distinct("tunnel_id").
+		Pluck("tunnel_id", &tunnelIDs).Error; err != nil {
+		return err
+	}
+	for _, tunnelID := range tunnelIDs {
+		if err := s.bumpTunnelRevisionWithDB(db, tunnelID, revision); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func (s *Server) bumpTunnelRevisionWithDB(db *gorm.DB, tunnelID uint, revision int64) error {
 	var tunnel models.Tunnel
 	if err := db.First(&tunnel, tunnelID).Error; err != nil {
-		return
+		return err
 	}
 	ids := []uint{tunnel.EntryGroupID}
 	if tunnel.ExitGroupID != nil {
 		ids = append(ids, *tunnel.ExitGroupID)
 	}
-	db.Model(&models.Node{}).Where("device_group_id IN ?", ids).Update("desired_revision", revision)
+	return bumpNodesByGroupWithDB(db, ids, revision)
+}
+
+func bumpNodesByGroupWithDB(db *gorm.DB, groupIDs []uint, revision int64) error {
+	if len(groupIDs) == 0 {
+		return nil
+	}
+	return db.Model(&models.Node{}).
+		Where("device_group_id IN ?", groupIDs).
+		Update("desired_revision", desiredRevisionExpr(revision)).Error
+}
+
+func desiredRevisionExpr(revision int64) clause.Expr {
+	return gorm.Expr("CASE WHEN desired_revision < ? THEN ? ELSE desired_revision END", revision, revision)
 }
 
 func (s *Server) createInstallToken(c *gin.Context) {
@@ -2052,12 +2307,13 @@ func (s *Server) deleteInstallToken(c *gin.Context) {
 
 func (s *Server) agentRegister(c *gin.Context) {
 	var req struct {
-		InstallToken string `json:"installToken" binding:"required"`
-		Name         string `json:"name"`
-		UUID         string `json:"uuid"`
-		Version      string `json:"version"`
-		PublicIP     string `json:"publicIp"`
-		ConnectHost  string `json:"connectHost"`
+		InstallToken string   `json:"installToken" binding:"required"`
+		Name         string   `json:"name"`
+		UUID         string   `json:"uuid"`
+		Version      string   `json:"version"`
+		PublicIP     string   `json:"publicIp"`
+		ConnectHost  string   `json:"connectHost"`
+		Capabilities []string `json:"capabilities"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		bad(c, err)
@@ -2094,6 +2350,7 @@ func (s *Server) agentRegister(c *gin.Context) {
 			TokenHash:     auth.TokenHash(nodeToken),
 			Status:        "online",
 			Version:       req.Version,
+			Capabilities:  normalizeCapabilities(req.Capabilities),
 			PublicIP:      req.PublicIP,
 			ConnectHost:   req.ConnectHost,
 			LastSeenAt:    &now,
@@ -2108,6 +2365,9 @@ func (s *Server) agentRegister(c *gin.Context) {
 		fail(c, err)
 		return
 	}
+	s.agentEvent(node.ID, "agent.register", "info", "online", "agent registered", map[string]any{
+		"version": node.Version, "capabilities": node.Capabilities,
+	})
 	s.audit(c, nil, "agent.register", "node", fmt.Sprint(node.ID), "{}")
 	c.JSON(http.StatusCreated, gin.H{"nodeId": node.ID, "nodeToken": nodeToken, "uuid": node.UUID})
 }
@@ -2120,6 +2380,7 @@ func (s *Server) agentHeartbeat(c *gin.Context) {
 		ConnectHost     string         `json:"connectHost"`
 		AppliedRevision int64          `json:"appliedRevision"`
 		System          map[string]any `json:"system"`
+		Capabilities    []string       `json:"capabilities"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		bad(c, err)
@@ -2131,9 +2392,14 @@ func (s *Server) agentHeartbeat(c *gin.Context) {
 		node.Status = "online"
 	}
 	node.Version = req.Version
+	if req.Capabilities != nil {
+		node.Capabilities = normalizeCapabilities(req.Capabilities)
+	}
 	node.PublicIP = req.PublicIP
 	node.ConnectHost = req.ConnectHost
-	node.AppliedRevision = req.AppliedRevision
+	if req.AppliedRevision > node.AppliedRevision {
+		node.AppliedRevision = req.AppliedRevision
+	}
 	node.SystemJSON = string(systemJSON)
 	node.LastSeenAt = &now
 	if err := s.db.Save(&node).Error; err != nil {
@@ -2185,8 +2451,13 @@ func agentSupportsFinalUninstallAck(version string) bool {
 	return values[0] > 0 || values[1] > 1 || (values[1] == 1 && values[2] >= 5)
 }
 
+func nodeSupportsFinalUninstallAck(node models.Node) bool {
+	return nodeHasCapability(node, "final_uninstall_ack") || agentSupportsFinalUninstallAck(node.Version)
+}
+
 func (s *Server) agentConfig(c *gin.Context) {
 	node := ctxNode(c)
+	now := time.Now().UTC()
 	var group models.DeviceGroup
 	if err := s.db.First(&group, node.DeviceGroupID).Error; err != nil {
 		fail(c, err)
@@ -2198,22 +2469,103 @@ func (s *Server) agentConfig(c *gin.Context) {
 		return
 	}
 	tunnelIDs := make([]uint, 0, len(tunnels))
+	entryTunnelIDs := make([]uint, 0, len(tunnels))
 	for _, tunnel := range tunnels {
 		tunnelIDs = append(tunnelIDs, tunnel.ID)
+		if tunnel.EntryGroupID == node.DeviceGroupID {
+			entryTunnelIDs = append(entryTunnelIDs, tunnel.ID)
+		}
 	}
-	var rules []models.ForwardRule
-	if len(tunnelIDs) > 0 {
-		s.db.Where("tunnel_id IN ? AND status NOT IN ?", tunnelIDs, []string{"paused", "disabled", "deleted", "quota_exhausted"}).Order("listen_port asc").Find(&rules)
+	var candidateRules []models.ForwardRule
+	if len(entryTunnelIDs) > 0 {
+		if err := s.db.Where("tunnel_id IN ? AND status NOT IN ?", entryTunnelIDs, []string{"paused", "disabled", "deleted", "quota_exhausted"}).Order("listen_port asc").Find(&candidateRules).Error; err != nil {
+			fail(c, err)
+			return
+		}
+	}
+	rules, userStateRevision, err := s.activeAgentRules(candidateRules, now)
+	if err != nil {
+		fail(c, err)
+		return
+	}
+	policyIDs := map[uint]struct{}{}
+	if group.ProtocolPolicyID != nil {
+		policyIDs[*group.ProtocolPolicyID] = struct{}{}
+	}
+	userIDs := map[uint]struct{}{}
+	ruleIDs := make([]uint, 0, len(rules))
+	for _, tunnel := range tunnels {
+		if tunnel.ProtocolPolicyID != nil {
+			policyIDs[*tunnel.ProtocolPolicyID] = struct{}{}
+		}
+	}
+	for _, rule := range rules {
+		ruleIDs = append(ruleIDs, rule.ID)
+		userIDs[rule.UserID] = struct{}{}
+		if rule.ProtocolPolicyID != nil {
+			policyIDs[*rule.ProtocolPolicyID] = struct{}{}
+		}
 	}
 	var policies []models.ProtocolPolicy
-	s.db.Order("id asc").Find(&policies)
+	if ids := uintSetValues(policyIDs); len(ids) > 0 {
+		if err := s.db.Where("id IN ?", ids).Order("id asc").Find(&policies).Error; err != nil {
+			fail(c, err)
+			return
+		}
+	}
 	var limits []models.SpeedLimit
-	s.db.Order("id asc").Find(&limits)
+	var limitQuery *gorm.DB
+	if len(ruleIDs) > 0 {
+		limitQuery = s.db.Where("rule_id IN ?", ruleIDs)
+	}
+	if len(tunnelIDs) > 0 {
+		if limitQuery == nil {
+			limitQuery = s.db.Where("tunnel_id IN ?", tunnelIDs)
+		} else {
+			limitQuery = limitQuery.Or("tunnel_id IN ?", tunnelIDs)
+		}
+	}
+	if ids := uintSetValues(userIDs); len(ids) > 0 {
+		if limitQuery == nil {
+			limitQuery = s.db.Where("user_id IN ?", ids)
+		} else {
+			limitQuery = limitQuery.Or("user_id IN ?", ids)
+		}
+	}
+	if limitQuery != nil {
+		if err := limitQuery.Order("id asc").Find(&limits).Error; err != nil {
+			fail(c, err)
+			return
+		}
+	}
+	var lineProbes []models.LineProbe
+	if err := s.db.Where("node_id = ? AND enabled = ?", node.ID, true).Order("id asc").Find(&lineProbes).Error; err != nil {
+		fail(c, err)
+		return
+	}
 
 	revision := node.DesiredRevision
+	revision = maxRevisionTime(revision, group.UpdatedAt)
+	if userStateRevision > revision {
+		revision = userStateRevision
+	}
+	for _, tunnel := range tunnels {
+		revision = maxRevisionTime(revision, tunnel.UpdatedAt)
+	}
 	for _, rule := range rules {
 		if rule.Revision > revision {
 			revision = rule.Revision
+		}
+	}
+	for _, policy := range policies {
+		revision = maxRevisionTime(revision, policy.UpdatedAt)
+	}
+	for _, limit := range limits {
+		revision = maxRevisionTime(revision, limit.UpdatedAt)
+	}
+	for _, probe := range lineProbes {
+		if probe.Revision > revision {
+			revision = probe.Revision
 		}
 	}
 
@@ -2224,10 +2576,123 @@ func (s *Server) agentConfig(c *gin.Context) {
 		"forwardRules":     rules,
 		"protocolPolicies": policies,
 		"speedLimits":      limits,
+		"lineProbes":       lineProbes,
 		"revision":         revision,
-		"generatedAt":      time.Now().UTC(),
-		"validUntil":       time.Now().UTC().Add(agentConfigLease),
+		"nonce":            configNonce(node, revision),
+		"generatedAt":      now,
+		"validUntil":       now.Add(agentConfigLease),
 	})
+}
+
+func maxRevisionTime(revision int64, updatedAt time.Time) int64 {
+	if value := updatedAt.UnixNano(); !updatedAt.IsZero() && value > revision {
+		return value
+	}
+	return revision
+}
+
+func (s *Server) activeAgentRules(candidates []models.ForwardRule, now time.Time) ([]models.ForwardRule, int64, error) {
+	userIDs := map[uint]struct{}{}
+	for _, rule := range candidates {
+		userIDs[rule.UserID] = struct{}{}
+	}
+	if len(userIDs) == 0 {
+		return nil, 0, nil
+	}
+	var users []models.User
+	if err := s.db.Where("id IN ?", uintSetValues(userIDs)).Find(&users).Error; err != nil {
+		return nil, 0, err
+	}
+	byID := make(map[uint]models.User, len(users))
+	var stateRevision int64
+	for _, user := range users {
+		byID[user.ID] = user
+		if user.ExpiresAt != nil && !user.ExpiresAt.After(now) {
+			revision := user.ExpiresAt.UnixNano() + 1
+			if revision > stateRevision {
+				stateRevision = revision
+			}
+		}
+	}
+	active := make([]models.ForwardRule, 0, len(candidates))
+	for _, rule := range candidates {
+		user, ok := byID[rule.UserID]
+		if !ok || user.Status != "active" || (user.ExpiresAt != nil && !user.ExpiresAt.After(now)) {
+			continue
+		}
+		if user.FlowLimitBytes > 0 && user.UsedBytes >= user.FlowLimitBytes {
+			continue
+		}
+		active = append(active, rule)
+	}
+	return active, stateRevision, nil
+}
+
+func (s *Server) agentConfigAck(c *gin.Context) {
+	node := ctxNode(c)
+	var req struct {
+		Revision int64          `json:"revision"`
+		Nonce    string         `json:"nonce"`
+		Status   string         `json:"status"`
+		Message  string         `json:"message"`
+		Runtime  map[string]any `json:"runtime"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		bad(c, err)
+		return
+	}
+	req.Nonce = strings.TrimSpace(req.Nonce)
+	req.Status = strings.ToLower(strings.TrimSpace(req.Status))
+	if req.Revision < 0 || req.Nonce == "" {
+		bad(c, errors.New("revision and nonce are required"))
+		return
+	}
+	if !contains([]string{"applied", "rejected", "rolled_back", "lease_expired"}, req.Status) {
+		bad(c, errors.New("status must be applied, rejected, rolled_back, or lease_expired"))
+		return
+	}
+	if req.Nonce != configNonce(node, req.Revision) {
+		bad(c, errors.New("config nonce does not match revision"))
+		return
+	}
+	now := time.Now().UTC()
+	detail, _ := json.Marshal(map[string]any{
+		"revision": req.Revision,
+		"nonce":    req.Nonce,
+		"runtime":  req.Runtime,
+	})
+	severity := "info"
+	if req.Status != "applied" {
+		severity = "warning"
+	}
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		updates := map[string]any{
+			"config_ack_revision": req.Revision,
+			"config_nonce":        req.Nonce,
+			"config_status":       req.Status,
+			"config_message":      req.Message,
+			"config_ack_at":       &now,
+		}
+		if req.Status == "applied" {
+			updates["applied_revision"] = req.Revision
+			updates["last_good_revision"] = req.Revision
+		}
+		result := tx.Model(&models.Node{}).
+			Where("id = ? AND config_ack_revision <= ?", node.ID, req.Revision).
+			Updates(updates)
+		if result.Error != nil {
+			return result.Error
+		}
+		return tx.Create(&models.AgentEvent{
+			NodeID: node.ID, Type: "config." + req.Status, Severity: severity, Status: req.Status,
+			Message: req.Message, DetailJSON: string(detail), OccurredAt: now,
+		}).Error
+	})
+	if err != nil {
+		fail(c, err)
+		return
+	}
+	c.Status(http.StatusNoContent)
 }
 
 func (s *Server) agentTraffic(c *gin.Context) {
@@ -2357,7 +2822,9 @@ func (s *Server) exhaustUserQuota(tx *gorm.DB, userID uint, revision int64) erro
 		return err
 	}
 	for _, tunnelID := range tunnelIDs {
-		s.bumpTunnelRevisionWithDB(tx, tunnelID, revision)
+		if err := s.bumpTunnelRevisionWithDB(tx, tunnelID, revision); err != nil {
+			return err
+		}
 	}
 	return nil
 }
@@ -2464,7 +2931,7 @@ func (s *Server) agentCommandAck(c *gin.Context) {
 	}
 	metadata, _ := json.Marshal(map[string]any{"commandId": commandID, "status": req.Status, "message": req.Message})
 	if req.Status == "accepted" {
-		node.UninstallLegacy = !agentSupportsFinalUninstallAck(node.Version)
+		node.UninstallLegacy = !nodeSupportsFinalUninstallAck(node)
 		if node.UninstallLegacy {
 			node.Status = "uninstall_legacy"
 		} else {
@@ -2517,6 +2984,17 @@ func (s *Server) listAuditLogs(c *gin.Context) {
 	respondPage[models.AuditLog](c, query, "id desc")
 }
 
+func (s *Server) listNodeEvents(c *gin.Context) {
+	query := s.db.Model(&models.AgentEvent{})
+	query = applySearch(query, c, "type", "severity", "status", "message", "detail_json")
+	query = filterUint(query, c, "node_id", "nodeId")
+	query = filterString(query, c, "type", "type")
+	query = filterString(query, c, "severity", "severity")
+	query = filterString(query, c, "status", "status")
+	query = filterDateRange(query, c, "occurred_at")
+	respondPage[models.AgentEvent](c, query, "occurred_at desc")
+}
+
 func (s *Server) listProtocolViolations(c *gin.Context) {
 	query := s.db.Model(&models.ProtocolViolation{})
 	query = applySearch(query, c, "protocol", "source_ip", "action", "detail")
@@ -2549,6 +3027,19 @@ func (s *Server) audit(c *gin.Context, actorID *uint, action, resourceType, reso
 		ResourceType: resourceType,
 		ResourceID:   resourceID,
 		MetadataJSON: metadata,
+	}).Error
+}
+
+func (s *Server) agentEvent(nodeID uint, eventType, severity, status, message string, detail any) {
+	detailJSON := "{}"
+	if detail != nil {
+		if content, err := json.Marshal(detail); err == nil {
+			detailJSON = string(content)
+		}
+	}
+	_ = s.db.Create(&models.AgentEvent{
+		NodeID: nodeID, Type: eventType, Severity: severity, Status: status,
+		Message: message, DetailJSON: detailJSON, OccurredAt: time.Now().UTC(),
 	}).Error
 }
 
@@ -2615,6 +3106,48 @@ func contains(values []string, needle string) bool {
 		}
 	}
 	return false
+}
+
+func normalizeCapabilities(values []string) []string {
+	result := make([]string, 0, len(values))
+	seen := map[string]struct{}{}
+	for _, value := range values {
+		value = strings.ToLower(strings.TrimSpace(value))
+		if value == "" || len(value) > 80 {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+		if len(result) == 64 {
+			break
+		}
+	}
+	return result
+}
+
+func nodeHasCapability(node models.Node, capability string) bool {
+	for _, value := range node.Capabilities {
+		if value == capability {
+			return true
+		}
+	}
+	return false
+}
+
+func uintSetValues(values map[uint]struct{}) []uint {
+	result := make([]uint, 0, len(values))
+	for value := range values {
+		result = append(result, value)
+	}
+	return result
+}
+
+func configNonce(node models.Node, revision int64) string {
+	sum := sha256.Sum256([]byte(fmt.Sprintf("%s:%d", node.TokenHash, revision)))
+	return fmt.Sprintf("%x", sum[:16])
 }
 
 func limit(c *gin.Context, fallback int) int {

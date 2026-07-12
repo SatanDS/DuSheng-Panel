@@ -42,12 +42,13 @@ type Credentials struct {
 }
 
 type RegisterRequest struct {
-	InstallToken string `json:"installToken"`
-	Name         string `json:"name,omitempty"`
-	UUID         string `json:"uuid,omitempty"`
-	Version      string `json:"version,omitempty"`
-	PublicIP     string `json:"publicIp,omitempty"`
-	ConnectHost  string `json:"connectHost,omitempty"`
+	InstallToken string   `json:"installToken"`
+	Name         string   `json:"name,omitempty"`
+	UUID         string   `json:"uuid,omitempty"`
+	Version      string   `json:"version,omitempty"`
+	PublicIP     string   `json:"publicIp,omitempty"`
+	ConnectHost  string   `json:"connectHost,omitempty"`
+	Capabilities []string `json:"capabilities,omitempty"`
 }
 
 type HeartbeatRequest struct {
@@ -56,6 +57,7 @@ type HeartbeatRequest struct {
 	ConnectHost     string         `json:"connectHost,omitempty"`
 	AppliedRevision int64          `json:"appliedRevision"`
 	System          map[string]any `json:"system"`
+	Capabilities    []string       `json:"capabilities,omitempty"`
 }
 
 type HeartbeatResponse struct {
@@ -83,22 +85,55 @@ type AgentConfig struct {
 	ForwardRules     []ForwardRule    `json:"forwardRules"`
 	ProtocolPolicies []ProtocolPolicy `json:"protocolPolicies"`
 	SpeedLimits      []SpeedLimit     `json:"speedLimits"`
+	LineProbes       []LineProbe      `json:"lineProbes"`
 	Revision         int64            `json:"revision"`
+	Nonce            string           `json:"nonce"`
 	GeneratedAt      time.Time        `json:"generatedAt"`
 	ValidUntil       time.Time        `json:"validUntil"`
 }
 
 type Node struct {
+	ID              uint     `json:"id"`
+	DeviceGroupID   uint     `json:"deviceGroupId"`
+	Name            string   `json:"name"`
+	UUID            string   `json:"uuid"`
+	Status          string   `json:"status"`
+	Version         string   `json:"version"`
+	PublicIP        string   `json:"publicIp"`
+	ConnectHost     string   `json:"connectHost"`
+	AppliedRevision int64    `json:"appliedRevision"`
+	DesiredRevision int64    `json:"desiredRevision"`
+	Capabilities    []string `json:"capabilities"`
+}
+
+type LineProbe struct {
 	ID              uint   `json:"id"`
-	DeviceGroupID   uint   `json:"deviceGroupId"`
+	CircuitID       uint   `json:"circuitId"`
+	NodeID          uint   `json:"nodeId"`
 	Name            string `json:"name"`
-	UUID            string `json:"uuid"`
-	Status          string `json:"status"`
-	Version         string `json:"version"`
-	PublicIP        string `json:"publicIp"`
-	ConnectHost     string `json:"connectHost"`
-	AppliedRevision int64  `json:"appliedRevision"`
-	DesiredRevision int64  `json:"desiredRevision"`
+	Type            string `json:"type"`
+	Target          string `json:"target"`
+	Payload         string `json:"payload"`
+	IntervalSeconds int    `json:"intervalSeconds"`
+	TimeoutMs       int    `json:"timeoutMs"`
+	Enabled         bool   `json:"enabled"`
+	Revision        int64  `json:"revision"`
+}
+
+type ProbeReport struct {
+	ProbeID   uint    `json:"probeId"`
+	Revision  int64   `json:"revision"`
+	Success   bool    `json:"success"`
+	LatencyMs float64 `json:"latencyMs"`
+	Error     string  `json:"error,omitempty"`
+}
+
+type ConfigAck struct {
+	Revision int64          `json:"revision"`
+	Nonce    string         `json:"nonce"`
+	Status   string         `json:"status"`
+	Message  string         `json:"message,omitempty"`
+	Runtime  map[string]any `json:"runtime,omitempty"`
 }
 
 type DeviceGroup struct {
@@ -125,6 +160,7 @@ type Tunnel struct {
 	EntryTrafficRatio float64 `json:"entryTrafficRatio"`
 	ExitTrafficRatio  float64 `json:"exitTrafficRatio"`
 	ProtocolPolicyID  *uint   `json:"protocolPolicyId"`
+	LineCircuitID     *uint   `json:"lineCircuitId"`
 	AdvancedJSON      string  `json:"advancedJson"`
 }
 
@@ -298,6 +334,14 @@ func (c *Client) ReportViolation(ctx context.Context, req ViolationReport) (Prot
 
 func (c *Client) AckCommand(ctx context.Context, id string, req CommandAck) error {
 	return c.doJSON(ctx, http.MethodPost, "/agent/commands/"+id+"/ack", req, nil, true)
+}
+
+func (c *Client) AckConfig(ctx context.Context, req ConfigAck) error {
+	return c.doJSON(ctx, http.MethodPost, "/agent/config/ack", req, nil, true)
+}
+
+func (c *Client) ReportProbe(ctx context.Context, req ProbeReport) error {
+	return c.doJSON(ctx, http.MethodPost, "/agent/probes", req, nil, true)
 }
 
 func (c *Client) doJSON(ctx context.Context, method, path string, input, output any, authenticated bool) error {

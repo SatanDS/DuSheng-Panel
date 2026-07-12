@@ -35,7 +35,15 @@ const (
 	defaultUDPInspectionPackets  = 12
 	defaultDPIInspectionPackets  = 12
 	defaultDPICloseQueueSize     = 1024
+	defaultDrainTimeout          = 30 * time.Second
 	maxUDPPacketBytes            = 64 * 1024
+)
+
+const (
+	listenerWarming int32 = iota
+	listenerActive
+	listenerDraining
+	listenerStopped
 )
 
 var errDPIBlocked = errors.New("connection blocked by DPI policy")
@@ -57,6 +65,7 @@ type Options struct {
 	MaxUDPSessionsPerRule int
 	DPIAddress            string
 	DPITimeout            time.Duration
+	DrainTimeout          time.Duration
 }
 
 type Runtime struct {
@@ -66,14 +75,19 @@ type Runtime struct {
 	traffic  *trafficBuffer
 	dpi      *dpi.Client
 
-	mu           sync.Mutex
-	listeners    map[listenerKey]managedListener
-	trackers     map[uint]*limitTracker
-	running      bool
-	lastApplyErr string
-	closed       bool
-	stopFlush    chan struct{}
-	dpiClose     chan string
+	mu                sync.Mutex
+	listeners         map[listenerKey]managedListener
+	draining          map[uint64]managedListener
+	trackers          map[uint]*limitTracker
+	running           bool
+	lastApplyErr      string
+	lastApplyStatus   string
+	lastApplyRevision int64
+	lastApplyAt       time.Time
+	lastApplyDuration time.Duration
+	closed            bool
+	stopFlush         chan struct{}
+	dpiClose          chan string
 
 	acceptErrors        int64
 	dialErrors          int64
@@ -85,6 +99,8 @@ type Runtime struct {
 	dpiErrors           int64
 	dpiCloseDropped     int64
 	nextDPIFlowID       uint64
+	nextDrainID         uint64
+	nextGeneration      uint64
 }
 
 type listenerKey struct {
@@ -93,10 +109,13 @@ type listenerKey struct {
 }
 
 type managedListener interface {
+	activate()
+	drain(time.Duration) <-chan struct{}
 	stop()
 	active() int64
+	drainingActive() int64
 	network() string
-	fingerprint() string
+	state() string
 	bind() string
 	update(ruleRuntimeConfig)
 }
@@ -132,6 +151,9 @@ func New(reporter Reporter, logger *log.Logger, options Options) *Runtime {
 	if options.DPITimeout <= 0 {
 		options.DPITimeout = defaultDPITimeout
 	}
+	if options.DrainTimeout <= 0 {
+		options.DrainTimeout = defaultDrainTimeout
+	}
 	rt := &Runtime{
 		reporter:  reporter,
 		logger:    logger,
@@ -139,6 +161,7 @@ func New(reporter Reporter, logger *log.Logger, options Options) *Runtime {
 		traffic:   newTrafficBuffer(reporter, logger, options),
 		dpi:       dpi.New(options.DPIAddress, options.DPITimeout),
 		listeners: map[listenerKey]managedListener{},
+		draining:  map[uint64]managedListener{},
 		trackers:  map[uint]*limitTracker{},
 		stopFlush: make(chan struct{}),
 		dpiClose:  make(chan string, defaultDPICloseQueueSize),
@@ -151,9 +174,10 @@ func New(reporter Reporter, logger *log.Logger, options Options) *Runtime {
 }
 
 func (r *Runtime) Apply(ctx context.Context, cfg client.AgentConfig) error {
+	startedAt := time.Now()
 	desired, err := r.desiredListeners(cfg)
 	if err != nil {
-		r.setApplyError(err)
+		r.setApplyResult(cfg.Revision, "rejected", startedAt, err)
 		return err
 	}
 
@@ -162,12 +186,20 @@ func (r *Runtime) Apply(ctx context.Context, cfg client.AgentConfig) error {
 		r.mu.Unlock()
 		return errors.New("runtime is stopped")
 	}
-	r.running = true
 	current := r.listeners
 	next := make(map[listenerKey]managedListener, len(desired))
 	nextTrackers := make(map[uint]*limitTracker)
-	var toStop []managedListener
-	var startErr error
+	reused := make(map[managedListener]struct{}, len(current))
+	currentByBind := make(map[string]managedListener, len(current))
+	for _, listener := range current {
+		currentByBind[listener.bind()] = listener
+	}
+	type listenerUpdate struct {
+		listener managedListener
+		config   ruleRuntimeConfig
+	}
+	var updates []listenerUpdate
+	var started []managedListener
 
 	for key, desiredCfg := range desired {
 		tracker := nextTrackers[desiredCfg.rule.ID]
@@ -181,36 +213,79 @@ func (r *Runtime) Apply(ctx context.Context, cfg client.AgentConfig) error {
 		}
 		desiredCfg.tracker = tracker
 
-		if existing := current[key]; existing != nil && existing.bind() == listenerBind(desiredCfg) {
-			existing.update(desiredCfg)
-			next[key] = existing
-			continue
+		existing := current[key]
+		if existing == nil || existing.bind() != listenerBind(desiredCfg) {
+			existing = currentByBind[listenerBind(desiredCfg)]
 		}
-		if existing := current[key]; existing != nil {
-			toStop = append(toStop, existing)
+		if existing != nil {
+			if _, alreadyUsed := reused[existing]; alreadyUsed {
+				r.mu.Unlock()
+				err := fmt.Errorf("multiple rules request listener %s", listenerBind(desiredCfg))
+				for _, listener := range started {
+					listener.stop()
+				}
+				r.setApplyResult(cfg.Revision, "rejected", startedAt, err)
+				return err
+			}
+			updates = append(updates, listenerUpdate{listener: existing, config: desiredCfg})
+			next[key] = existing
+			reused[existing] = struct{}{}
+			continue
 		}
 		listener, err := r.startListener(ctx, desiredCfg)
 		if err != nil {
-			startErr = errors.Join(startErr, err)
-			continue
+			r.mu.Unlock()
+			for _, staged := range started {
+				staged.stop()
+			}
+			r.setApplyResult(cfg.Revision, "rejected", startedAt, err)
+			return err
 		}
+		started = append(started, listener)
 		next[key] = listener
 	}
-	for key, existing := range current {
-		if _, ok := desired[key]; !ok {
-			toStop = append(toStop, existing)
+	var toDrain []managedListener
+	for _, existing := range current {
+		if _, ok := reused[existing]; !ok {
+			toDrain = append(toDrain, existing)
 		}
+	}
+	for _, update := range updates {
+		update.listener.update(update.config)
+	}
+	for _, listener := range started {
+		listener.activate()
 	}
 	r.listeners = next
 	r.trackers = nextTrackers
-	r.lastApplyErr = errorString(startErr)
+	r.running = true
+	r.lastApplyErr = ""
+	r.lastApplyStatus = "applied"
+	r.lastApplyRevision = cfg.Revision
+	r.lastApplyAt = time.Now().UTC()
+	r.lastApplyDuration = time.Since(startedAt)
+	draining := make(map[uint64]managedListener, len(toDrain))
+	for _, listener := range toDrain {
+		r.nextDrainID++
+		draining[r.nextDrainID] = listener
+		r.draining[r.nextDrainID] = listener
+	}
 	r.mu.Unlock()
 
-	for _, listener := range toStop {
-		listener.stop()
+	drainTimeout := r.options.DrainTimeout
+	if !cfg.ValidUntil.IsZero() && !cfg.ValidUntil.After(time.Now()) {
+		drainTimeout = 0
 	}
-	if startErr != nil {
-		return startErr
+	for id, listener := range draining {
+		done := listener.drain(drainTimeout)
+		go func(id uint64, listener managedListener) {
+			<-done
+			r.mu.Lock()
+			if r.draining[id] == listener {
+				delete(r.draining, id)
+			}
+			r.mu.Unlock()
+		}(id, listener)
 	}
 	return nil
 }
@@ -224,9 +299,12 @@ func (r *Runtime) Running() bool {
 func (r *Runtime) Status() map[string]any {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	var activeTCP, activeUDP int64
-	var tcpListeners, udpListeners int
+	var activeTCP, activeUDP, drainingConnections int64
+	var tcpListeners, udpListeners, warmingListeners, drainingListeners int
 	for _, listener := range r.listeners {
+		if listener.state() == "warming" {
+			warmingListeners++
+		}
 		switch listener.network() {
 		case "udp":
 			udpListeners++
@@ -235,16 +313,28 @@ func (r *Runtime) Status() map[string]any {
 			tcpListeners++
 			activeTCP += listener.active()
 		}
+		drainingConnections += listener.drainingActive()
+	}
+	for _, listener := range r.draining {
+		drainingListeners++
+		drainingConnections += listener.active()
 	}
 	return map[string]any{
-		"running":           r.running && !r.closed,
-		"listeners":         len(r.listeners),
-		"tcpListeners":      tcpListeners,
-		"udpListeners":      udpListeners,
-		"activeConnections": activeTCP + activeUDP,
-		"activeUDPSessions": activeUDP,
-		"lastApplyError":    r.lastApplyErr,
-		"trafficBuffer":     r.traffic.status(),
+		"running":             r.running && !r.closed,
+		"listeners":           len(r.listeners),
+		"tcpListeners":        tcpListeners,
+		"udpListeners":        udpListeners,
+		"activeConnections":   activeTCP + activeUDP,
+		"activeUDPSessions":   activeUDP,
+		"warmingListeners":    warmingListeners,
+		"drainingListeners":   drainingListeners,
+		"drainingConnections": drainingConnections,
+		"lastApplyError":      r.lastApplyErr,
+		"lastApplyStatus":     r.lastApplyStatus,
+		"lastApplyRevision":   r.lastApplyRevision,
+		"lastApplyAt":         r.lastApplyAt,
+		"lastApplyDurationMs": r.lastApplyDuration.Milliseconds(),
+		"trafficBuffer":       r.traffic.status(),
 		"listenerErrors": map[string]int64{
 			"accept":              atomic.LoadInt64(&r.acceptErrors),
 			"dial":                atomic.LoadInt64(&r.dialErrors),
@@ -274,7 +364,11 @@ func (r *Runtime) Stop(ctx context.Context) error {
 	for _, listener := range r.listeners {
 		listeners = append(listeners, listener)
 	}
+	for _, listener := range r.draining {
+		listeners = append(listeners, listener)
+	}
 	r.listeners = map[listenerKey]managedListener{}
+	r.draining = map[uint64]managedListener{}
 	r.trackers = map[uint]*limitTracker{}
 	r.mu.Unlock()
 
@@ -359,27 +453,34 @@ func (r *Runtime) startListener(ctx context.Context, cfg ruleRuntimeConfig) (man
 	if cfg.network == "udp" {
 		return r.startUDPListener(ctx, cfg)
 	}
+	cfg.generation = r.newGeneration()
 	ln, err := (&net.ListenConfig{}).Listen(ctx, "tcp", cfg.listenAddr)
 	if err != nil {
 		return nil, fmt.Errorf("listen rule %d on %s: %w", cfg.rule.ID, cfg.listenAddr, err)
 	}
 	listener := &ruleListener{
-		runtime: r,
-		cfg:     cfg,
-		ln:      ln,
-		stopCh:  make(chan struct{}),
-		conns:   map[net.Conn]struct{}{},
+		runtime:   r,
+		cfg:       cfg,
+		ln:        ln,
+		stopCh:    make(chan struct{}),
+		readyCh:   make(chan struct{}),
+		drainDone: make(chan struct{}),
+		conns:     map[net.Conn]uint64{},
 	}
 	listener.wg.Add(1)
 	go listener.acceptLoop()
-	r.logger.Printf("runtime tcp listener started rule=%d addr=%s target=%s:%d", cfg.rule.ID, cfg.listenAddr, cfg.rule.RemoteHost, cfg.rule.RemotePort)
+	r.logger.Printf("runtime tcp listener warming rule=%d addr=%s target=%s:%d", cfg.rule.ID, cfg.listenAddr, cfg.rule.RemoteHost, cfg.rule.RemotePort)
 	return listener, nil
 }
 
-func (r *Runtime) setApplyError(err error) {
+func (r *Runtime) setApplyResult(revision int64, status string, startedAt time.Time, err error) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
 	r.lastApplyErr = errorString(err)
+	r.lastApplyStatus = status
+	r.lastApplyRevision = revision
+	r.lastApplyAt = time.Now().UTC()
+	r.lastApplyDuration = time.Since(startedAt)
 }
 
 func (r *Runtime) flushLoop() {
@@ -433,6 +534,11 @@ type ruleRuntimeConfig struct {
 	network     string
 	listenAddr  string
 	fingerprint string
+	generation  uint64
+}
+
+func (r *Runtime) newGeneration() uint64 {
+	return atomic.AddUint64(&r.nextGeneration, 1)
 }
 
 type dpiFlow struct {
@@ -542,16 +648,23 @@ func addrIPPort(addr net.Addr) (string, int) {
 }
 
 type ruleListener struct {
-	runtime *Runtime
-	cfgMu   sync.RWMutex
-	cfg     ruleRuntimeConfig
-	ln      net.Listener
-	stopCh  chan struct{}
-	wg      sync.WaitGroup
+	runtime    *Runtime
+	cfgMu      sync.RWMutex
+	cfg        ruleRuntimeConfig
+	ln         net.Listener
+	stopCh     chan struct{}
+	readyCh    chan struct{}
+	drainDone  chan struct{}
+	wg         sync.WaitGroup
+	readyOnce  sync.Once
+	stopOnce   sync.Once
+	drainOnce  sync.Once
+	finishOnce sync.Once
+	stateValue int32
 
 	activeConns int64
 	mu          sync.Mutex
-	conns       map[net.Conn]struct{}
+	conns       map[net.Conn]uint64
 }
 
 func (l *ruleListener) config() ruleRuntimeConfig {
@@ -562,11 +675,41 @@ func (l *ruleListener) config() ruleRuntimeConfig {
 
 func (l *ruleListener) update(cfg ruleRuntimeConfig) {
 	old := l.config()
+	if old.fingerprint == cfg.fingerprint {
+		cfg.generation = old.generation
+	} else {
+		cfg.generation = l.runtime.newGeneration()
+	}
 	l.cfgMu.Lock()
 	l.cfg = cfg
 	l.cfgMu.Unlock()
 	if old.fingerprint != "" && old.fingerprint != cfg.fingerprint {
-		l.closeActiveConns()
+		go l.closeGenerationAfter(old.generation, l.runtime.options.DrainTimeout)
+	}
+}
+
+func (l *ruleListener) closeGenerationAfter(generation uint64, timeout time.Duration) {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-l.stopCh:
+		return
+	}
+	l.mu.Lock()
+	for conn, connectionGeneration := range l.conns {
+		if connectionGeneration == generation {
+			_ = conn.Close()
+		}
+	}
+	l.mu.Unlock()
+}
+
+func (l *ruleListener) activate() {
+	if atomic.CompareAndSwapInt32(&l.stateValue, listenerWarming, listenerActive) {
+		l.readyOnce.Do(func() { close(l.readyCh) })
+		cfg := l.config()
+		l.runtime.logger.Printf("runtime tcp listener active rule=%d addr=%s", cfg.rule.ID, cfg.listenAddr)
 	}
 }
 
@@ -585,6 +728,11 @@ func (l *ruleListener) closeActiveConns() {
 
 func (l *ruleListener) acceptLoop() {
 	defer l.wg.Done()
+	select {
+	case <-l.readyCh:
+	case <-l.stopCh:
+		return
+	}
 	for {
 		conn, err := l.ln.Accept()
 		if err != nil {
@@ -613,7 +761,7 @@ func (l *ruleListener) handle(conn net.Conn) {
 		_ = conn.Close()
 		return
 	}
-	l.trackConn(conn)
+	l.trackConn(conn, cfg.generation)
 	defer l.untrackConn(conn)
 	defer l.releaseConfig(cfg, sourceIP)
 	defer conn.Close()
@@ -759,9 +907,9 @@ func (l *ruleListener) releaseConfig(cfg ruleRuntimeConfig, sourceIP string) {
 	}
 }
 
-func (l *ruleListener) trackConn(conn net.Conn) {
+func (l *ruleListener) trackConn(conn net.Conn, generation uint64) {
 	l.mu.Lock()
-	l.conns[conn] = struct{}{}
+	l.conns[conn] = generation
 	l.mu.Unlock()
 }
 
@@ -775,27 +923,73 @@ func (l *ruleListener) active() int64 {
 	return atomic.LoadInt64(&l.activeConns)
 }
 
+func (l *ruleListener) drainingActive() int64 {
+	if atomic.LoadInt32(&l.stateValue) == listenerDraining {
+		return l.active()
+	}
+	current := l.config().generation
+	var count int64
+	l.mu.Lock()
+	for _, generation := range l.conns {
+		if generation != current {
+			count++
+		}
+	}
+	l.mu.Unlock()
+	return count
+}
+
 func (l *ruleListener) network() string {
 	return "tcp"
 }
 
-func (l *ruleListener) fingerprint() string {
-	cfg := l.config()
-	return cfg.fingerprint
+func (l *ruleListener) state() string {
+	return listenerStateName(atomic.LoadInt32(&l.stateValue))
+}
+
+func (l *ruleListener) drain(timeout time.Duration) <-chan struct{} {
+	l.drainOnce.Do(func() {
+		atomic.StoreInt32(&l.stateValue, listenerDraining)
+		l.signalStop()
+		go func() {
+			waitDone := make(chan struct{})
+			go func() {
+				l.wg.Wait()
+				close(waitDone)
+			}()
+			timer := time.NewTimer(timeout)
+			defer timer.Stop()
+			select {
+			case <-waitDone:
+			case <-timer.C:
+				l.closeActiveConns()
+				<-waitDone
+			}
+			l.finish()
+		}()
+	})
+	return l.drainDone
+}
+
+func (l *ruleListener) signalStop() {
+	l.stopOnce.Do(func() {
+		close(l.stopCh)
+		_ = l.ln.Close()
+	})
+}
+
+func (l *ruleListener) finish() {
+	atomic.StoreInt32(&l.stateValue, listenerStopped)
+	l.finishOnce.Do(func() { close(l.drainDone) })
 }
 
 func (l *ruleListener) stop() {
-	select {
-	case <-l.stopCh:
-		return
-	default:
-		close(l.stopCh)
-		_ = l.ln.Close()
-		l.closeActiveConns()
-		l.wg.Wait()
-		cfg := l.config()
-		l.runtime.logger.Printf("runtime listener stopped rule=%d addr=%s", cfg.rule.ID, cfg.listenAddr)
-	}
+	l.signalStop()
+	l.closeActiveConns()
+	l.wg.Wait()
+	l.finish()
+	cfg := l.config()
+	l.runtime.logger.Printf("runtime listener stopped rule=%d addr=%s", cfg.rule.ID, cfg.listenAddr)
 }
 
 func (l *ruleListener) reportViolation(ctx context.Context, cfg ruleRuntimeConfig, result protocol.Result, sourceIP string) {
@@ -832,31 +1026,41 @@ func (l *ruleListener) reportViolation(ctx context.Context, cfg ruleRuntimeConfi
 }
 
 func (r *Runtime) startUDPListener(ctx context.Context, cfg ruleRuntimeConfig) (managedListener, error) {
+	cfg.generation = r.newGeneration()
 	conn, err := (&net.ListenConfig{}).ListenPacket(ctx, "udp", cfg.listenAddr)
 	if err != nil {
 		return nil, fmt.Errorf("listen udp rule %d on %s: %w", cfg.rule.ID, cfg.listenAddr, err)
 	}
 	listener := &udpListener{
-		runtime:  r,
-		cfg:      cfg,
-		conn:     conn,
-		stopCh:   make(chan struct{}),
-		sessions: map[string]*udpSession{},
+		runtime:   r,
+		cfg:       cfg,
+		conn:      conn,
+		stopCh:    make(chan struct{}),
+		readyCh:   make(chan struct{}),
+		drainDone: make(chan struct{}),
+		sessions:  map[string]*udpSession{},
 	}
 	listener.wg.Add(2)
 	go listener.readLoop()
 	go listener.cleanupLoop()
-	r.logger.Printf("runtime udp listener started rule=%d addr=%s target=%s:%d", cfg.rule.ID, cfg.listenAddr, cfg.rule.RemoteHost, cfg.rule.RemotePort)
+	r.logger.Printf("runtime udp listener warming rule=%d addr=%s target=%s:%d", cfg.rule.ID, cfg.listenAddr, cfg.rule.RemoteHost, cfg.rule.RemotePort)
 	return listener, nil
 }
 
 type udpListener struct {
-	runtime *Runtime
-	cfgMu   sync.RWMutex
-	cfg     ruleRuntimeConfig
-	conn    net.PacketConn
-	stopCh  chan struct{}
-	wg      sync.WaitGroup
+	runtime    *Runtime
+	cfgMu      sync.RWMutex
+	cfg        ruleRuntimeConfig
+	conn       net.PacketConn
+	stopCh     chan struct{}
+	readyCh    chan struct{}
+	drainDone  chan struct{}
+	wg         sync.WaitGroup
+	readyOnce  sync.Once
+	stopOnce   sync.Once
+	drainOnce  sync.Once
+	finishOnce sync.Once
+	stateValue int32
 
 	mu       sync.Mutex
 	sessions map[string]*udpSession
@@ -885,11 +1089,49 @@ func (l *udpListener) config() ruleRuntimeConfig {
 
 func (l *udpListener) update(cfg ruleRuntimeConfig) {
 	old := l.config()
+	if old.fingerprint == cfg.fingerprint {
+		cfg.generation = old.generation
+	} else {
+		cfg.generation = l.runtime.newGeneration()
+	}
 	l.cfgMu.Lock()
 	l.cfg = cfg
 	l.cfgMu.Unlock()
 	if old.fingerprint != "" && old.fingerprint != cfg.fingerprint {
-		l.closeAllSessions()
+		go l.closeGenerationAfter(old.generation, l.runtime.options.DrainTimeout)
+	}
+}
+
+func (l *udpListener) closeGenerationAfter(generation uint64, timeout time.Duration) {
+	timer := time.NewTimer(timeout)
+	defer timer.Stop()
+	select {
+	case <-timer.C:
+	case <-l.stopCh:
+		return
+	}
+	var stale []*udpSession
+	l.mu.Lock()
+	for key, session := range l.sessions {
+		if session.cfg.generation == generation {
+			delete(l.sessions, key)
+			stale = append(stale, session)
+		}
+	}
+	l.mu.Unlock()
+	for _, session := range stale {
+		session.close()
+		if session.cfg.tracker != nil {
+			session.cfg.tracker.release(session.sourceIP)
+		}
+	}
+}
+
+func (l *udpListener) activate() {
+	if atomic.CompareAndSwapInt32(&l.stateValue, listenerWarming, listenerActive) {
+		l.readyOnce.Do(func() { close(l.readyCh) })
+		cfg := l.config()
+		l.runtime.logger.Printf("runtime udp listener active rule=%d addr=%s", cfg.rule.ID, cfg.listenAddr)
 	}
 }
 
@@ -900,6 +1142,11 @@ func (l *udpListener) bind() string {
 
 func (l *udpListener) readLoop() {
 	defer l.wg.Done()
+	select {
+	case <-l.readyCh:
+	case <-l.stopCh:
+		return
+	}
 	buf := make([]byte, maxUDPPacketBytes)
 	for {
 		n, addr, err := l.conn.ReadFrom(buf)
@@ -945,6 +1192,10 @@ func (l *udpListener) handleDatagram(clientAddr net.Addr, packet []byte) {
 	key := clientAddr.String()
 	l.mu.Lock()
 	session := l.sessions[key]
+	if session == nil && atomic.LoadInt32(&l.stateValue) == listenerDraining {
+		l.mu.Unlock()
+		return
+	}
 	if session == nil && l.runtime.options.MaxUDPSessionsPerRule > 0 && len(l.sessions) >= l.runtime.options.MaxUDPSessionsPerRule {
 		l.mu.Unlock()
 		atomic.AddInt64(&l.runtime.udpRejectedSessions, 1)
@@ -1114,13 +1365,28 @@ func (l *udpListener) active() int64 {
 	return int64(len(l.sessions))
 }
 
+func (l *udpListener) drainingActive() int64 {
+	if atomic.LoadInt32(&l.stateValue) == listenerDraining {
+		return l.active()
+	}
+	current := l.config().generation
+	var count int64
+	l.mu.Lock()
+	for _, session := range l.sessions {
+		if session.cfg.generation != current {
+			count++
+		}
+	}
+	l.mu.Unlock()
+	return count
+}
+
 func (l *udpListener) network() string {
 	return "udp"
 }
 
-func (l *udpListener) fingerprint() string {
-	cfg := l.config()
-	return cfg.fingerprint
+func (l *udpListener) state() string {
+	return listenerStateName(atomic.LoadInt32(&l.stateValue))
 }
 
 func (l *udpListener) closeAllSessions() {
@@ -1140,17 +1406,43 @@ func (l *udpListener) closeAllSessions() {
 }
 
 func (l *udpListener) stop() {
-	select {
-	case <-l.stopCh:
-		return
-	default:
+	l.stopOnce.Do(func() {
 		close(l.stopCh)
 		_ = l.conn.Close()
 		l.closeAllSessions()
 		l.wg.Wait()
+		atomic.StoreInt32(&l.stateValue, listenerStopped)
+		l.finishOnce.Do(func() { close(l.drainDone) })
 		cfg := l.config()
 		l.runtime.logger.Printf("runtime udp listener stopped rule=%d addr=%s", cfg.rule.ID, cfg.listenAddr)
-	}
+	})
+}
+
+func (l *udpListener) drain(timeout time.Duration) <-chan struct{} {
+	l.drainOnce.Do(func() {
+		atomic.StoreInt32(&l.stateValue, listenerDraining)
+		go func() {
+			deadline := time.NewTimer(timeout)
+			ticker := time.NewTicker(50 * time.Millisecond)
+			defer deadline.Stop()
+			defer ticker.Stop()
+			for {
+				if l.active() == 0 {
+					l.stop()
+					return
+				}
+				select {
+				case <-deadline.C:
+					l.stop()
+					return
+				case <-ticker.C:
+				case <-l.stopCh:
+					return
+				}
+			}
+		}()
+	})
+	return l.drainDone
 }
 
 func (s *udpSession) readLoop() {
@@ -1795,6 +2087,21 @@ func skipRule(rule client.ForwardRule) bool {
 
 func listenerBind(cfg ruleRuntimeConfig) string {
 	return cfg.network + "|" + cfg.listenAddr
+}
+
+func listenerStateName(state int32) string {
+	switch state {
+	case listenerWarming:
+		return "warming"
+	case listenerActive:
+		return "active"
+	case listenerDraining:
+		return "draining"
+	case listenerStopped:
+		return "stopped"
+	default:
+		return "unknown"
+	}
 }
 
 func isTCPRule(rule client.ForwardRule) bool {

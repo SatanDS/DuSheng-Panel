@@ -34,6 +34,7 @@ import type {
   LoginResponse,
   ProtocolViolation,
   AuditLog,
+	AgentEvent,
   Session
 } from "./types";
 
@@ -41,11 +42,13 @@ type PageKey =
   | "dashboard"
   | "forward-rules"
   | "nodes"
+	| "line-assets"
   | "device-groups"
   | "tunnels"
   | "protocol-policies"
   | "speed-limits"
   | "violations"
+	| "node-events"
   | "audit-logs"
   | "users";
 
@@ -66,6 +69,7 @@ interface FieldConfig {
   rows?: number;
   fullWidth?: boolean;
   reference?: ReferenceKey;
+	defaultValue?: string | boolean;
 }
 
 interface ColumnConfig {
@@ -75,8 +79,11 @@ interface ColumnConfig {
   className?: string;
 }
 
+type CRUDPageKey = Exclude<PageKey, "dashboard" | "line-assets" | "violations" | "node-events" | "audit-logs">;
+type LineAssetKey = "line-providers" | "line-sites" | "line-circuits" | "line-endpoints" | "line-probes";
+
 interface ResourceConfig {
-  key: Exclude<PageKey, "dashboard" | "violations" | "audit-logs">;
+  key: CRUDPageKey | LineAssetKey;
   title: string;
   eyebrow: string;
   endpoint: string;
@@ -88,7 +95,16 @@ interface ResourceConfig {
 }
 
 type FormDraft = Record<string, string | boolean>;
-type ReferenceKey = "users" | "tunnels" | "protocol-policies" | "device-groups" | "forward-rules";
+type ReferenceKey =
+	| "users"
+	| "tunnels"
+	| "protocol-policies"
+	| "device-groups"
+	| "forward-rules"
+	| "line-providers"
+	| "line-sites"
+	| "line-circuits"
+	| "nodes";
 
 const pageSize = 25;
 
@@ -108,6 +124,23 @@ const valueLabels: Record<string, string> = {
   online: "在线",
   offline: "离线",
   maintenance: "维护中",
+	inactive: "停用",
+	planned: "规划中",
+	provisioning: "开通中",
+	retired: "已退役",
+	terminated: "已终止",
+	iepl: "IEPL",
+	iplc: "IPLC",
+	mpls: "MPLS",
+	internet: "互联网",
+	a: "A 端",
+	z: "Z 端",
+	pending: "等待探测",
+	up: "正常",
+	down: "故障",
+	tcp: "TCP",
+	http: "HTTP",
+	udp_echo: "UDP 回显",
   entry: "入口",
   exit: "出口",
   relay: "中继",
@@ -142,6 +175,13 @@ const valueLabels: Record<string, string> = {
   strict_compliance: "严格合规",
   synced: "已同步",
   unsynced: "未同步",
+	applied: "已应用",
+	rejected: "已拒绝",
+	rolled_back: "已回滚",
+	lease_expired: "配置租约过期",
+	warning: "警告",
+	info: "信息",
+	error: "错误",
   quota_exhausted: "流量用尽",
   running: "运行中",
   unknown: "未知",
@@ -177,6 +217,8 @@ const navItems: { key: PageKey; label: string; icon: LucideIcon }[] = [
   { key: "dashboard", label: "总览", icon: Gauge },
   { key: "forward-rules", label: "转发规则", icon: Route },
   { key: "nodes", label: "节点", icon: Server },
+	{ key: "line-assets", label: "线路资产", icon: Network },
+	{ key: "node-events", label: "节点事件", icon: Activity },
   { key: "device-groups", label: "设备组", icon: Boxes },
   { key: "tunnels", label: "线路", icon: Network },
   { key: "protocol-policies", label: "协议策略", icon: ShieldCheck },
@@ -232,7 +274,147 @@ const policyActionOptions = [
   { value: "block", label: "阻断" }
 ];
 
-const resourceConfigs: Record<Exclude<PageKey, "dashboard" | "violations" | "audit-logs">, ResourceConfig> = {
+const lineAssetConfigs: Record<LineAssetKey, ResourceConfig> = {
+	"line-providers": {
+		key: "line-providers",
+		title: "运营商",
+		eyebrow: "专线供应商与支持渠道",
+		endpoint: "/line-providers",
+		createLabel: "新增运营商",
+		fields: [
+			{ key: "name", label: "名称", required: true },
+			{ key: "code", label: "代码" },
+			{ key: "status", label: "状态", type: "select", options: [
+				{ value: "active", label: "启用" }, { value: "inactive", label: "停用" }, { value: "suspended", label: "暂停" }
+			] },
+			{ key: "supportContact", label: "支持联系人" },
+			{ key: "supportPhone", label: "支持电话" },
+			{ key: "supportEmail", label: "支持邮箱" },
+			{ key: "portalUrl", label: "工单门户" },
+			{ key: "notes", label: "备注", type: "textarea", rows: 4, fullWidth: true }
+		],
+		columns: [
+			{ key: "id", label: "ID", className: "mono" }, { key: "name", label: "名称" }, { key: "code", label: "代码" },
+			{ key: "status", label: "状态", render: (row) => <StatusPill value={text(row.status)} /> },
+			{ key: "supportContact", label: "联系人" }, { key: "supportPhone", label: "电话" },
+			{ key: "updatedAt", label: "更新于", render: (row) => formatDate(row.updatedAt) }
+		]
+	},
+	"line-sites": {
+		key: "line-sites",
+		title: "站点",
+		eyebrow: "机房、POP 与业务位置",
+		endpoint: "/line-sites",
+		createLabel: "新增站点",
+		fields: [
+			{ key: "name", label: "名称", required: true }, { key: "code", label: "代码" },
+			{ key: "status", label: "状态", type: "select", options: [
+				{ value: "active", label: "启用" }, { value: "planned", label: "规划中" },
+				{ value: "maintenance", label: "维护中" }, { value: "retired", label: "已退役" }
+			] },
+			{ key: "country", label: "国家/地区" }, { key: "region", label: "区域" }, { key: "city", label: "城市" },
+			{ key: "address", label: "地址", fullWidth: true },
+			{ key: "notes", label: "备注", type: "textarea", rows: 4, fullWidth: true }
+		],
+		columns: [
+			{ key: "id", label: "ID", className: "mono" }, { key: "name", label: "名称" }, { key: "code", label: "代码" },
+			{ key: "status", label: "状态", render: (row) => <StatusPill value={text(row.status)} /> },
+			{ key: "country", label: "国家/地区" }, { key: "region", label: "区域" }, { key: "city", label: "城市" },
+			{ key: "updatedAt", label: "更新于", render: (row) => formatDate(row.updatedAt) }
+		]
+	},
+	"line-circuits": {
+		key: "line-circuits",
+		title: "物理线路",
+		eyebrow: "IEPL/IPLC 合同、带宽与 SLA",
+		endpoint: "/line-circuits",
+		createLabel: "新增线路",
+		fields: [
+			{ key: "providerId", label: "运营商", type: "number", required: true, min: 1, reference: "line-providers" },
+			{ key: "name", label: "线路名称", required: true }, { key: "circuitCode", label: "运营商线路号" },
+			{ key: "serviceType", label: "业务类型", type: "select", options: [
+				{ value: "iepl", label: "IEPL" }, { value: "iplc", label: "IPLC" }, { value: "mpls", label: "MPLS" },
+				{ value: "internet", label: "互联网" }, { value: "custom", label: "自定义" }
+			] },
+			{ key: "status", label: "状态", type: "select", options: [
+				{ value: "planned", label: "规划中" }, { value: "provisioning", label: "开通中" }, { value: "active", label: "启用" },
+				{ value: "maintenance", label: "维护中" }, { value: "suspended", label: "暂停" }, { value: "terminated", label: "已终止" }
+			] },
+			{ key: "bandwidthMbps", label: "峰值带宽 Mbps", type: "number", min: 0 },
+			{ key: "committedMbps", label: "承诺带宽 Mbps", type: "number", min: 0 },
+			{ key: "latencySlaMs", label: "时延 SLA ms", type: "number", min: 0, step: 0.1 },
+			{ key: "packetLossSlaPct", label: "丢包 SLA %", type: "number", min: 0, max: 100, step: 0.01 },
+			{ key: "monthlyCost", label: "月成本", type: "number", min: 0, step: 0.01 }, { key: "currency", label: "币种" },
+			{ key: "startsAt", label: "开始时间", type: "datetime-local", optional: true },
+			{ key: "expiresAt", label: "到期时间", type: "datetime-local", optional: true },
+			{ key: "maintenanceStart", label: "维护开始", type: "datetime-local", optional: true },
+			{ key: "maintenanceEnd", label: "维护结束", type: "datetime-local", optional: true },
+			{ key: "tags", label: "标签", fullWidth: true }, { key: "notes", label: "备注", type: "textarea", rows: 4, fullWidth: true }
+		],
+		columns: [
+			{ key: "id", label: "ID", className: "mono" }, { key: "name", label: "名称" }, { key: "providerId", label: "运营商" },
+			{ key: "serviceType", label: "类型", render: (row) => <Badge>{displayValue(row.serviceType)}</Badge> },
+			{ key: "status", label: "状态", render: (row) => <StatusPill value={text(row.status)} /> },
+			{ key: "bandwidthMbps", label: "峰值 Mbps" }, { key: "committedMbps", label: "承诺 Mbps" },
+			{ key: "latencySlaMs", label: "时延 SLA" }, { key: "packetLossSlaPct", label: "丢包 SLA" },
+			{ key: "expiresAt", label: "到期", render: (row) => formatDate(row.expiresAt) }
+		]
+	},
+	"line-endpoints": {
+		key: "line-endpoints",
+		title: "A/Z 端点",
+		eyebrow: "线路两端机房、接口与地址",
+		endpoint: "/line-endpoints",
+		createLabel: "新增端点",
+		fields: [
+			{ key: "circuitId", label: "物理线路", type: "number", required: true, min: 1, reference: "line-circuits" },
+			{ key: "side", label: "端点", type: "select", options: [{ value: "a", label: "A 端" }, { value: "z", label: "Z 端" }] },
+			{ key: "siteId", label: "站点", type: "number", optional: true, min: 1, reference: "line-sites" },
+			{ key: "deviceGroupId", label: "设备组", type: "number", optional: true, min: 1, reference: "device-groups" },
+			{ key: "address", label: "对接地址", fullWidth: true }, { key: "interface", label: "接口" },
+			{ key: "vlan", label: "VLAN", type: "number", min: 0, max: 4094 },
+			{ key: "ipCidrs", label: "IP/CIDR", type: "textarea", rows: 3, fullWidth: true },
+			{ key: "notes", label: "备注", type: "textarea", rows: 4, fullWidth: true }
+		],
+		columns: [
+			{ key: "id", label: "ID", className: "mono" }, { key: "circuitId", label: "线路" },
+			{ key: "side", label: "端点", render: (row) => <Badge>{displayValue(row.side)}</Badge> },
+			{ key: "siteId", label: "站点" }, { key: "deviceGroupId", label: "设备组" }, { key: "interface", label: "接口" },
+			{ key: "vlan", label: "VLAN" }, { key: "ipCidrs", label: "IP/CIDR" },
+			{ key: "updatedAt", label: "更新于", render: (row) => formatDate(row.updatedAt) }
+		]
+	},
+	"line-probes": {
+		key: "line-probes",
+		title: "线路探测",
+		eyebrow: "由指定 Agent 测量线路可达性与时延",
+		endpoint: "/line-probes",
+		createLabel: "新增探测",
+		fields: [
+			{ key: "circuitId", label: "物理线路", type: "number", required: true, min: 1, reference: "line-circuits" },
+			{ key: "nodeId", label: "执行节点", type: "number", required: true, min: 1, reference: "nodes" },
+			{ key: "name", label: "名称", required: true },
+			{ key: "type", label: "探测类型", type: "select", options: [
+				{ value: "tcp", label: "TCP 建连" }, { value: "http", label: "HTTP" }, { value: "udp_echo", label: "UDP 回显" }
+			] },
+			{ key: "target", label: "目标", required: true, placeholder: "host:port 或 https://..." },
+			{ key: "payload", label: "UDP 回显内容" },
+			{ key: "intervalSeconds", label: "间隔秒", type: "number", min: 5, max: 3600 },
+			{ key: "timeoutMs", label: "超时 ms", type: "number", min: 100, max: 30000 },
+			{ key: "enabled", label: "启用", type: "checkbox", defaultValue: true }
+		],
+		columns: [
+			{ key: "id", label: "ID", className: "mono" }, { key: "name", label: "名称" }, { key: "circuitId", label: "线路" },
+			{ key: "nodeId", label: "节点" }, { key: "type", label: "类型", render: (row) => <Badge>{displayValue(row.type)}</Badge> },
+			{ key: "target", label: "目标" }, { key: "status", label: "状态", render: (row) => <StatusPill value={text(row.status)} /> },
+			{ key: "lastLatencyMs", label: "时延", render: (row) => formatLatency(row.lastLatencyMs) },
+			{ key: "consecutiveFailures", label: "连续失败" }, { key: "lastCheckedAt", label: "最后探测", render: (row) => formatDate(row.lastCheckedAt) },
+			{ key: "lastError", label: "错误" }
+		]
+	}
+};
+
+const resourceConfigs: Record<CRUDPageKey, ResourceConfig> = {
   "forward-rules": {
     key: "forward-rules",
     title: "转发规则",
@@ -327,7 +509,9 @@ const resourceConfigs: Record<Exclude<PageKey, "dashboard" | "violations" | "aud
       { key: "publicIp", label: "公网 IP" },
       { key: "connectHost", label: "连接地址" },
       { key: "version", label: "版本" },
+	  { key: "capabilities", label: "能力", render: renderNodeCapabilities },
       { key: "sync", label: "同步", render: renderNodeSync },
+	  { key: "configStatus", label: "配置结果", render: renderNodeConfig },
       { key: "uninstallAckStatus", label: "卸载确认", render: renderNodeUninstall },
       { key: "systemJson", label: "Agent", render: renderNodeHealth },
       { key: "lastSeenAt", label: "最后心跳", render: (row) => formatDate(row.lastSeenAt) }
@@ -440,6 +624,7 @@ const resourceConfigs: Record<Exclude<PageKey, "dashboard" | "violations" | "aud
         min: 1,
         reference: "protocol-policies"
       },
+	  { key: "lineCircuitId", label: "物理线路", type: "number", optional: true, min: 1, reference: "line-circuits" },
       { key: "advancedJson", label: "高级 JSON", type: "textarea", rows: 4, fullWidth: true }
     ],
     columns: [
@@ -451,6 +636,7 @@ const resourceConfigs: Record<Exclude<PageKey, "dashboard" | "violations" | "aud
       { key: "protocol", label: "协议", render: (row) => displayValue(row.protocol) },
       { key: "flowAccounting", label: "计费" },
       { key: "protocolPolicyId", label: "策略" },
+	  { key: "lineCircuitId", label: "物理线路" },
       { key: "updatedAt", label: "更新于", render: (row) => formatDate(row.updatedAt) }
     ]
   },
@@ -726,6 +912,14 @@ function renderPage(activePage: PageKey, refreshSeed: number) {
     return <ViolationsPage refreshSeed={refreshSeed} />;
   }
 
+  if (activePage === "node-events") {
+    return <NodeEventsPage refreshSeed={refreshSeed} />;
+  }
+
+	if (activePage === "line-assets") {
+		return <LineAssetsPage refreshSeed={refreshSeed} />;
+	}
+
   if (activePage === "audit-logs") {
     return <AuditLogsPage refreshSeed={refreshSeed} />;
   }
@@ -749,6 +943,23 @@ function renderPage(activePage: PageKey, refreshSeed: number) {
   }
 
   return <ResourcePage config={resourceConfigs[activePage]} refreshSeed={refreshSeed} />;
+}
+
+function LineAssetsPage({ refreshSeed }: { refreshSeed: number }) {
+	const tabs: { key: LineAssetKey; label: string }[] = [
+		{ key: "line-circuits", label: "物理线路" },
+		{ key: "line-probes", label: "线路探测" },
+		{ key: "line-endpoints", label: "A/Z 端点" },
+		{ key: "line-providers", label: "运营商" },
+		{ key: "line-sites", label: "站点" }
+	];
+	const [activeTab, setActiveTab] = useState<LineAssetKey>("line-circuits");
+	return <div className="stack">
+		<div className="segmented-control" role="tablist" aria-label="线路资产视图">
+			{tabs.map((tab) => <button key={tab.key} type="button" role="tab" aria-selected={activeTab === tab.key} className={activeTab === tab.key ? "active" : ""} onClick={() => setActiveTab(tab.key)}>{tab.label}</button>)}
+		</div>
+		<ResourcePage config={lineAssetConfigs[activeTab]} refreshSeed={refreshSeed} />
+	</div>;
 }
 
 function Dashboard({ refreshSeed }: { refreshSeed: number }) {
@@ -1534,6 +1745,78 @@ function ViolationsPage({ refreshSeed }: { refreshSeed: number }) {
   );
 }
 
+function NodeEventsPage({ refreshSeed }: { refreshSeed: number }) {
+	const [rows, setRows] = useState<AgentEvent[]>([]);
+	const [selected, setSelected] = useState<AgentEvent | null>(null);
+	const [loading, setLoading] = useState(true);
+	const [error, setError] = useState<string | null>(null);
+	const [query, setQuery] = useState("");
+	const [page, setPage] = useState(1);
+	const [total, setTotal] = useState(0);
+
+	const load = useCallback(async () => {
+		setLoading(true);
+		setError(null);
+		try {
+			const data = await api.page<AgentEvent>("/node-events", { page, pageSize, q: query });
+			setRows(data.items);
+			setTotal(data.total);
+			setSelected((current) => data.items.find((row) => row.id === current?.id) ?? data.items[0] ?? null);
+		} catch (err) {
+			setError(err instanceof Error ? err.message : "节点事件请求失败");
+		} finally {
+			setLoading(false);
+		}
+	}, [page, query]);
+
+	useEffect(() => {
+		void load();
+	}, [load, refreshSeed]);
+
+	const pageCount = Math.max(1, Math.ceil(total / pageSize));
+	return (
+		<div className="stack">
+			<section className="section-heading">
+				<div><p>Agent 控制面</p><h2>节点事件</h2></div>
+				<button className="ghost-action" onClick={() => void load()} disabled={loading}>
+					<RefreshCw size={15} />刷新
+				</button>
+			</section>
+			<section className="table-toolbar">
+				<input aria-label="搜索节点事件" placeholder="搜索类型、状态或错误" value={query} onChange={(event) => { setQuery(event.target.value); setPage(1); }} />
+				<PaginationControls page={Math.min(page, pageCount)} pageCount={pageCount} onPage={setPage} />
+			</section>
+			{error ? <div className="notice error">{error}</div> : null}
+			<div className="resource-grid">
+				<section className="panel table-panel">
+					<PanelHeader title="事件列表" icon={Activity} meta={`${rows.length}/${total} 条`} />
+					{loading ? <StateBlock tone="loading" title="正在加载节点事件" /> : (
+						<DataTable rows={rows} selectedId={selected?.id ?? null} onRowClick={(row) => setSelected(row as AgentEvent)} columns={[
+							{ key: "occurredAt", label: "时间", render: (row) => formatDate(row.occurredAt) },
+							{ key: "nodeId", label: "节点" },
+							{ key: "severity", label: "级别", render: (row) => <StatusPill value={text(row.severity)} /> },
+							{ key: "type", label: "类型" },
+							{ key: "status", label: "状态", render: (row) => <StatusPill value={text(row.status)} /> },
+							{ key: "message", label: "消息" }
+						]} />
+					)}
+				</section>
+				<section className="panel detail-panel">
+					<PanelHeader title="事件详情" icon={ScrollText} />
+					{selected ? <dl className="detail-list">
+						<div><dt>节点</dt><dd>{selected.nodeId}</dd></div>
+						<div><dt>类型</dt><dd>{selected.type}</dd></div>
+						<div><dt>状态</dt><dd>{displayValue(selected.status)}</dd></div>
+						<div><dt>发生时间</dt><dd>{formatDate(selected.occurredAt)}</dd></div>
+						<div className="full"><dt>消息</dt><dd className="prewrap">{selected.message || "-"}</dd></div>
+						<div className="full"><dt>运行详情</dt><dd className="prewrap">{prettyJSON(selected.detailJson)}</dd></div>
+					</dl> : <StateBlock tone="empty" title="请选择一条节点事件" />}
+				</section>
+			</div>
+		</div>
+	);
+}
+
 function AuditLogsPage({ refreshSeed }: { refreshSeed: number }) {
   const [rows, setRows] = useState<AuditLog[]>([]);
   const [loading, setLoading] = useState(true);
@@ -1997,6 +2280,29 @@ function renderNodeSync(row: Entity) {
   return <StatusPill value={synced ? "synced" : `未同步 ${applied}/${desired}`} />;
 }
 
+function renderNodeCapabilities(row: Entity) {
+	const values = Array.isArray(row.capabilities) ? row.capabilities.map(String).filter(Boolean) : [];
+	if (values.length === 0) {
+		return <span className="muted">旧版 Agent</span>;
+	}
+	const visible = values.slice(0, 3);
+	return <div className="flag-list" title={values.join(", ")}>
+		{visible.map((value) => <Badge key={value}>{value}</Badge>)}
+		{values.length > visible.length ? <Badge>+{values.length - visible.length}</Badge> : null}
+	</div>;
+}
+
+function renderNodeConfig(row: Entity) {
+	const status = text(row.configStatus);
+	if (status === "-") {
+		return <span className="muted">等待新版 Agent 回执</span>;
+	}
+	const revision = Number(row.configAckRevision ?? 0);
+	const message = text(row.configMessage);
+	const label = `${displayValue(status)} r${revision}${message === "-" ? "" : `：${message}`}`;
+	return <StatusPill value={label} />;
+}
+
 function renderNodeUninstall(row: Entity) {
   const status = text(row.status);
   if (!["uninstalling", "uninstall_legacy", "uninstall_timeout", "uninstall_failed"].includes(status)) {
@@ -2026,6 +2332,15 @@ function renderNodeHealth(row: Entity) {
       `连接 ${runtimeStatus.activeConnections ?? 0}`,
       `UDP会话 ${runtimeStatus.activeUDPSessions ?? 0}`
     ];
+	const warming = Number(runtimeStatus.warmingListeners ?? 0);
+	const draining = Number(runtimeStatus.drainingListeners ?? 0);
+	const drainingConnections = Number(runtimeStatus.drainingConnections ?? 0);
+	if (warming > 0) {
+		parts.push(`预热 ${warming}`);
+	}
+	if (draining > 0 || drainingConnections > 0) {
+		parts.push(`排空 ${draining}/${drainingConnections}`);
+	}
     if (errors > 0) {
       parts.push(`错误 ${errors}`);
     }
@@ -2045,6 +2360,14 @@ function pageTitle(activePage: PageKey) {
   if (activePage === "violations") {
     return "协议告警";
   }
+
+  if (activePage === "node-events") {
+    return "节点事件";
+  }
+
+	if (activePage === "line-assets") {
+		return "线路资产";
+	}
 
   if (activePage === "audit-logs") {
     return "管理审计";
@@ -2085,7 +2408,9 @@ function importRulePayload(row: Entity) {
 
 function emptyDraft(fields: FieldConfig[]): FormDraft {
   return fields.reduce<FormDraft>((draft, field) => {
-    if (field.type === "checkbox") {
+	if (typeof field.defaultValue !== "undefined") {
+	  draft[field.key] = field.defaultValue;
+	} else if (field.type === "checkbox") {
       draft[field.key] = false;
     } else if (field.type === "select" && field.options?.[0]) {
       draft[field.key] = field.options[0].value;
@@ -2192,6 +2517,14 @@ function formatBps(value: unknown) {
   return `${formatBytes(bytes)}/s`;
 }
 
+function formatLatency(value: unknown) {
+	const latency = Number(value);
+	if (!Number.isFinite(latency) || latency < 0) {
+		return "-";
+	}
+	return `${latency.toFixed(latency >= 10 ? 1 : 2)} ms`;
+}
+
 function formatDate(value: unknown) {
   if (!value) {
     return "-";
@@ -2236,4 +2569,15 @@ function parseSystem(value: unknown): Record<string, unknown> | null {
   } catch {
     return null;
   }
+}
+
+function prettyJSON(value: unknown) {
+	if (typeof value !== "string" || value.trim() === "") {
+		return "-";
+	}
+	try {
+		return JSON.stringify(JSON.parse(value), null, 2);
+	} catch {
+		return value;
+	}
 }

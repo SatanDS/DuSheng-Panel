@@ -66,8 +66,24 @@ services:
       - api
       - web
 
+  prometheus:
+    image: prom/prometheus:v3.4.2
+    profiles: ["monitoring"]
+    restart: unless-stopped
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.retention.time=30d
+    ports:
+      - "127.0.0.1:${PROMETHEUS_PORT:-19091}:9090"
+    volumes:
+      - ./prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - prometheus-data:/prometheus
+    depends_on:
+      - api
+
 volumes:
   postgres-data:
   api-data:
   caddy-data:
   caddy-config:
+  prometheus-data:

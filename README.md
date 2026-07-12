@@ -15,8 +15,8 @@ DuSheng Panel 是一个原创转发面板项目，参考了 flux-panel 和 nyanp
 ## 第一版范围
 
 - 管理员/用户登录，认证方式为 JWT。
-- 设备组、节点、隧道、转发规则、限速、流量采样、审计日志、安装令牌、协议策略。
-- 节点端注册、心跳、配置拉取、流量上报、协议违规上报。
+- 设备组、节点、逻辑隧道、IEPL 线路资产、A/Z 端点、转发规则、线路探测、限速、流量采样、节点事件、审计日志、安装令牌、协议策略。
+- 节点端注册、能力协商、心跳、配置 ACK/NACK/回滚、TCP/UDP 转发、线路探测、流量上报、协议违规上报。
 - TCP/UDP 转发规则模型，支持基于 revision 的节点同步。
 - 协议治理检测，适用于 IEPL/IPLC 场景：允许授权 SS/SSH/游戏加速入口，阻断未经授权的代理、VPN、BT、远控和高风险隧道。
 - Docker Compose 和 systemd 部署模板。
@@ -76,12 +76,33 @@ HTTPS_PORT=7443
 - `DUSHENG_CORS_ORIGINS`：逗号分隔的允许来源；本地可用 `*`，生产必须设置为面板域名或明确的来源 allowlist。
 - `DUSHENG_AGENT_RELEASE_BASE`：节点安装脚本下载 agent 二进制的 GitHub Release 地址，默认是 `https://github.com/SatanDS/DuSheng-Panel/releases/latest/download`。
 - `DUSHENG_GOST_PATH` / `DUSHENG_GOST_BIN`：节点端 `gost` 二进制路径，安装脚本会同时写入两者以兼容旧配置。当前第一版入口监听默认由 `dusheng-agent` TCP/UDP runtime 承担，`gost` 保留给后续复杂 tunnel/relay transport。
+- `DUSHENG_METRICS_LISTEN`：Agent Prometheus 指标地址，默认仅监听 `127.0.0.1:19090`；设为空可关闭。
 
 ## 节点 TCP/UDP Runtime
 
-节点端会按面板下发的 TCP / TCP+UDP 转发规则启动本地 TCP listener。连接进入后，agent 会预读首包并执行轻量协议检测，支持 TLS ClientHello SNI/ALPN、HTTP Host、HTTP CONNECT、SOCKS4/5、SSH 和未知明文 TCP。命中协议策略后，`block` 会直接关闭连接并上报违规，`alert` / `observe` 会允许转发并记录事件。
+节点端只在逻辑线路的入口设备组下发业务规则；出口组保留给线路资产、探测和后续 transport adapter，不会重复监听用户端口。Agent 会按 TCP、UDP 或 TCP+UDP 规则启动 listener。TCP 连接进入后会执行有界首包/多包检测，支持 TLS ClientHello SNI/ALPN、HTTP Host、HTTP CONNECT、SOCKS4/5、SSH 和未知明文 TCP。命中协议策略后，`block` 会直接关闭连接并上报违规，`alert` / `observe` 会允许转发并记录事件。
 
 TCP/UDP 转发链路由 agent 直接计量流量，并定时批量上报 `/agent/traffic`。限速、最大连接数和最大 IP 数也在 agent runtime 内执行；UDP v1 按 clientAddr 维护 session，支持 QUIC 首包检测、阻断/告警、计量、限速和空闲清理。`gost` transport adapter 会在后续阶段补齐。
+
+配置应用采用 `warming -> active -> draining` 生命周期。新配置只有在全部 listener 成功预热后才会整体切换；任一端口启动失败会保留上一版并向 API 回报 `rejected` 或 `rolled_back`。同端口策略/上游变更不再立即中断已有连接，旧连接会按单调 generation 在排空超时后收敛。配置租约过期时 Agent 会关闭 listener，避免离线节点永久运行已撤销规则。Agent 会显式上报 capability 列表，API 不再只依赖版本号判断功能支持。
+
+## IEPL 线路资产与探测
+
+「线路资产」独立管理运营商、站点、物理线路、合同带宽、承诺带宽、时延/丢包 SLA、有效期、维护窗口和 A/Z 端点。原有「线路」仍表示逻辑转发隧道，可通过 `lineCircuitId` 绑定实际 IEPL/IPLC 线路。
+
+线路探测由指定 Agent 在节点侧执行，支持 TCP 建连、HTTP 和 UDP 回显。结果写入当前状态与 30 天原始样本，并在 `pending/up/down` 转换时生成节点事件。探测配置带单调 revision，旧 worker 的迟到结果不会覆盖新目标状态。
+
+## Prometheus 监控
+
+API 在容器内的 `/metrics` 暴露低基数 HTTP、节点、配置回执、规则、物理线路、探测和违规指标；Caddy 默认不对公网转发该路径。Agent 默认在 `127.0.0.1:19090` 暴露 listener 生命周期、连接、配置租约、DPI、流量缓冲和线路探测指标。
+
+启动可选 Prometheus profile：
+
+```bash
+docker compose --env-file .env -f deploy/docker-compose.yml --profile monitoring up -d
+```
+
+Prometheus 默认仅绑定面板机 `127.0.0.1:19091`，保留 30 天数据。远程 Agent 指标需要通过受控管理网络采集，不建议直接暴露到公网。
 
 ## 协议治理与 DPI
 
@@ -105,6 +126,8 @@ v0.1.4 及更早 agent 只能确认已接收命令，面板会显示 `uninstall_
 
 - `dusheng-agent-linux-amd64.tar.gz`
 - `dusheng-agent-linux-arm64.tar.gz`
+- `checksums.txt`
+- CycloneDX SBOM 与 Sigstore bundle
 
 在当前开发机生成 release 资产。默认使用 Docker Buildx 为 Linux `amd64/arm64` 构建 nDPI sidecar，并在压缩包内携带可替换的 `libndpi.so` 与 LGPLv3 第三方许可说明，节点不需要单独安装 `libndpi`：
 
@@ -125,12 +148,14 @@ powershell -ExecutionPolicy Bypass -File .\deploy\scripts\build-agent-release.ps
 release/
 ```
 
-把以下文件上传到 GitHub Release 后，面板里复制出来的节点安装命令会自动下载对应架构的 agent：
+GitHub Actions 会上传以下文件；面板里复制出来的节点安装命令会自动下载对应架构的 agent，并强制核对 `checksums.txt` 中的 SHA256：
 
 ```text
 release/dusheng-agent-linux-amd64.tar.gz
 release/dusheng-agent-linux-arm64.tar.gz
 release/checksums.txt
+release/*.sbom.cdx.json
+release/*.sigstore.json
 ```
 
 面板生成的节点安装命令会显式带上 `DUSHENG_RELEASE_BASE`，默认指向本仓库最新 Release。若你使用自建下载源，只需在面板端 `.env` 中覆盖 `DUSHENG_AGENT_RELEASE_BASE`。

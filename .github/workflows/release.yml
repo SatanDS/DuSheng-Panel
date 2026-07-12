@@ -7,6 +7,7 @@ on:
 
 permissions:
   contents: write
+  id-token: write
 
 jobs:
   build:
@@ -60,6 +61,22 @@ jobs:
           merge-multiple: true
       - name: Generate checksums
         run: cd release && sha256sum dusheng-agent-linux-*.tar.gz > checksums.txt
+      - uses: anchore/sbom-action/download-syft@v0.20.6
+      - name: Generate CycloneDX SBOMs
+        shell: bash
+        run: |
+          set -euo pipefail
+          for archive in release/dusheng-agent-linux-*.tar.gz; do
+            syft scan "$archive" -o "cyclonedx-json=${archive}.sbom.cdx.json"
+          done
+      - uses: sigstore/cosign-installer@v3.9.2
+      - name: Sign release assets with GitHub OIDC
+        shell: bash
+        run: |
+          set -euo pipefail
+          for asset in release/dusheng-agent-linux-*.tar.gz release/checksums.txt; do
+            cosign sign-blob --yes --bundle "${asset}.sigstore.json" "$asset"
+          done
       - uses: softprops/action-gh-release@v2
         with:
           name: DuSheng Panel ${{ github.ref_name }}
@@ -68,3 +85,8 @@ jobs:
             release/dusheng-agent-linux-amd64.tar.gz
             release/dusheng-agent-linux-arm64.tar.gz
             release/checksums.txt
+            release/dusheng-agent-linux-amd64.tar.gz.sbom.cdx.json
+            release/dusheng-agent-linux-arm64.tar.gz.sbom.cdx.json
+            release/dusheng-agent-linux-amd64.tar.gz.sigstore.json
+            release/dusheng-agent-linux-arm64.tar.gz.sigstore.json
+            release/checksums.txt.sigstore.json

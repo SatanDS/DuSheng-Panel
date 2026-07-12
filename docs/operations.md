@@ -22,6 +22,25 @@ powershell -ExecutionPolicy Bypass -File .\deploy\scripts\publish-agent-release.
 
 发布前先确认 GitHub Release 版本号不存在；如果远端已有同名版本，请改用新的版本号，避免覆盖用户正在使用的安装资产。
 
+Release workflow 会生成 SHA256、CycloneDX SBOM 和 Sigstore bundle。安装脚本默认拒绝无法校验 SHA256 的下载；自建下载源必须同时提供 `checksums.txt`，或显式设置 `DUSHENG_AGENT_SHA256`。`DUSHENG_SKIP_VERIFY=1` 只允许用于可信的临时开发构建。
+
+## 监控
+
+启动 API Prometheus 采集：
+
+```bash
+docker compose --env-file .env -f deploy/docker-compose.yml --profile monitoring up -d
+curl -fsS http://127.0.0.1:19091/-/healthy
+```
+
+API `/metrics` 仅在 Compose 内网直接访问，Caddy 默认不会公开转发。Agent 默认指标地址为 `127.0.0.1:19090`，如需远程采集，应通过 WireGuard、管理 VLAN 或 SSH tunnel，并配置来源访问控制，不能直接监听公网地址。
+
+重点告警建议：节点离线超过 90 秒、`config_status` 为 `rejected/rolled_back/lease_expired`、线路探测连续失败、listener 错误增长、DPI 不可用、traffic buffer 丢弃样本。业务规则只应出现在入口设备组 Agent；出口节点出现业务 listener 应视为配置异常。
+
+## 数据库迁移
+
+API 只使用 `schema_migrations` 中尚未执行的版本化迁移。升级前必须备份 PostgreSQL；迁移成功后不要直接回滚到不认识新 schema 的旧二进制，应优先恢复配套备份或按发布说明执行兼容回滚。
+
 ## PostgreSQL 备份
 
 建议更新前、迁移前、批量导入规则前都做一次备份：

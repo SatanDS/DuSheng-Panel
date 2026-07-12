@@ -15,11 +15,24 @@ import (
 
 	"dusheng-panel/apps/agent/internal/client"
 	"dusheng-panel/apps/agent/internal/configsync"
+	"dusheng-panel/apps/agent/internal/probe"
 	agentruntime "dusheng-panel/apps/agent/internal/runtime"
 	"dusheng-panel/apps/agent/internal/supervisor"
 )
 
 var version = "dev"
+
+var capabilities = []string{
+	"config_ack_v1",
+	"config_lease_v1",
+	"dpi_sidecar_v1",
+	"final_uninstall_ack",
+	"listener_lifecycle_v1",
+	"line_probe_v1",
+	"tcp_runtime",
+	"traffic_idempotency_v1",
+	"udp_runtime",
+}
 
 func main() {
 	logger := log.New(os.Stdout, "dusheng-agent ", log.LstdFlags|log.Lmicroseconds)
@@ -31,6 +44,7 @@ func main() {
 	name := flag.String("name", firstEnvDefault("DuSheng Node", "DUSHENG_NODE_NAME", "DUSHENG_NAME", "NAME"), "node name used during registration")
 	gostPath := flag.String("gost-path", firstEnv("DUSHENG_GOST_PATH", "DUSHENG_GOST_BIN", "GOST_PATH", "GOST_BIN"), "path to gost binary")
 	dpiAddr := flag.String("dpi-addr", firstEnv("DUSHENG_DPI_ADDR", "DPI_ADDR"), "local dusheng-dpi endpoint, e.g. unix:/run/dusheng-dpi.sock")
+	metricsListen := flag.String("metrics-listen", firstPresentEnvDefault("127.0.0.1:19090", "DUSHENG_METRICS_LISTEN", "METRICS_LISTEN"), "Prometheus metrics listen address; empty disables metrics")
 	flag.Parse()
 
 	if strings.TrimSpace(*baseURL) == "" {
@@ -60,6 +74,7 @@ func main() {
 			Name:         strings.TrimSpace(*name),
 			UUID:         creds.UUID,
 			Version:      version,
+			Capabilities: capabilities,
 		})
 		if err != nil {
 			logger.Fatalf("register node: %v", err)
@@ -73,7 +88,10 @@ func main() {
 
 	gost := supervisor.New(*gostPath, logger)
 	rt := agentruntime.New(api, logger, agentruntime.Options{DPIAddress: strings.TrimSpace(*dpiAddr)})
-	syncer := configsync.New(api, *dataDir, rt, logger)
+	probeManager := probe.New(api, logger)
+	runtimeManager := &combinedRuntime{forwarding: rt, probes: probeManager}
+	syncer := configsync.New(api, *dataDir, runtimeManager, logger)
+	startMetricsServer(ctx, strings.TrimSpace(*metricsListen), newAgentCollector(runtimeManager, syncer), logger)
 
 	if err := syncer.SyncOnce(ctx); err != nil {
 		logger.Printf("initial config sync failed: %v", err)
@@ -83,7 +101,7 @@ func main() {
 	} else if shouldExit, err := handleCommand(ctx, api, command, *dataDir, logger); err != nil {
 		logger.Printf("handle command failed: %v", err)
 	} else if shouldExit {
-		shutdown(rt, gost, logger)
+		shutdown(runtimeManager, gost, logger)
 		return
 	}
 
@@ -95,7 +113,7 @@ func main() {
 	for {
 		select {
 		case <-ctx.Done():
-			shutdown(rt, gost, logger)
+			shutdown(runtimeManager, gost, logger)
 			return
 		case <-configTicker.C:
 			if err := syncer.SyncOnce(ctx); err != nil {
@@ -113,7 +131,7 @@ func main() {
 				continue
 			}
 			if shouldExit {
-				shutdown(rt, gost, logger)
+				shutdown(runtimeManager, gost, logger)
 				return
 			}
 		}
@@ -125,6 +143,7 @@ func sendHeartbeat(ctx context.Context, api *client.Client, syncer *configsync.S
 	runtimeStatus := syncer.RuntimeStatus()
 	resp, err := api.Heartbeat(ctx, client.HeartbeatRequest{
 		Version:         version,
+		Capabilities:    capabilities,
 		AppliedRevision: syncer.AppliedRevision(),
 		System: map[string]any{
 			"hostname":          host,
@@ -186,7 +205,39 @@ func handleCommand(ctx context.Context, api *client.Client, command *client.Comm
 	return true, nil
 }
 
-func shutdown(rt *agentruntime.Runtime, gost *supervisor.Supervisor, logger *log.Logger) {
+type combinedRuntime struct {
+	forwarding *agentruntime.Runtime
+	probes     *probe.Manager
+}
+
+func (r *combinedRuntime) Apply(ctx context.Context, cfg client.AgentConfig) error {
+	if err := r.probes.Validate(cfg); err != nil {
+		return err
+	}
+	if err := r.forwarding.Apply(ctx, cfg); err != nil {
+		return err
+	}
+	return r.probes.Apply(cfg)
+}
+
+func (r *combinedRuntime) Running() bool { return r.forwarding.Running() }
+
+func (r *combinedRuntime) Status() map[string]any {
+	status := r.forwarding.Status()
+	status["lineProbes"] = r.probes.Status()
+	return status
+}
+
+func (r *combinedRuntime) Stop(ctx context.Context) error {
+	r.probes.Stop()
+	return r.forwarding.Stop(ctx)
+}
+
+type runtimeController interface {
+	Stop(context.Context) error
+}
+
+func shutdown(rt runtimeController, gost *supervisor.Supervisor, logger *log.Logger) {
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	if err := rt.Stop(shutdownCtx); err != nil {
@@ -210,6 +261,15 @@ func firstEnv(keys ...string) string {
 func firstEnvDefault(def string, keys ...string) string {
 	if value := firstEnv(keys...); value != "" {
 		return value
+	}
+	return def
+}
+
+func firstPresentEnvDefault(def string, keys ...string) string {
+	for _, key := range keys {
+		if value, exists := os.LookupEnv(key); exists {
+			return strings.TrimSpace(value)
+		}
 	}
 	return def
 }
