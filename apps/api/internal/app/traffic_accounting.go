@@ -157,9 +157,11 @@ func (s *Server) accountAgentTrafficTx(tx *gorm.DB, node models.Node, samples []
 		if err := tx.Clauses(clause.OnConflict{
 			Columns: []clause.Column{{Name: "tenant_id"}, {Name: "bucket_started_at"}},
 			DoUpdates: clause.Assignments(map[string]any{
-				"in_bytes":     gorm.Expr("in_bytes + ?", delta.inBytes),
-				"out_bytes":    gorm.Expr("out_bytes + ?", delta.outBytes),
-				"billed_bytes": gorm.Expr("billed_bytes + ?", billed),
+				// Qualify the target row. PostgreSQL exposes both the target and
+				// EXCLUDED rows in DO UPDATE, so bare column names are ambiguous.
+				"in_bytes":     gorm.Expr("tenant_traffic_hourly_buckets.in_bytes + ?", delta.inBytes),
+				"out_bytes":    gorm.Expr("tenant_traffic_hourly_buckets.out_bytes + ?", delta.outBytes),
+				"billed_bytes": gorm.Expr("tenant_traffic_hourly_buckets.billed_bytes + ?", billed),
 				"updated_at":   now,
 			}),
 		}).Create(&bucket).Error; err != nil {

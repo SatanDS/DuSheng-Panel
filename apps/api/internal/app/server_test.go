@@ -1270,7 +1270,7 @@ func TestTenantTrafficQuotaIsIdempotentAndStopsAgentConfig(t *testing.T) {
 	now := time.Now().UTC()
 	nextReset := now.Add(30 * 24 * time.Hour)
 	tenant := models.Tenant{
-		Name: "Game Team", Code: "game-team", Status: "active", TrafficLimitBytes: 10,
+		Name: "Game Team", Code: "game-team", Status: "active", TrafficLimitBytes: 20,
 		ResetIntervalDays: 30, PeriodStartedAt: &now, NextResetAt: &nextReset,
 	}
 	require.NoError(t, s.db.Create(&tenant).Error)
@@ -1300,9 +1300,14 @@ func TestTenantTrafficQuotaIsIdempotentAndStopsAgentConfig(t *testing.T) {
 	rec = jsonRequest(t, router, http.MethodPost, "/api/v1/agent/traffic", body, nodeToken)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	require.Contains(t, rec.Body.String(), "duplicate")
+	rec = jsonRequest(t, router, http.MethodPost, "/api/v1/agent/traffic", map[string]any{
+		"reportId": "tenant-report-2",
+		"samples":  []map[string]any{{"ruleId": rule.ID, "inBytes": 6, "outBytes": 5}},
+	}, nodeToken)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 
 	require.NoError(t, s.db.First(&tenant, tenant.ID).Error)
-	require.Equal(t, int64(11), tenant.UsedBytes)
+	require.Equal(t, int64(22), tenant.UsedBytes)
 	require.True(t, tenant.QuotaBlocked)
 	require.NoError(t, s.db.First(&rule, rule.ID).Error)
 	require.Equal(t, "quota_exhausted", rule.Status)
@@ -1310,7 +1315,7 @@ func TestTenantTrafficQuotaIsIdempotentAndStopsAgentConfig(t *testing.T) {
 	var buckets []models.TenantTrafficHourlyBucket
 	require.NoError(t, s.db.Where("tenant_id = ?", tenant.ID).Find(&buckets).Error)
 	require.Len(t, buckets, 1)
-	require.Equal(t, int64(11), buckets[0].BilledBytes)
+	require.Equal(t, int64(22), buckets[0].BilledBytes)
 
 	rec = jsonRequest(t, router, http.MethodGet, "/api/v1/agent/config", nil, nodeToken)
 	require.Equal(t, http.StatusOK, rec.Code)
