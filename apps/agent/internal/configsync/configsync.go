@@ -338,6 +338,7 @@ type GostNode struct {
 
 type ServiceMeta struct {
 	RuleID           uint   `json:"ruleId"`
+	TenantID         *uint  `json:"tenantId,omitempty"`
 	TunnelID         uint   `json:"tunnelId"`
 	UserID           uint   `json:"userId"`
 	Strategy         string `json:"strategy,omitempty"`
@@ -347,6 +348,7 @@ type ServiceMeta struct {
 type RenderedLimit struct {
 	ID          uint   `json:"id"`
 	Name        string `json:"name"`
+	TenantID    *uint  `json:"tenantId,omitempty"`
 	UserID      *uint  `json:"userId,omitempty"`
 	TunnelID    *uint  `json:"tunnelId,omitempty"`
 	RuleID      *uint  `json:"ruleId,omitempty"`
@@ -460,6 +462,7 @@ func buildGostConfig(cfg client.AgentConfig) GostConfig {
 			}}},
 			Metadata: ServiceMeta{
 				RuleID:           rule.ID,
+				TenantID:         rule.TenantID,
 				TunnelID:         rule.TunnelID,
 				UserID:           rule.UserID,
 				Strategy:         rule.Strategy,
@@ -507,6 +510,7 @@ func buildGostConfig(cfg client.AgentConfig) GostConfig {
 		limits = append(limits, RenderedLimit{
 			ID:          limit.ID,
 			Name:        limit.Name,
+			TenantID:    limit.TenantID,
 			UserID:      limit.UserID,
 			TunnelID:    limit.TunnelID,
 			RuleID:      limit.RuleID,

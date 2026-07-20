@@ -17,7 +17,7 @@ docker compose --env-file .env -f deploy/docker-compose.yml ps
 
 ```powershell
 cd "D:\DuSheng Panel"
-powershell -ExecutionPolicy Bypass -File .\deploy\scripts\publish-agent-release.ps1 -Version v0.1.3
+powershell -ExecutionPolicy Bypass -File .\deploy\scripts\publish-agent-release.ps1 -Version vX.Y.Z
 ```
 
 发布前先确认 GitHub Release 版本号不存在；如果远端已有同名版本，请改用新的版本号，避免覆盖用户正在使用的安装资产。
@@ -35,7 +35,17 @@ curl -fsS http://127.0.0.1:19091/-/healthy
 
 API `/metrics` 仅在 Compose 内网直接访问，Caddy 默认不会公开转发。Agent 默认指标地址为 `127.0.0.1:19090`，如需远程采集，应通过 WireGuard、管理 VLAN 或 SSH tunnel，并配置来源访问控制，不能直接监听公网地址。
 
-重点告警建议：节点离线超过 90 秒、`config_status` 为 `rejected/rolled_back/lease_expired`、线路探测连续失败、listener 错误增长、DPI 不可用、traffic buffer 丢弃样本。业务规则只应出现在入口设备组 Agent；出口节点出现业务 listener 应视为配置异常。
+重点告警建议：节点离线超过 90 秒、`config_status` 为 `rejected/rolled_back/lease_expired`、线路探测连续失败、listener 错误增长、DPI 不可用、traffic buffer 丢弃样本、`dusheng_panel_tenant_quota_blocked` 增长。业务规则只应出现在入口设备组 Agent；出口节点出现业务 listener 应视为配置异常。
+
+租户监控使用低基数聚合指标：`dusheng_panel_tenants{status}`、`dusheng_panel_tenant_accounted_bytes`、`dusheng_panel_tenant_quota_blocked` 和 `dusheng_panel_tenant_tunnel_grants`。不要把 tenant ID、user ID 或 rule ID 添加为 Prometheus label；单租户明细通过面板流量接口和小时桶查询。
+
+## 租户与线路授权变更
+
+暂停、禁用、恢复租户或修改租户线路授权后，API 会提升关联入口/出口节点的 desired revision，Agent 下一轮同步会停止或恢复对应 listener。配置租约仍是离线节点的最终保护：节点长时间无法同步时，旧 listener 会在租约过期后关闭。
+
+缩小租户授权端口范围或规则数上限前，先在面板查看现有规则。API 会拒绝排除现有监听端口、低于现有规则数或移动仍被规则引用的授权，避免已运行规则在配置层变成未授权状态。批量导入应始终先调用预检；正式提交是原子事务，失败时不会保留半批规则或端口租约。
+
+租户流量和用户流量是两层独立配额。重置租户周期不会绕过仍耗尽的用户配额，重置用户流量也不会绕过仍耗尽的租户配额。执行人工重置前应在审计日志记录原因，并确认计费周期和客户授权。
 
 ## 数据库迁移
 

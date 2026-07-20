@@ -934,6 +934,49 @@ func TestTCPUDPSharedLimitTracker(t *testing.T) {
 	}
 }
 
+func TestTenantLimitTrackerIsSharedAcrossRules(t *testing.T) {
+	reporter := &mockReporter{}
+	rt := New(reporter, nil, Options{ListenHost: "127.0.0.1", UDPIdleTimeout: 60 * time.Millisecond})
+	defer rt.Stop(context.Background())
+
+	_, upstreamPort, stopUpstream := startUDPEchoServer(t)
+	defer stopUpstream()
+	firstPort := freeUDPPort(t)
+	secondPort := freeUDPPort(t)
+	for secondPort == firstPort {
+		secondPort = freeUDPPort(t)
+	}
+	tenantID := uint(77)
+	cfg := testConfig(firstPort, upstreamPort)
+	cfg.ForwardRules[0].Protocol = "udp"
+	cfg.ForwardRules[0].TenantID = &tenantID
+	secondRule := cfg.ForwardRules[0]
+	secondRule.ID = 2
+	secondRule.Name = "tenant-rule-2"
+	secondRule.ListenPort = secondPort
+	cfg.ForwardRules = append(cfg.ForwardRules, secondRule)
+	cfg.SpeedLimits = []client.SpeedLimit{{TenantID: &tenantID, MaxConns: 1}}
+	if err := rt.Apply(context.Background(), cfg); err != nil {
+		t.Fatalf("Apply() error = %v", err)
+	}
+
+	first, err := net.Dial("udp", net.JoinHostPort("127.0.0.1", itoa(firstPort)))
+	if err != nil {
+		t.Fatalf("Dial(first) error = %v", err)
+	}
+	defer first.Close()
+	if got, err := udpRoundTripConn(first, []byte("first"), time.Second); err != nil || string(got) != "first" {
+		t.Fatalf("first tenant rule got %q err %v", got, err)
+	}
+	if _, err := udpRoundTrip(secondPort, []byte("blocked"), 150*time.Millisecond); err == nil {
+		t.Fatal("second tenant rule bypassed shared maxConns")
+	}
+	waitFor(t, func() bool { return rt.Status()["activeUDPSessions"] == int64(0) })
+	if got, err := udpRoundTrip(secondPort, []byte("after"), time.Second); err != nil || string(got) != "after" {
+		t.Fatalf("second tenant rule after release got %q err %v", got, err)
+	}
+}
+
 func TestRuleListenerConnectionAndIPLimits(t *testing.T) {
 	limit := effectiveSpeedLimit{MaxConns: 1, MaxIPs: 1}
 	listener := &ruleListener{

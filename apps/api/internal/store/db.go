@@ -63,6 +63,10 @@ func dialector(databaseURL string) (gorm.Dialector, error) {
 func runMigrations(db *gorm.DB) error {
 	if err := applyMigration(db, "2026071201_initial_commercial_schema", func(tx *gorm.DB) error {
 		return tx.AutoMigrate(
+			&models.Tenant{},
+			&models.TenantTunnelGrant{},
+			&models.TenantTrafficHourlyBucket{},
+			&models.PortLease{},
 			&models.User{},
 			&models.DeviceGroup{},
 			&models.LineProvider{},
@@ -86,12 +90,82 @@ func runMigrations(db *gorm.DB) error {
 	}); err != nil {
 		return err
 	}
-	return applyMigration(db, "2026071001_forward_rule_unique_port", func(tx *gorm.DB) error {
-		if tx.Migrator().HasIndex(&models.ForwardRule{}, "idx_forward_rules_tunnel_listen") {
-			return nil
+	if err := applyMigration(db, "2026071001_forward_rule_unique_port", func(tx *gorm.DB) error {
+		return nil
+	}); err != nil {
+		return err
+	}
+	return applyMigration(db, "2026072001_tenants_and_port_leases", func(tx *gorm.DB) error {
+		if err := tx.AutoMigrate(
+			&models.Tenant{},
+			&models.TenantTunnelGrant{},
+			&models.TenantTrafficHourlyBucket{},
+			&models.PortLease{},
+			&models.User{},
+			&models.ForwardRule{},
+			&models.SpeedLimit{},
+			&models.TrafficSample{},
+		); err != nil {
+			return err
 		}
-		return tx.Migrator().CreateIndex(&models.ForwardRule{}, "idx_forward_rules_tunnel_listen")
+		if tx.Migrator().HasIndex(&models.ForwardRule{}, "idx_forward_rules_tunnel_listen") {
+			if err := tx.Migrator().DropIndex(&models.ForwardRule{}, "idx_forward_rules_tunnel_listen"); err != nil {
+				return err
+			}
+		}
+		if err := tx.Exec(`UPDATE forward_rules SET tenant_id = (SELECT tenant_id FROM users WHERE users.id = forward_rules.user_id) WHERE tenant_id IS NULL`).Error; err != nil {
+			return err
+		}
+		if err := tx.Exec(`UPDATE traffic_samples SET tenant_id = (SELECT tenant_id FROM users WHERE users.id = traffic_samples.user_id) WHERE tenant_id IS NULL`).Error; err != nil {
+			return err
+		}
+		return backfillPortLeases(tx)
 	})
+}
+
+func backfillPortLeases(tx *gorm.DB) error {
+	type leaseSource struct {
+		RuleID       uint
+		EntryGroupID uint
+		BindIPs      string
+		Protocol     string
+		ListenPort   int
+	}
+	var sources []leaseSource
+	if err := tx.Table("forward_rules").
+		Select("forward_rules.id AS rule_id, tunnels.entry_group_id, device_groups.bind_ips, forward_rules.protocol, forward_rules.listen_port").
+		Joins("JOIN tunnels ON tunnels.id = forward_rules.tunnel_id").
+		Joins("JOIN device_groups ON device_groups.id = tunnels.entry_group_id").
+		Where("forward_rules.status NOT IN ?", []string{"deleted", "disabled"}).
+		Scan(&sources).Error; err != nil {
+		return err
+	}
+	for _, source := range sources {
+		bindIP := "*"
+		if parts := strings.Split(source.BindIPs, ","); len(parts) > 0 && strings.TrimSpace(parts[0]) != "" {
+			bindIP = strings.TrimSpace(parts[0])
+		}
+		transports := []string{"tcp"}
+		switch strings.ToLower(strings.TrimSpace(source.Protocol)) {
+		case "udp":
+			transports = []string{"udp"}
+		case "tcp_udp":
+			transports = []string{"tcp", "udp"}
+		}
+		for _, transport := range transports {
+			lease := models.PortLease{
+				EntryGroupID: source.EntryGroupID,
+				BindIP:       bindIP,
+				Transport:    transport,
+				ListenPort:   source.ListenPort,
+				RuleID:       source.RuleID,
+			}
+			if err := tx.Create(&lease).Error; err != nil {
+				return fmt.Errorf("backfill port lease for rule %d: %w", source.RuleID, err)
+			}
+		}
+	}
+	return nil
 }
 
 func applyMigration(db *gorm.DB, version string, fn func(*gorm.DB) error) error {

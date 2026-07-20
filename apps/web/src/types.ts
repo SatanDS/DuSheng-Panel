@@ -13,6 +13,7 @@ export interface Page<T> {
 
 export interface User extends Entity {
   id: number;
+	tenantId: number | null;
   username: string;
   displayName: string;
   role: string;
@@ -25,6 +26,7 @@ export interface User extends Entity {
 
 export interface ForwardRule extends Entity {
   id: number;
+	tenantId: number | null;
   userId: number;
   tunnelId: number;
   name: string;
@@ -40,6 +42,38 @@ export interface ForwardRule extends Entity {
   revision: number;
   lastSyncError: string;
   violationCount: number;
+}
+
+export interface Tenant extends Entity {
+	id: number;
+	name: string;
+	code: string;
+	status: string;
+	trafficLimitBytes: number;
+	usedBytes: number;
+	forwardLimit: number;
+	userLimit: number;
+	resetIntervalDays: number;
+	periodStartedAt: string | null;
+	nextResetAt: string | null;
+	quotaBlocked: boolean;
+	quotaBlockedAt: string | null;
+	expiresAt: string | null;
+	notes: string;
+}
+
+export interface TenantTrafficHourlyBucket extends Entity {
+	id: number;
+	tenantId: number;
+	bucketStartedAt: string;
+	inBytes: number;
+	outBytes: number;
+	billedBytes: number;
+}
+
+export interface TenantTrafficPayload {
+	tenant: Tenant;
+	buckets: Page<TenantTrafficHourlyBucket>;
 }
 
 export interface ProtocolViolation extends Entity {

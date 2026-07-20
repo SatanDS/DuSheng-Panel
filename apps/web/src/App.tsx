@@ -1,8 +1,9 @@
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { FormEvent, ReactNode } from "react";
 import {
   Activity,
   AlertTriangle,
+  Building2,
   Boxes,
   Download,
   Gauge,
@@ -35,11 +36,15 @@ import type {
   ProtocolViolation,
   AuditLog,
 	AgentEvent,
-  Session
+	Session,
+	TenantTrafficPayload
 } from "./types";
 
 type PageKey =
   | "dashboard"
+	| "tenant-overview"
+	| "tenants"
+	| "tenant-tunnel-grants"
   | "forward-rules"
   | "nodes"
 	| "line-assets"
@@ -79,7 +84,7 @@ interface ColumnConfig {
   className?: string;
 }
 
-type CRUDPageKey = Exclude<PageKey, "dashboard" | "line-assets" | "violations" | "node-events" | "audit-logs">;
+type CRUDPageKey = Exclude<PageKey, "dashboard" | "tenant-overview" | "line-assets" | "violations" | "node-events" | "audit-logs">;
 type LineAssetKey = "line-providers" | "line-sites" | "line-circuits" | "line-endpoints" | "line-probes";
 
 interface ResourceConfig {
@@ -96,6 +101,7 @@ interface ResourceConfig {
 
 type FormDraft = Record<string, string | boolean>;
 type ReferenceKey =
+	| "tenants"
 	| "users"
 	| "tunnels"
 	| "protocol-policies"
@@ -192,6 +198,7 @@ const valueLabels: Record<string, string> = {
   http_only: "仅允许 HTTP",
   block_proxy_like: "阻断代理特征",
   admin: "管理员",
+	tenant_admin: "租户管理员",
   user: "普通用户",
   create: "创建",
   update: "更新",
@@ -213,19 +220,22 @@ const valueLabels: Record<string, string> = {
   install_tokens: "安装令牌"
 };
 
-const navItems: { key: PageKey; label: string; icon: LucideIcon }[] = [
+const navItems: { key: PageKey; label: string; icon: LucideIcon; roles?: string[] }[] = [
   { key: "dashboard", label: "总览", icon: Gauge },
   { key: "forward-rules", label: "转发规则", icon: Route },
-  { key: "nodes", label: "节点", icon: Server },
-	{ key: "line-assets", label: "线路资产", icon: Network },
-	{ key: "node-events", label: "节点事件", icon: Activity },
-  { key: "device-groups", label: "设备组", icon: Boxes },
-  { key: "tunnels", label: "线路", icon: Network },
-  { key: "protocol-policies", label: "协议策略", icon: ShieldCheck },
-  { key: "speed-limits", label: "限速策略", icon: SlidersHorizontal },
-  { key: "violations", label: "违规事件", icon: AlertTriangle },
-  { key: "audit-logs", label: "审计日志", icon: ScrollText },
-  { key: "users", label: "用户", icon: Users }
+	{ key: "tenant-overview", label: "租户用量", icon: Building2, roles: ["tenant_admin"] },
+	{ key: "tenants", label: "租户", icon: Building2, roles: ["admin"] },
+	{ key: "tenant-tunnel-grants", label: "租户线路授权", icon: Route, roles: ["admin"] },
+  { key: "nodes", label: "节点", icon: Server, roles: ["admin"] },
+	{ key: "line-assets", label: "线路资产", icon: Network, roles: ["admin"] },
+	{ key: "node-events", label: "节点事件", icon: Activity, roles: ["admin"] },
+  { key: "device-groups", label: "设备组", icon: Boxes, roles: ["admin"] },
+  { key: "tunnels", label: "线路", icon: Network, roles: ["admin"] },
+  { key: "protocol-policies", label: "协议策略", icon: ShieldCheck, roles: ["admin"] },
+  { key: "speed-limits", label: "限速策略", icon: SlidersHorizontal, roles: ["admin"] },
+  { key: "violations", label: "违规事件", icon: AlertTriangle, roles: ["admin"] },
+  { key: "audit-logs", label: "审计日志", icon: ScrollText, roles: ["admin"] },
+  { key: "users", label: "用户", icon: Users, roles: ["admin", "tenant_admin"] }
 ];
 
 const protocolOptions = [
@@ -448,8 +458,7 @@ const resourceConfigs: Record<CRUDPageKey, ResourceConfig> = {
         options: [
           { value: "active", label: "启用" },
           { value: "paused", label: "暂停" },
-          { value: "disabled", label: "禁用" },
-          { value: "quota_exhausted", label: "流量用尽" }
+          { value: "disabled", label: "禁用" }
         ]
       },
       {
@@ -700,6 +709,7 @@ const resourceConfigs: Record<CRUDPageKey, ResourceConfig> = {
     createLabel: "新建限速",
     fields: [
       { key: "name", label: "名称", required: true },
+		{ key: "tenantId", label: "租户", type: "number", optional: true, min: 1, reference: "tenants" },
       { key: "userId", label: "用户", type: "number", optional: true, min: 1, reference: "users" },
       { key: "tunnelId", label: "线路", type: "number", optional: true, min: 1, reference: "tunnels" },
       { key: "ruleId", label: "转发规则", type: "number", optional: true, min: 1, reference: "forward-rules" },
@@ -711,6 +721,7 @@ const resourceConfigs: Record<CRUDPageKey, ResourceConfig> = {
     columns: [
       { key: "id", label: "ID", className: "mono" },
       { key: "name", label: "名称" },
+		{ key: "tenantId", label: "租户" },
       { key: "userId", label: "用户" },
       { key: "tunnelId", label: "线路" },
       { key: "ruleId", label: "规则" },
@@ -720,6 +731,59 @@ const resourceConfigs: Record<CRUDPageKey, ResourceConfig> = {
       { key: "maxIps", label: "IP" }
     ]
   },
+	tenants: {
+		key: "tenants",
+		title: "租户",
+		eyebrow: "组织、周期配额与运营状态",
+		endpoint: "/tenants",
+		createLabel: "新建租户",
+		fields: [
+			{ key: "name", label: "名称", required: true },
+			{ key: "code", label: "租户代码", required: true, placeholder: "例如 game-team-a" },
+			{ key: "status", label: "状态", type: "select", options: [
+				{ value: "active", label: "启用" }, { value: "suspended", label: "暂停" }, { value: "disabled", label: "禁用" }
+			] },
+			{ key: "trafficLimitBytes", label: "周期流量上限 Bytes", type: "number", min: 0 },
+			{ key: "forwardLimit", label: "规则数量上限", type: "number", min: 0 },
+			{ key: "userLimit", label: "用户数量上限", type: "number", min: 0 },
+			{ key: "resetIntervalDays", label: "重置周期（天）", type: "number", min: 0, max: 3660 },
+			{ key: "expiresAt", label: "租户到期时间", type: "datetime-local", optional: true },
+			{ key: "notes", label: "运营备注", type: "textarea", rows: 4, fullWidth: true }
+		],
+		columns: [
+			{ key: "id", label: "ID", className: "mono" },
+			{ key: "name", label: "名称" },
+			{ key: "code", label: "代码", className: "mono" },
+			{ key: "status", label: "状态", render: (row) => <StatusPill value={text(row.status)} /> },
+			{ key: "usedBytes", label: "已用", render: (row) => formatBytes(row.usedBytes) },
+			{ key: "trafficLimitBytes", label: "周期上限", render: (row) => formatBytes(row.trafficLimitBytes) },
+			{ key: "quotaBlocked", label: "配额", render: (row) => <StatusPill value={row.quotaBlocked ? "quota_exhausted" : "active"} /> },
+			{ key: "nextResetAt", label: "下次重置", render: (row) => formatDate(row.nextResetAt) }
+		]
+	},
+	"tenant-tunnel-grants": {
+		key: "tenant-tunnel-grants",
+		title: "租户线路授权",
+		eyebrow: "可用线路、端口段与规则额度",
+		endpoint: "/tenant-tunnel-grants",
+		createLabel: "新增授权",
+		fields: [
+			{ key: "tenantId", label: "租户", type: "number", required: true, min: 1, reference: "tenants" },
+			{ key: "tunnelId", label: "线路", type: "number", required: true, min: 1, reference: "tunnels" },
+			{ key: "forwardLimit", label: "本线路规则上限", type: "number", min: 0 },
+			{ key: "portStart", label: "授权起始端口", type: "number", min: 0, max: 65535 },
+			{ key: "portEnd", label: "授权结束端口", type: "number", min: 0, max: 65535 }
+		],
+		columns: [
+			{ key: "id", label: "ID", className: "mono" },
+			{ key: "tenantId", label: "租户" },
+			{ key: "tunnelId", label: "线路" },
+			{ key: "forwardLimit", label: "规则上限" },
+			{ key: "portStart", label: "起始端口" },
+			{ key: "portEnd", label: "结束端口" },
+			{ key: "updatedAt", label: "更新于", render: (row) => formatDate(row.updatedAt) }
+		]
+	},
   users: {
     key: "users",
     title: "用户",
@@ -727,6 +791,7 @@ const resourceConfigs: Record<CRUDPageKey, ResourceConfig> = {
     endpoint: "/users",
     createLabel: "新建用户",
     fields: [
+		{ key: "tenantId", label: "所属租户", type: "number", optional: true, min: 1, reference: "tenants" },
       { key: "username", label: "用户名", required: true },
       { key: "displayName", label: "显示名称" },
       { key: "password", label: "密码", type: "password", requiredOnCreate: true, placeholder: "编辑时留空则不修改" },
@@ -736,6 +801,7 @@ const resourceConfigs: Record<CRUDPageKey, ResourceConfig> = {
         type: "select",
         options: [
           { value: "admin", label: "管理员" },
+		  { value: "tenant_admin", label: "租户管理员" },
           { value: "user", label: "普通用户" }
         ]
       },
@@ -756,6 +822,7 @@ const resourceConfigs: Record<CRUDPageKey, ResourceConfig> = {
     columns: [
       { key: "id", label: "ID", className: "mono" },
       { key: "username", label: "用户名" },
+		{ key: "tenantId", label: "租户" },
       { key: "displayName", label: "显示名" },
       { key: "role", label: "角色", render: (row) => <Badge>{displayValue(row.role)}</Badge> },
       { key: "status", label: "状态", render: (row) => <StatusPill value={text(row.status)} /> },
@@ -790,6 +857,7 @@ export default function App() {
   if (!session) {
     return <LoginPage onLogin={(nextSession) => setSession(nextSession)} />;
   }
+	const visibleNavItems = navItems.filter((item) => !item.roles || item.roles.includes(session.user.role));
 
   return (
     <div className="app-shell">
@@ -803,7 +871,7 @@ export default function App() {
         </div>
 
         <nav className="nav-list" aria-label="主导航">
-          {navItems.map((item) => {
+          {visibleNavItems.map((item) => {
             const Icon = item.icon;
             return (
               <button
@@ -822,7 +890,7 @@ export default function App() {
       <main className="main">
         <header className="topbar">
           <div>
-            <p>{navItems.find((item) => item.key === activePage)?.label}</p>
+            <p>{visibleNavItems.find((item) => item.key === activePage)?.label}</p>
             <h1>{pageTitle(activePage)}</h1>
           </div>
           <div className="topbar-actions">
@@ -839,7 +907,7 @@ export default function App() {
           </div>
         </header>
 
-        <section className="content">{renderPage(activePage, refreshSeed)}</section>
+        <section className="content">{renderPage(activePage, refreshSeed, session.user.role)}</section>
       </main>
     </div>
   );
@@ -903,10 +971,14 @@ function LoginPage({ onLogin }: { onLogin: (session: Session) => void }) {
   );
 }
 
-function renderPage(activePage: PageKey, refreshSeed: number) {
+function renderPage(activePage: PageKey, refreshSeed: number, role: string) {
   if (activePage === "dashboard") {
     return <Dashboard refreshSeed={refreshSeed} />;
   }
+
+	if (activePage === "tenant-overview") {
+		return <TenantOverviewPage refreshSeed={refreshSeed} />;
+	}
 
   if (activePage === "violations") {
     return <ViolationsPage refreshSeed={refreshSeed} />;
@@ -924,11 +996,11 @@ function renderPage(activePage: PageKey, refreshSeed: number) {
     return <AuditLogsPage refreshSeed={refreshSeed} />;
   }
 
-  if (activePage === "forward-rules") {
+	if (activePage === "forward-rules") {
     return (
       <>
-        <ResourcePage config={resourceConfigs["forward-rules"]} refreshSeed={refreshSeed} />
-        <ForwardRuleTools />
+		<ResourcePage config={resourceConfigs["forward-rules"]} refreshSeed={refreshSeed} role={role} />
+        <ForwardRuleTools role={role} />
       </>
     );
   }
@@ -936,13 +1008,13 @@ function renderPage(activePage: PageKey, refreshSeed: number) {
   if (activePage === "nodes") {
     return (
       <>
-        <ResourcePage config={resourceConfigs.nodes} refreshSeed={refreshSeed} />
+		<ResourcePage config={resourceConfigs.nodes} refreshSeed={refreshSeed} role={role} />
         <InstallTokensPanel refreshSeed={refreshSeed} />
       </>
     );
   }
 
-  return <ResourcePage config={resourceConfigs[activePage]} refreshSeed={refreshSeed} />;
+	return <ResourcePage config={resourceConfigs[activePage]} refreshSeed={refreshSeed} role={role} />;
 }
 
 function LineAssetsPage({ refreshSeed }: { refreshSeed: number }) {
@@ -960,6 +1032,126 @@ function LineAssetsPage({ refreshSeed }: { refreshSeed: number }) {
 		</div>
 		<ResourcePage config={lineAssetConfigs[activeTab]} refreshSeed={refreshSeed} />
 	</div>;
+}
+
+function TenantOverviewPage({ refreshSeed }: { refreshSeed: number }) {
+	const [payload, setPayload] = useState<TenantTrafficPayload | null>(null);
+	const [loading, setLoading] = useState(true);
+	const [error, setError] = useState<string | null>(null);
+
+	const load = useCallback(async () => {
+		setLoading(true);
+		setError(null);
+		try {
+			setPayload(await api.get<TenantTrafficPayload>("/tenant/traffic?page=1&pageSize=168"));
+		} catch (err) {
+			setError(err instanceof Error ? err.message : "租户用量请求失败");
+		} finally {
+			setLoading(false);
+		}
+	}, []);
+
+	useEffect(() => {
+		void load();
+	}, [load, refreshSeed]);
+
+	return (
+		<div className="stack">
+			<section className="section-heading">
+				<div><p>当前租户</p><h2>{payload?.tenant.name ?? "租户用量"}</h2></div>
+				<button className="ghost-action" onClick={() => void load()} disabled={loading}><RefreshCw size={15} />刷新</button>
+			</section>
+			{error ? <div className="notice error">{error}</div> : null}
+			{loading && !payload ? <StateBlock tone="loading" title="正在加载租户用量" /> : null}
+			{payload ? <TenantTrafficView payload={payload} /> : null}
+		</div>
+	);
+}
+
+function TenantTrafficPanel({ tenantId, refreshSeed }: { tenantId: number; refreshSeed: number }) {
+	const [payload, setPayload] = useState<TenantTrafficPayload | null>(null);
+	const [loading, setLoading] = useState(true);
+	const [resetting, setResetting] = useState(false);
+	const [error, setError] = useState<string | null>(null);
+	const [reloadSeed, setReloadSeed] = useState(0);
+
+	const load = useCallback(async () => {
+		setLoading(true);
+		setError(null);
+		try {
+			setPayload(await api.get<TenantTrafficPayload>(`/tenants/${tenantId}/traffic?page=1&pageSize=168`));
+		} catch (err) {
+			setError(err instanceof Error ? err.message : "租户流量趋势请求失败");
+		} finally {
+			setLoading(false);
+		}
+	}, [tenantId]);
+
+	useEffect(() => {
+		void load();
+	}, [load, refreshSeed, reloadSeed]);
+
+	async function resetTraffic() {
+		if (!window.confirm("确认清零该租户当前周期用量并恢复因租户配额停用的规则？")) {
+			return;
+		}
+		setResetting(true);
+		setError(null);
+		try {
+			await api.post(`/tenants/${tenantId}/traffic/reset`, {});
+			setReloadSeed((seed) => seed + 1);
+		} catch (err) {
+			setError(err instanceof Error ? err.message : "重置租户流量失败");
+		} finally {
+			setResetting(false);
+		}
+	}
+
+	return (
+		<section className="panel tenant-traffic-panel">
+			<PanelHeader title="租户流量与周期" icon={Activity} meta={payload ? formatDate(payload.tenant.nextResetAt) : undefined} />
+			{error ? <div className="notice error">{error}</div> : null}
+			{loading && !payload ? <StateBlock tone="loading" title="正在加载租户流量" /> : null}
+			{payload ? <TenantTrafficView payload={payload} /> : null}
+			<div className="tenant-traffic-actions">
+				<button className="ghost-action danger" type="button" disabled={resetting} onClick={() => void resetTraffic()}>
+					<RefreshCw size={15} />{resetting ? "重置中" : "重置周期用量"}
+				</button>
+			</div>
+		</section>
+	);
+}
+
+function TenantTrafficView({ payload }: { payload: TenantTrafficPayload }) {
+	const tenant = payload.tenant;
+	const limit = Number(tenant.trafficLimitBytes ?? 0);
+	const used = Number(tenant.usedBytes ?? 0);
+	const remaining = limit > 0 ? Math.max(0, limit - used) : 0;
+	const buckets = payload.buckets.items.slice().reverse();
+	const peak = Math.max(1, ...buckets.map((bucket) => Number(bucket.billedBytes ?? 0)));
+	return (
+		<div className="tenant-traffic-content">
+			<div className="metric-grid compact">
+				<div className="metric"><span>当前周期已用</span><strong>{formatBytes(used)}</strong></div>
+				<div className="metric"><span>周期上限</span><strong>{limit > 0 ? formatBytes(limit) : "不限"}</strong></div>
+				<div className="metric"><span>剩余额度</span><strong>{limit > 0 ? formatBytes(remaining) : "不限"}</strong></div>
+				<div className="metric"><span>配额状态</span><strong><StatusPill value={tenant.quotaBlocked ? "quota_exhausted" : tenant.status} /></strong></div>
+			</div>
+			<div className="traffic-bars" aria-label="租户小时流量趋势">
+				{buckets.slice(-48).map((bucket) => (
+					<div key={bucket.id ?? bucket.bucketStartedAt} className="traffic-bar-column" title={`${formatDate(bucket.bucketStartedAt)} ${formatBytes(bucket.billedBytes)}`}>
+						<div className="traffic-bar" style={{ height: `${Math.max(3, Number(bucket.billedBytes ?? 0) / peak * 100)}%` }} />
+					</div>
+				))}
+			</div>
+			<DataTable rows={payload.buckets.items.slice(0, 24)} columns={[
+				{ key: "bucketStartedAt", label: "小时", render: (row) => formatDate(row.bucketStartedAt) },
+				{ key: "inBytes", label: "入站", render: (row) => formatBytes(row.inBytes) },
+				{ key: "outBytes", label: "出站", render: (row) => formatBytes(row.outBytes) },
+				{ key: "billedBytes", label: "计费流量", render: (row) => formatBytes(row.billedBytes) }
+			]} />
+		</div>
+	);
 }
 
 function Dashboard({ refreshSeed }: { refreshSeed: number }) {
@@ -1058,9 +1250,22 @@ function Dashboard({ refreshSeed }: { refreshSeed: number }) {
   );
 }
 
-function ResourcePage({ config, refreshSeed }: { config: ResourceConfig; refreshSeed: number }) {
+function ResourcePage({ config, refreshSeed, role }: { config: ResourceConfig; refreshSeed: number; role?: string }) {
+	const fields = useMemo(() => {
+		let visible = config.fields;
+		if (config.key === "users" && role === "tenant_admin") {
+			visible = visible.filter((field) => field.key !== "tenantId" && field.key !== "role");
+		}
+		if (config.key === "forward-rules" && role !== "admin") {
+			visible = visible.filter((field) => field.key !== "protocolPolicyId");
+			if (role === "user") {
+				visible = visible.filter((field) => field.key !== "userId");
+			}
+		}
+		return visible;
+	}, [config.fields, config.key, role]);
   const [rows, setRows] = useState<Entity[]>([]);
-  const [draft, setDraft] = useState<FormDraft>(() => emptyDraft(config.fields));
+	const [draft, setDraft] = useState<FormDraft>(() => emptyDraft(fields));
   const [editingId, setEditingId] = useState<number | null>(null);
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
@@ -1072,7 +1277,7 @@ function ResourcePage({ config, refreshSeed }: { config: ResourceConfig; refresh
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
   const [references, setReferences] = useState<Record<string, { value: string; label: string }[]>>({});
-  const hasStatusFilter = config.fields.some((field) => field.key === "status");
+	const hasStatusFilter = fields.some((field) => field.key === "status");
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -1094,13 +1299,13 @@ function ResourcePage({ config, refreshSeed }: { config: ResourceConfig; refresh
   }, [config.endpoint, config.title, page, query, statusFilter]);
 
   useEffect(() => {
-    setDraft(emptyDraft(config.fields));
+	setDraft(emptyDraft(fields));
     setEditingId(null);
     setNotice(null);
     setQuery("");
     setStatusFilter("");
     setPage(1);
-  }, [config.key, config.fields]);
+	}, [config.key, fields]);
 
   useEffect(() => {
     void load();
@@ -1108,7 +1313,7 @@ function ResourcePage({ config, refreshSeed }: { config: ResourceConfig; refresh
 
   useEffect(() => {
     let alive = true;
-    const keys = Array.from(new Set(config.fields.map((field) => field.reference).filter(Boolean))) as ReferenceKey[];
+	const keys = Array.from(new Set(fields.map((field) => field.reference).filter(Boolean))) as ReferenceKey[];
 
     async function loadReferences() {
       const next: Record<string, { value: string; label: string }[]> = {};
@@ -1134,7 +1339,7 @@ function ResourcePage({ config, refreshSeed }: { config: ResourceConfig; refresh
     return () => {
       alive = false;
     };
-  }, [config.fields]);
+	}, [fields]);
 
   const pageCount = Math.max(1, Math.ceil(total / pageSize));
   const currentPage = Math.min(page, pageCount);
@@ -1152,7 +1357,7 @@ function ResourcePage({ config, refreshSeed }: { config: ResourceConfig; refresh
     setNotice(null);
 
     try {
-      const payload = payloadFromDraft(config.fields, draft);
+	  const payload = payloadFromDraft(fields, draft);
       if (editingId === null) {
         await api.post<Entity>(config.endpoint, payload);
         setNotice(`${config.title}已创建`);
@@ -1214,13 +1419,13 @@ function ResourcePage({ config, refreshSeed }: { config: ResourceConfig; refresh
     }
 
     setEditingId(row.id);
-    setDraft(draftFromRow(config.fields, row));
+	setDraft(draftFromRow(fields, row));
     setNotice(null);
   }
 
   function resetDraft() {
     setEditingId(null);
-    setDraft(emptyDraft(config.fields));
+	setDraft(emptyDraft(fields));
   }
 
   return (
@@ -1256,7 +1461,7 @@ function ResourcePage({ config, refreshSeed }: { config: ResourceConfig; refresh
             }}
           >
             <option value="">全部状态</option>
-            {config.fields
+			{fields
               .find((field) => field.key === "status")
               ?.options?.map((option) => (
                 <option key={option.value} value={option.value}>
@@ -1306,7 +1511,7 @@ function ResourcePage({ config, refreshSeed }: { config: ResourceConfig; refresh
             meta={config.disableCreate && editingId === null ? "请选择一条记录" : undefined}
           />
           <form className="resource-form" onSubmit={submit}>
-            {config.fields.map((field) => (
+			{fields.map((field) => (
               <FieldControl
                 key={field.key}
                 field={field}
@@ -1335,6 +1540,7 @@ function ResourcePage({ config, refreshSeed }: { config: ResourceConfig; refresh
           </form>
         </section>
       </div>
+		{config.key === "tenants" && editingId !== null ? <TenantTrafficPanel tenantId={editingId} refreshSeed={reloadSeed + refreshSeed} /> : null}
     </div>
   );
 }
@@ -1897,7 +2103,7 @@ function AuditLogsPage({ refreshSeed }: { refreshSeed: number }) {
   );
 }
 
-function ForwardRuleTools() {
+function ForwardRuleTools({ role }: { role?: string }) {
   const [notice, setNotice] = useState<string | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -1951,9 +2157,17 @@ function ForwardRuleTools() {
       if (rules.length === 0) {
         throw new Error("导入文件中没有找到规则");
       }
-      for (const rule of rules) {
-        await api.post<Entity>("/forward-rules", importRulePayload(rule));
-      }
+		  if (rules.length > 100) {
+			throw new Error("单次最多导入 100 条规则，请拆分文件后重试");
+		  }
+		  const payloads = rules.map((rule) => importRulePayload(rule, role === "admin", role !== "user"));
+		  const preview = await api.post<{ items: ForwardRule[]; count: number }>("/forward-rules/batch/preview", { rules: payloads });
+		  const ports = preview.items.slice(0, 8).map((rule) => `${rule.name}:${rule.listenPort}`).join("、");
+		  if (!window.confirm(`预检通过 ${preview.count} 条规则${ports ? `，端口示例：${ports}` : ""}。确认原子提交？`)) {
+			setNotice("已取消导入");
+			return;
+		  }
+		  await api.post("/forward-rules/batch", { rules: payloads });
       setNotice(`已导入 ${rules.length} 条规则`);
     } catch (err) {
       setError(err instanceof Error ? err.message : "导入失败");
@@ -2361,6 +2575,10 @@ function pageTitle(activePage: PageKey) {
     return "协议告警";
   }
 
+	if (activePage === "tenant-overview") {
+		return "租户流量与配额";
+	}
+
   if (activePage === "node-events") {
     return "节点事件";
   }
@@ -2386,18 +2604,22 @@ function referenceLabel(key: ReferenceKey, row: Entity) {
   return [id, text(primary)].filter((part) => part && part !== "-").join(" ");
 }
 
-function importRulePayload(row: Entity) {
+function importRulePayload(row: Entity, includePolicy = true, includeUser = true) {
   const keys = [
-    "userId",
     "tunnelId",
     "name",
     "protocol",
     "listenPort",
     "remoteHost",
     "remotePort",
-    "strategy",
-    "protocolPolicyId"
+    "strategy"
   ];
+	if (includeUser) {
+		keys.unshift("userId");
+	}
+	if (includePolicy) {
+		keys.push("protocolPolicyId");
+	}
   return keys.reduce<Record<string, unknown>>((payload, key) => {
     if (typeof row[key] !== "undefined") {
       payload[key] = row[key];

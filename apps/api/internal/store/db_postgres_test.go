@@ -21,7 +21,7 @@ func TestPostgresMigrationsAndJSONCapabilities(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Open(PostgreSQL) error = %v", err)
 	}
-	for _, model := range []any{&models.LineProvider{}, &models.LineCircuit{}, &models.LineProbeSample{}, &models.AgentEvent{}} {
+	for _, model := range []any{&models.Tenant{}, &models.TenantTrafficHourlyBucket{}, &models.PortLease{}, &models.LineProvider{}, &models.LineCircuit{}, &models.LineProbeSample{}, &models.AgentEvent{}} {
 		if !db.Migrator().HasTable(model) {
 			t.Fatalf("PostgreSQL is missing table for %T", model)
 		}

@@ -104,16 +104,35 @@ func NewServer(cfg config.Config, db *gorm.DB) *gin.Engine {
 	protected := api.Group("", s.userAuth())
 	protected.GET("/me", s.me)
 	protected.GET("/dashboard", s.dashboard)
+	tenantManagerView := protected.Group("", requireRole("tenant_admin"))
+	tenantManagerView.GET("/tenant", s.currentTenant)
+	tenantManagerView.GET("/tenant/traffic", s.currentTenantTraffic)
 	protected.GET("/forward-rules", s.listForwardRules)
+	protected.GET("/tunnels", s.listTunnels)
 	protected.POST("/forward-rules", s.createForwardRule)
+	protected.POST("/forward-rules/batch/preview", s.previewForwardRuleBatch)
+	protected.POST("/forward-rules/batch", s.createForwardRuleBatch)
 	protected.PUT("/forward-rules/:id", s.updateForwardRule)
 	protected.DELETE("/forward-rules/:id", s.deleteForwardRule)
 
+	userManager := protected.Group("", requireAnyRole("admin", "tenant_admin"))
+	userManager.GET("/users", s.listUsers)
+	userManager.POST("/users", s.createUser)
+	userManager.PUT("/users/:id", s.updateUser)
+	userManager.DELETE("/users/:id", s.deleteUser)
+	userManager.POST("/users/:id/traffic/reset", s.resetUserTraffic)
+
 	admin := protected.Group("", requireRole("admin"))
-	admin.GET("/users", s.listUsers)
-	admin.POST("/users", s.createUser)
-	admin.PUT("/users/:id", s.updateUser)
-	admin.DELETE("/users/:id", s.deleteUser)
+	admin.GET("/tenants", s.listTenants)
+	admin.POST("/tenants", s.createTenant)
+	admin.PUT("/tenants/:id", s.updateTenant)
+	admin.DELETE("/tenants/:id", s.deleteTenant)
+	admin.GET("/tenants/:id/traffic", s.adminTenantTraffic)
+	admin.POST("/tenants/:id/traffic/reset", s.resetTenantTraffic)
+	admin.GET("/tenant-tunnel-grants", s.listTenantTunnelGrants)
+	admin.POST("/tenant-tunnel-grants", s.createTenantTunnelGrant)
+	admin.PUT("/tenant-tunnel-grants/:id", s.updateTenantTunnelGrant)
+	admin.DELETE("/tenant-tunnel-grants/:id", s.deleteTenantTunnelGrant)
 	admin.GET("/device-groups", s.listDeviceGroups)
 	admin.POST("/device-groups", s.createDeviceGroup)
 	admin.PUT("/device-groups/:id", s.updateDeviceGroup)
@@ -139,7 +158,6 @@ func NewServer(cfg config.Config, db *gorm.DB) *gin.Engine {
 	admin.PUT("/line-probes/:id", s.updateLineProbe)
 	admin.DELETE("/line-probes/:id", s.deleteLineProbe)
 	admin.GET("/line-probe-samples", s.listLineProbeSamples)
-	admin.GET("/tunnels", s.listTunnels)
 	admin.POST("/tunnels", s.createTunnel)
 	admin.PUT("/tunnels/:id", s.updateTunnel)
 	admin.DELETE("/tunnels/:id", s.deleteTunnel)
@@ -298,7 +316,7 @@ func (s *Server) login(c *gin.Context) {
 		unauthorized(c)
 		return
 	}
-	if !userActiveAt(user, now) || !auth.CheckPassword(user.PasswordHash, req.Password) {
+	if !s.userCanAuthenticate(user, now) || !auth.CheckPassword(user.PasswordHash, req.Password) {
 		s.limiter().fail(key, now)
 		s.audit(c, &user.ID, "auth.login.failed", "user", fmt.Sprint(user.ID), "{}")
 		unauthorized(c)
@@ -331,7 +349,7 @@ func (s *Server) refresh(c *gin.Context) {
 		return
 	}
 	var user models.User
-	if err := s.db.First(&user, claims.UserID).Error; err != nil || !userActiveAt(user, time.Now()) {
+	if err := s.db.First(&user, claims.UserID).Error; err != nil || !s.userCanAuthenticate(user, time.Now()) {
 		unauthorized(c)
 		return
 	}
@@ -375,6 +393,26 @@ func (s *Server) dashboard(c *gin.Context) {
 			Scan(&todayBytes)
 		s.db.Order("occurred_at desc").Limit(8).Find(&recentViolations)
 		s.db.Order("updated_at desc").Limit(8).Find(&recentRules)
+	} else if ctxRole(c) == "tenant_admin" {
+		tenantID := ctxTenantID(c)
+		s.db.Model(&models.User{}).Where("tenant_id = ?", tenantID).Count(&users)
+		s.nodeScopeForTenant(tenantID).Count(&nodes)
+		s.nodeScopeForTenant(tenantID).Where("nodes.status = ?", "online").Count(&onlineNodes)
+		s.db.Model(&models.ForwardRule{}).Where("tenant_id = ?", tenantID).Count(&rules)
+		s.db.Model(&models.ProtocolViolation{}).
+			Joins("JOIN forward_rules ON forward_rules.id = protocol_violations.rule_id").
+			Where("forward_rules.tenant_id = ? AND protocol_violations.occurred_at >= ?", tenantID, since).
+			Count(&violations)
+		s.db.Model(&models.TrafficSample{}).
+			Where("tenant_id = ? AND sampled_at >= ?", tenantID, dayStart).
+			Select("COALESCE(SUM(bytes),0)").
+			Scan(&todayBytes)
+		s.db.Joins("JOIN forward_rules ON forward_rules.id = protocol_violations.rule_id").
+			Where("forward_rules.tenant_id = ?", tenantID).
+			Order("protocol_violations.occurred_at desc").
+			Limit(8).
+			Find(&recentViolations)
+		s.db.Where("tenant_id = ?", tenantID).Order("updated_at desc").Limit(8).Find(&recentRules)
 	} else {
 		userID := ctxUserID(c)
 		users = 1
@@ -421,12 +459,15 @@ func (s *Server) userAuth() gin.HandlerFunc {
 			return
 		}
 		var user models.User
-		if err := s.db.First(&user, claims.UserID).Error; err != nil || !userActiveAt(user, time.Now()) {
+		if err := s.db.First(&user, claims.UserID).Error; err != nil || !s.userCanAuthenticate(user, time.Now()) {
 			unauthorized(c)
 			return
 		}
 		c.Set("userID", user.ID)
 		c.Set("role", user.Role)
+		if user.TenantID != nil {
+			c.Set("tenantID", *user.TenantID)
+		}
 		c.Next()
 	}
 }
@@ -435,9 +476,28 @@ func userActiveAt(user models.User, now time.Time) bool {
 	return user.Status == "active" && (user.ExpiresAt == nil || user.ExpiresAt.After(now))
 }
 
+func (s *Server) userCanAuthenticate(user models.User, now time.Time) bool {
+	if !userActiveAt(user, now) {
+		return false
+	}
+	if user.TenantID == nil || *user.TenantID == 0 || user.Role == "admin" {
+		return true
+	}
+	var tenant models.Tenant
+	return s.db.First(&tenant, *user.TenantID).Error == nil && tenantActiveAt(tenant, now)
+}
+
 func requireRole(role string) gin.HandlerFunc {
+	return requireAnyRole(role)
+}
+
+func requireAnyRole(roles ...string) gin.HandlerFunc {
+	allowed := make(map[string]struct{}, len(roles))
+	for _, role := range roles {
+		allowed[role] = struct{}{}
+	}
 	return func(c *gin.Context) {
-		if ctxRole(c) != role {
+		if _, ok := allowed[ctxRole(c)]; !ok {
 			c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "forbidden"})
 			return
 		}
@@ -467,6 +527,14 @@ func ctxRole(c *gin.Context) string {
 		return role
 	}
 	return ""
+}
+
+func ctxTenantID(c *gin.Context) uint {
+	value, _ := c.Get("tenantID")
+	if id, ok := value.(uint); ok {
+		return id
+	}
+	return 0
 }
 
 func (s *Server) agentAuth() gin.HandlerFunc {
@@ -584,12 +652,17 @@ func parseQueryTime(value string) time.Time {
 
 func (s *Server) listUsers(c *gin.Context) {
 	query := s.db.Model(&models.User{})
+	if ctxRole(c) == "tenant_admin" {
+		query = query.Where("tenant_id = ?", ctxTenantID(c))
+	}
 	query = applySearch(query, c, "username", "display_name", "role", "status")
 	query = filterString(query, c, "status", "status")
+	query = filterUint(query, c, "tenant_id", "tenantId")
 	respondPage[models.User](c, query, "id desc")
 }
 
 type userPayload struct {
+	TenantID       *uint      `json:"tenantId"`
 	Username       string     `json:"username"`
 	DisplayName    string     `json:"displayName"`
 	Password       string     `json:"password"`
@@ -606,8 +679,18 @@ func (s *Server) createUser(c *gin.Context) {
 		bad(c, err)
 		return
 	}
+	req.Username = strings.TrimSpace(req.Username)
 	if req.Username == "" || req.Password == "" {
 		bad(c, errors.New("username and password are required"))
+		return
+	}
+	tenantID, role, err := s.managedUserTenantAndRole(c, req.TenantID, defaultString(req.Role, "user"))
+	if err != nil {
+		bad(c, err)
+		return
+	}
+	if err := s.validateUserPayload(req.Status, req.FlowLimitBytes, req.ForwardLimit); err != nil {
+		bad(c, err)
 		return
 	}
 	hash, err := auth.HashPassword(req.Password)
@@ -616,17 +699,29 @@ func (s *Server) createUser(c *gin.Context) {
 		return
 	}
 	user := models.User{
+		TenantID:       tenantID,
 		Username:       req.Username,
 		DisplayName:    req.DisplayName,
 		PasswordHash:   hash,
-		Role:           defaultString(req.Role, "user"),
+		Role:           role,
 		Status:         defaultString(req.Status, "active"),
 		FlowLimitBytes: req.FlowLimitBytes,
 		ForwardLimit:   req.ForwardLimit,
 		ExpiresAt:      req.ExpiresAt,
 	}
-	if err := s.db.Create(&user).Error; err != nil {
-		fail(c, err)
+	var capacityErr error
+	if err := s.db.Transaction(func(tx *gorm.DB) error {
+		if err := s.ensureTenantUserCapacityWithDB(tx, tenantID, 0); err != nil {
+			capacityErr = err
+			return err
+		}
+		return tx.Create(&user).Error
+	}); err != nil {
+		if capacityErr != nil {
+			bad(c, capacityErr)
+		} else {
+			fail(c, err)
+		}
 		return
 	}
 	s.audit(c, actor(c), "user.create", "user", fmt.Sprint(user.ID), "{}")
@@ -639,14 +734,43 @@ func (s *Server) updateUser(c *gin.Context) {
 		notFound(c)
 		return
 	}
+	if !canManageUser(c, user) {
+		forbidden(c)
+		return
+	}
 	var req userPayload
 	if err := c.ShouldBindJSON(&req); err != nil {
 		bad(c, err)
 		return
 	}
-	user.Username = defaultString(req.Username, user.Username)
+	requestedTenantID := req.TenantID
+	if requestedTenantID == nil {
+		requestedTenantID = user.TenantID
+	}
+	tenantID, role, err := s.managedUserTenantAndRole(c, requestedTenantID, defaultString(req.Role, user.Role))
+	if err != nil {
+		bad(c, err)
+		return
+	}
+	if err := s.validateUserPayload(req.Status, req.FlowLimitBytes, req.ForwardLimit); err != nil {
+		bad(c, err)
+		return
+	}
+	if !sameOptionalUint(user.TenantID, tenantID) {
+		var references int64
+		if err := s.db.Model(&models.ForwardRule{}).Where("user_id = ?", user.ID).Count(&references).Error; err != nil {
+			fail(c, err)
+			return
+		}
+		if references > 0 {
+			bad(c, errors.New("user with forwarding rules cannot be moved between tenants"))
+			return
+		}
+	}
+	user.TenantID = tenantID
+	user.Username = defaultString(strings.TrimSpace(req.Username), user.Username)
 	user.DisplayName = req.DisplayName
-	user.Role = defaultString(req.Role, user.Role)
+	user.Role = role
 	user.Status = defaultString(req.Status, user.Status)
 	user.FlowLimitBytes = req.FlowLimitBytes
 	user.ForwardLimit = req.ForwardLimit
@@ -660,13 +784,22 @@ func (s *Server) updateUser(c *gin.Context) {
 		user.PasswordHash = hash
 	}
 	revision := time.Now().UnixNano()
+	var capacityErr error
 	if err := s.db.Transaction(func(tx *gorm.DB) error {
+		if err := s.ensureTenantUserCapacityWithDB(tx, tenantID, user.ID); err != nil {
+			capacityErr = err
+			return err
+		}
 		if err := tx.Save(&user).Error; err != nil {
 			return err
 		}
-		return s.bumpUserRevisionWithDB(tx, user.ID, revision)
+		return s.reconcileUserQuotaTx(tx, &user, revision)
 	}); err != nil {
-		fail(c, err)
+		if capacityErr != nil {
+			bad(c, capacityErr)
+		} else {
+			fail(c, err)
+		}
 		return
 	}
 	s.audit(c, actor(c), "user.update", "user", fmt.Sprint(user.ID), "{}")
@@ -677,6 +810,10 @@ func (s *Server) deleteUser(c *gin.Context) {
 	var user models.User
 	if err := s.db.First(&user, c.Param("id")).Error; err != nil {
 		notFound(c)
+		return
+	}
+	if !canManageUser(c, user) {
+		forbidden(c)
 		return
 	}
 	if user.ID == ctxUserID(c) {
@@ -713,6 +850,90 @@ func (s *Server) deleteUser(c *gin.Context) {
 	}
 	s.audit(c, actor(c), "user.delete", "user", fmt.Sprint(user.ID), "{}")
 	c.Status(http.StatusNoContent)
+}
+
+func (s *Server) managedUserTenantAndRole(c *gin.Context, requestedTenantID *uint, requestedRole string) (*uint, string, error) {
+	role := strings.ToLower(strings.TrimSpace(requestedRole))
+	if ctxRole(c) == "tenant_admin" {
+		tenantID := ctxTenantID(c)
+		if tenantID == 0 {
+			return nil, "", errors.New("tenant administrator is not assigned to a tenant")
+		}
+		if role != "user" {
+			return nil, "", errors.New("tenant administrators can only manage regular users")
+		}
+		return &tenantID, role, nil
+	}
+	if !contains([]string{"admin", "tenant_admin", "user"}, role) {
+		return nil, "", errors.New("role must be admin, tenant_admin, or user")
+	}
+	if role == "admin" {
+		return nil, role, nil
+	}
+	if requestedTenantID != nil && *requestedTenantID == 0 {
+		requestedTenantID = nil
+	}
+	if role == "tenant_admin" && requestedTenantID == nil {
+		return nil, "", errors.New("tenant administrators must be assigned to a tenant")
+	}
+	if requestedTenantID != nil {
+		if err := s.requireID(&models.Tenant{}, *requestedTenantID, "tenant"); err != nil {
+			return nil, "", err
+		}
+		value := *requestedTenantID
+		return &value, role, nil
+	}
+	return nil, role, nil
+}
+
+func (s *Server) validateUserPayload(status string, flowLimitBytes int64, forwardLimit int) error {
+	status = defaultString(strings.ToLower(strings.TrimSpace(status)), "active")
+	if !contains([]string{"active", "suspended", "disabled"}, status) {
+		return errors.New("status must be active, suspended, or disabled")
+	}
+	if flowLimitBytes < 0 || forwardLimit < 0 {
+		return errors.New("user limits must be non-negative")
+	}
+	return nil
+}
+
+func (s *Server) ensureTenantUserCapacityWithDB(db *gorm.DB, tenantID *uint, excludeUserID uint) error {
+	if tenantID == nil || *tenantID == 0 {
+		return nil
+	}
+	var tenant models.Tenant
+	if err := db.Clauses(clause.Locking{Strength: "UPDATE"}).First(&tenant, *tenantID).Error; err != nil {
+		return errors.New("tenant not found")
+	}
+	if tenant.UserLimit <= 0 {
+		return nil
+	}
+	query := db.Model(&models.User{}).Where("tenant_id = ?", tenant.ID)
+	if excludeUserID > 0 {
+		query = query.Where("id <> ?", excludeUserID)
+	}
+	var count int64
+	if err := query.Count(&count).Error; err != nil {
+		return err
+	}
+	if count >= int64(tenant.UserLimit) {
+		return errors.New("tenant user limit reached")
+	}
+	return nil
+}
+
+func canManageUser(c *gin.Context, user models.User) bool {
+	if ctxRole(c) == "admin" {
+		return true
+	}
+	return ctxRole(c) == "tenant_admin" && user.Role == "user" && user.TenantID != nil && *user.TenantID == ctxTenantID(c)
+}
+
+func sameOptionalUint(left, right *uint) bool {
+	if left == nil || right == nil {
+		return left == nil && right == nil
+	}
+	return *left == *right
 }
 
 func (s *Server) listNodes(c *gin.Context) {
@@ -756,6 +977,14 @@ func (s *Server) nodeScopeForUser(userID uint) *gorm.DB {
 		Joins("JOIN tunnels ON nodes.device_group_id = tunnels.entry_group_id OR nodes.device_group_id = tunnels.exit_group_id").
 		Joins("JOIN forward_rules ON forward_rules.tunnel_id = tunnels.id").
 		Where("forward_rules.user_id = ?", userID).
+		Distinct("nodes.id")
+}
+
+func (s *Server) nodeScopeForTenant(tenantID uint) *gorm.DB {
+	return s.db.Model(&models.Node{}).
+		Joins("JOIN tunnels ON nodes.device_group_id = tunnels.entry_group_id OR nodes.device_group_id = tunnels.exit_group_id").
+		Joins("JOIN forward_rules ON forward_rules.tunnel_id = tunnels.id").
+		Where("forward_rules.tenant_id = ?", tenantID).
 		Distinct("nodes.id")
 }
 
@@ -991,6 +1220,12 @@ type tunnelPayload struct {
 
 func (s *Server) listTunnels(c *gin.Context) {
 	query := s.db.Model(&models.Tunnel{})
+	if ctxRole(c) != "admin" && ctxTenantID(c) > 0 {
+		grants := s.db.Model(&models.TenantTunnelGrant{}).
+			Select("tunnel_id").
+			Where("tenant_id = ?", ctxTenantID(c))
+		query = query.Where("id IN (?)", grants)
+	}
 	query = applySearch(query, c, "name", "mode", "protocol", "flow_accounting")
 	query = filterString(query, c, "mode", "mode")
 	query = filterUint(query, c, "entry_group_id", "entryGroupId")
@@ -1648,6 +1883,7 @@ func normalizePolicyToken(value string) string {
 
 type speedLimitPayload struct {
 	Name        string `json:"name"`
+	TenantID    *uint  `json:"tenantId"`
 	UserID      *uint  `json:"userId"`
 	TunnelID    *uint  `json:"tunnelId"`
 	RuleID      *uint  `json:"ruleId"`
@@ -1660,6 +1896,7 @@ type speedLimitPayload struct {
 func (s *Server) listSpeedLimits(c *gin.Context) {
 	query := s.db.Model(&models.SpeedLimit{})
 	query = applySearch(query, c, "name")
+	query = filterUint(query, c, "tenant_id", "tenantId")
 	query = filterUint(query, c, "user_id", "userId")
 	query = filterUint(query, c, "tunnel_id", "tunnelId")
 	query = filterUint(query, c, "rule_id", "ruleId")
@@ -1730,8 +1967,20 @@ func (s *Server) applySpeedLimitPayload(row *models.SpeedLimit, req speedLimitPa
 	if req.UploadBps < 0 || req.DownloadBps < 0 || req.MaxConns < 0 || req.MaxIPs < 0 {
 		return errors.New("speed limit values must be non-negative")
 	}
-	if req.UserID == nil && req.TunnelID == nil && req.RuleID == nil {
-		return errors.New("one of userId, tunnelId, or ruleId is required")
+	scopeCount := 0
+	for _, id := range []*uint{req.TenantID, req.UserID, req.TunnelID, req.RuleID} {
+		if id != nil && *id > 0 {
+			scopeCount++
+		}
+	}
+	if scopeCount == 0 {
+		return errors.New("one of tenantId, userId, tunnelId, or ruleId is required")
+	}
+	if scopeCount > 1 {
+		return errors.New("speed limits must target exactly one tenant, user, tunnel, or rule")
+	}
+	if err := s.requireOptionalID(&models.Tenant{}, req.TenantID, "tenant"); err != nil {
+		return err
 	}
 	if err := s.requireOptionalID(&models.User{}, req.UserID, "user"); err != nil {
 		return err
@@ -1743,6 +1992,7 @@ func (s *Server) applySpeedLimitPayload(row *models.SpeedLimit, req speedLimitPa
 		return err
 	}
 	row.Name = req.Name
+	row.TenantID = req.TenantID
 	row.UserID = req.UserID
 	row.TunnelID = req.TunnelID
 	row.RuleID = req.RuleID
@@ -1816,7 +2066,9 @@ func (s *Server) afterSpeedLimitChange(c *gin.Context, db *gorm.DB, limit *model
 
 func (s *Server) listForwardRules(c *gin.Context) {
 	query := s.db.Model(&models.ForwardRule{})
-	if ctxRole(c) != "admin" {
+	if ctxRole(c) == "tenant_admin" {
+		query = query.Where("tenant_id = ?", ctxTenantID(c))
+	} else if ctxRole(c) != "admin" {
 		query = query.Where("user_id = ?", ctxUserID(c))
 	}
 	query = applySearch(query, c, "name", "protocol", "remote_host", "status", "strategy")
@@ -1846,13 +2098,24 @@ func (s *Server) createForwardRule(c *gin.Context) {
 		bad(c, err)
 		return
 	}
+	policyID, err := forwardRulePolicyForActor(c, req.ProtocolPolicyID, nil)
+	if err != nil {
+		bad(c, err)
+		return
+	}
+	req.ProtocolPolicyID = policyID
 	var rule models.ForwardRule
 	if err := s.applyForwardRulePayload(&rule, req); err != nil {
 		bad(c, err)
 		return
 	}
 	if ctxRole(c) != "admin" {
-		rule.UserID = ctxUserID(c)
+		if ctxRole(c) == "user" {
+			rule.UserID = ctxUserID(c)
+		} else if !s.userBelongsToTenant(rule.UserID, ctxTenantID(c)) {
+			forbidden(c)
+			return
+		}
 	}
 	if ctxRole(c) != "admin" {
 		if forbidden, reason := forbiddenRemoteHost(rule.RemoteHost); forbidden {
@@ -1860,17 +2123,25 @@ func (s *Server) createForwardRule(c *gin.Context) {
 			return
 		}
 	}
-	if err := s.prepareForwardRule(&rule, 0); err != nil {
+	rule.Status = forwardRuleStatusAfterWrite(req.Status)
+	rule.QuotaSource = ""
+	rule.Revision = time.Now().UnixNano()
+	if err := s.db.Transaction(func(tx *gorm.DB) error {
+		group, err := s.prepareForwardRuleTx(tx, &rule, 0)
+		if err != nil {
+			return err
+		}
+		if err := tx.Create(&rule).Error; err != nil {
+			return err
+		}
+		if err := s.replaceRulePortLeasesTx(tx, rule, group); err != nil {
+			return err
+		}
+		return s.bumpTunnelRevisionWithDB(tx, rule.TunnelID, rule.Revision)
+	}); err != nil {
 		bad(c, err)
 		return
 	}
-	rule.Status = forwardRuleStatusAfterWrite(req.Status)
-	rule.Revision = time.Now().UnixNano()
-	if err := s.db.Create(&rule).Error; err != nil {
-		fail(c, err)
-		return
-	}
-	s.bumpTunnelRevision(rule.TunnelID, rule.Revision)
 	s.audit(c, actor(c), "forward_rule.create", "forward_rule", fmt.Sprint(rule.ID), "{}")
 	c.JSON(http.StatusCreated, rule)
 }
@@ -1881,7 +2152,7 @@ func (s *Server) updateForwardRule(c *gin.Context) {
 		notFound(c)
 		return
 	}
-	if ctxRole(c) != "admin" && existing.UserID != ctxUserID(c) {
+	if !canManageForwardRule(c, existing) {
 		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "forbidden"})
 		return
 	}
@@ -1891,6 +2162,12 @@ func (s *Server) updateForwardRule(c *gin.Context) {
 		bad(c, err)
 		return
 	}
+	policyID, err := forwardRulePolicyForActor(c, req.ProtocolPolicyID, existing.ProtocolPolicyID)
+	if err != nil {
+		bad(c, err)
+		return
+	}
+	req.ProtocolPolicyID = policyID
 	id, _ := strconv.ParseUint(c.Param("id"), 10, 64)
 	existing.ID = uint(id)
 	if err := s.applyForwardRulePayload(&existing, req); err != nil {
@@ -1898,7 +2175,12 @@ func (s *Server) updateForwardRule(c *gin.Context) {
 		return
 	}
 	if ctxRole(c) != "admin" {
-		existing.UserID = ctxUserID(c)
+		if ctxRole(c) == "user" {
+			existing.UserID = ctxUserID(c)
+		} else if !s.userBelongsToTenant(existing.UserID, ctxTenantID(c)) {
+			forbidden(c)
+			return
+		}
 	}
 	if ctxRole(c) != "admin" {
 		if forbidden, reason := forbiddenRemoteHost(existing.RemoteHost); forbidden {
@@ -1906,19 +2188,41 @@ func (s *Server) updateForwardRule(c *gin.Context) {
 			return
 		}
 	}
-	if err := s.prepareForwardRule(&existing, existing.ID); err != nil {
+	existing.Status = forwardRuleStatusAfterWrite(req.Status)
+	existing.QuotaSource = ""
+	existing.Revision = time.Now().UnixNano()
+	if err := s.db.Transaction(func(tx *gorm.DB) error {
+		previousGroupID, err := entryGroupIDForTunnelTx(tx, previousTunnelID)
+		if err != nil {
+			return err
+		}
+		newGroupID, err := entryGroupIDForTunnelTx(tx, existing.TunnelID)
+		if err != nil {
+			return err
+		}
+		if err := lockEntryGroupsTx(tx, previousGroupID, newGroupID); err != nil {
+			return err
+		}
+		group, err := s.prepareForwardRuleTx(tx, &existing, existing.ID)
+		if err != nil {
+			return err
+		}
+		if err := tx.Save(&existing).Error; err != nil {
+			return err
+		}
+		if err := s.replaceRulePortLeasesTx(tx, existing, group); err != nil {
+			return err
+		}
+		if err := s.bumpTunnelRevisionWithDB(tx, existing.TunnelID, existing.Revision); err != nil {
+			return err
+		}
+		if previousTunnelID != existing.TunnelID {
+			return s.bumpTunnelRevisionWithDB(tx, previousTunnelID, existing.Revision)
+		}
+		return nil
+	}); err != nil {
 		bad(c, err)
 		return
-	}
-	existing.Status = forwardRuleStatusAfterWrite(req.Status)
-	existing.Revision = time.Now().UnixNano()
-	if err := s.db.Save(&existing).Error; err != nil {
-		fail(c, err)
-		return
-	}
-	s.bumpTunnelRevision(existing.TunnelID, existing.Revision)
-	if previousTunnelID != existing.TunnelID {
-		s.bumpTunnelRevision(previousTunnelID, existing.Revision)
 	}
 	s.audit(c, actor(c), "forward_rule.update", "forward_rule", fmt.Sprint(existing.ID), "{}")
 	c.JSON(http.StatusOK, existing)
@@ -1948,6 +2252,16 @@ func (s *Server) applyForwardRulePayload(rule *models.ForwardRule, req forwardRu
 	return nil
 }
 
+func forwardRulePolicyForActor(c *gin.Context, requested, existing *uint) (*uint, error) {
+	if ctxRole(c) == "admin" {
+		return requested, nil
+	}
+	if requested != nil && !sameOptionalUint(requested, existing) {
+		return nil, errors.New("protocolPolicyId can only be managed by administrators")
+	}
+	return existing, nil
+}
+
 func forwardRuleStatusAfterWrite(status string) string {
 	normalized := strings.ToLower(strings.TrimSpace(status))
 	switch normalized {
@@ -1964,7 +2278,7 @@ func (s *Server) deleteForwardRule(c *gin.Context) {
 		notFound(c)
 		return
 	}
-	if ctxRole(c) != "admin" && rule.UserID != ctxUserID(c) {
+	if !canManageForwardRule(c, rule) {
 		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "forbidden"})
 		return
 	}
@@ -1977,141 +2291,194 @@ func (s *Server) deleteForwardRule(c *gin.Context) {
 		bad(c, errors.New("forwarding rule is still referenced by speed limits"))
 		return
 	}
-	if err := s.db.Delete(&rule).Error; err != nil {
+	revision := time.Now().UnixNano()
+	if err := s.db.Transaction(func(tx *gorm.DB) error {
+		if err := releaseRulePortLeasesTx(tx, rule.ID); err != nil {
+			return err
+		}
+		if err := tx.Delete(&rule).Error; err != nil {
+			return err
+		}
+		return s.bumpTunnelRevisionWithDB(tx, rule.TunnelID, revision)
+	}); err != nil {
 		fail(c, err)
 		return
 	}
-	s.bumpTunnelRevision(rule.TunnelID, time.Now().UnixNano())
 	s.audit(c, actor(c), "forward_rule.delete", "forward_rule", fmt.Sprint(rule.ID), "{}")
 	c.Status(http.StatusNoContent)
 }
 
 func (s *Server) prepareForwardRule(rule *models.ForwardRule, excludeID uint) error {
+	return s.db.Transaction(func(tx *gorm.DB) error {
+		_, err := s.prepareForwardRuleTx(tx, rule, excludeID)
+		return err
+	})
+}
+
+func (s *Server) prepareForwardRuleTx(tx *gorm.DB, rule *models.ForwardRule, excludeID uint) (models.DeviceGroup, error) {
+	var entry models.DeviceGroup
 	if rule.UserID == 0 {
-		return errors.New("userId is required")
+		return entry, errors.New("userId is required")
 	}
 	if !contains([]string{"tcp", "udp", "tcp_udp"}, rule.Protocol) {
-		return errors.New("protocol must be tcp, udp, or tcp_udp")
+		return entry, errors.New("protocol must be tcp, udp, or tcp_udp")
 	}
 	if rule.Strategy == "" {
 		rule.Strategy = "least_conn"
 	}
 	if !contains([]string{"least_conn", "round_robin", "random", "source_hash"}, rule.Strategy) {
-		return errors.New("strategy must be least_conn, round_robin, random, or source_hash")
+		return entry, errors.New("strategy must be least_conn, round_robin, random, or source_hash")
 	}
 	if rule.RemoteHost == "" || rule.RemotePort <= 0 || rule.RemotePort > 65535 {
-		return errors.New("valid remoteHost and remotePort are required")
+		return entry, errors.New("valid remoteHost and remotePort are required")
 	}
 	var user models.User
-	if err := s.db.First(&user, rule.UserID).Error; err != nil {
-		return errors.New("user not found")
+	if err := tx.First(&user, rule.UserID).Error; err != nil {
+		return entry, errors.New("user not found")
 	}
 	if user.Status != "active" {
-		return errors.New("user is not active")
+		return entry, errors.New("user is not active")
 	}
 	if user.ExpiresAt != nil && user.ExpiresAt.Before(time.Now()) {
-		return errors.New("user is expired")
+		return entry, errors.New("user is expired")
 	}
 	if user.FlowLimitBytes > 0 && user.UsedBytes >= user.FlowLimitBytes {
-		return errors.New("user traffic is exhausted")
+		return entry, errors.New("user traffic is exhausted")
 	}
+	rule.TenantID = user.TenantID
 	var tunnel models.Tunnel
-	if err := s.db.First(&tunnel, rule.TunnelID).Error; err != nil {
-		return errors.New("tunnel not found")
+	if err := tx.First(&tunnel, rule.TunnelID).Error; err != nil {
+		return entry, errors.New("tunnel not found")
 	}
-	var entry models.DeviceGroup
-	if err := s.db.First(&entry, tunnel.EntryGroupID).Error; err != nil {
-		return errors.New("entry device group not found")
+	if err := lockEntryGroupsTx(tx, tunnel.EntryGroupID); err != nil {
+		return entry, err
+	}
+	if err := tx.First(&entry, tunnel.EntryGroupID).Error; err != nil {
+		return entry, errors.New("entry device group not found")
+	}
+	portStart, portEnd := entry.PortStart, entry.PortEnd
+	if user.TenantID != nil && *user.TenantID > 0 {
+		var tenant models.Tenant
+		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&tenant, *user.TenantID).Error; err != nil {
+			return entry, errors.New("tenant not found")
+		}
+		now := time.Now().UTC()
+		if err := s.rollTenantPeriodTx(tx, &tenant, now, now.UnixNano()); err != nil {
+			return entry, err
+		}
+		if !tenantActiveAt(tenant, now) {
+			return entry, errors.New("tenant is not active")
+		}
+		if tenant.QuotaBlocked || (tenant.TrafficLimitBytes > 0 && tenant.UsedBytes >= tenant.TrafficLimitBytes) {
+			return entry, errors.New("tenant traffic is exhausted")
+		}
+		var grant models.TenantTunnelGrant
+		if err := tx.Where("tenant_id = ? AND tunnel_id = ?", tenant.ID, tunnel.ID).First(&grant).Error; err != nil {
+			return entry, errors.New("tenant is not authorized to use this tunnel")
+		}
+		if grant.PortStart > 0 && grant.PortEnd > 0 {
+			portStart, portEnd = grant.PortStart, grant.PortEnd
+		}
+		if tenant.ForwardLimit > 0 {
+			count, err := countForwardRulesTx(tx, "tenant_id = ?", tenant.ID, excludeID)
+			if err != nil {
+				return entry, err
+			}
+			if count >= int64(tenant.ForwardLimit) {
+				return entry, errors.New("tenant forward rule limit reached")
+			}
+		}
+		if grant.ForwardLimit > 0 {
+			count, err := countForwardRulesTx(tx, "tenant_id = ? AND tunnel_id = ?", []any{tenant.ID, tunnel.ID}, excludeID)
+			if err != nil {
+				return entry, err
+			}
+			if count >= int64(grant.ForwardLimit) {
+				return entry, errors.New("tenant tunnel forward rule limit reached")
+			}
+		}
 	}
 	if rule.ListenPort == 0 {
-		port, err := s.allocatePort(entry.ID, rule.Protocol, entry.PortStart, entry.PortEnd, excludeID)
+		port, err := s.allocatePortTx(tx, entry, rule.Protocol, portStart, portEnd, excludeID)
 		if err != nil {
-			return err
+			return entry, err
 		}
 		rule.ListenPort = port
 	}
 	if rule.ListenPort <= 0 || rule.ListenPort > 65535 {
-		return errors.New("listenPort must be between 1 and 65535")
+		return entry, errors.New("listenPort must be between 1 and 65535")
 	}
-	if entry.PortStart > 0 && entry.PortEnd > 0 && (rule.ListenPort < entry.PortStart || rule.ListenPort > entry.PortEnd) {
-		return fmt.Errorf("listenPort must be within entry group range %d-%d", entry.PortStart, entry.PortEnd)
+	if portStart > 0 && portEnd > 0 && (rule.ListenPort < portStart || rule.ListenPort > portEnd) {
+		return entry, fmt.Errorf("listenPort must be within authorized range %d-%d", portStart, portEnd)
 	}
-	duplicate, err := s.entryPortInUse(entry.ID, rule.ListenPort, rule.Protocol, excludeID)
+	duplicate, err := s.entryPortInUseTx(tx, entry.ID, rule.ListenPort, rule.Protocol, excludeID)
 	if err != nil {
-		return err
+		return entry, err
 	}
 	if duplicate {
-		return errors.New("listenPort is already used by an overlapping rule in this entry device group")
+		return entry, errors.New("listenPort is already used by an overlapping rule in this entry device group")
 	}
 	if user.ForwardLimit > 0 {
-		var count int64
-		query := s.db.Model(&models.ForwardRule{}).Where("user_id = ?", user.ID)
-		if excludeID != 0 {
-			query = query.Where("id <> ?", excludeID)
+		count, err := countForwardRulesTx(tx, "user_id = ?", user.ID, excludeID)
+		if err != nil {
+			return entry, err
 		}
-		if err := query.Count(&count).Error; err != nil {
-			return err
-		}
-		if int(count) >= user.ForwardLimit {
-			return errors.New("user forward rule limit reached")
+		if count >= int64(user.ForwardLimit) {
+			return entry, errors.New("user forward rule limit reached")
 		}
 	}
-	policy, err := s.effectivePolicy(rule, &tunnel, &entry)
+	policy, err := effectivePolicyWithDB(tx, rule, &tunnel, &entry)
 	if err != nil {
-		return err
+		return entry, err
 	}
 	if policy != nil {
 		if policy.BlockEncryptedTunnel && encryptedTunnelProtocol(tunnel.Protocol) {
-			return fmt.Errorf("protocol policy %q forbids encrypted tunnel protocol %q", policy.Name, tunnel.Protocol)
+			return entry, fmt.Errorf("protocol policy %q forbids encrypted tunnel protocol %q", policy.Name, tunnel.Protocol)
 		}
 		if policy.AllowHTTPOnly && rule.Protocol != "tcp" {
-			return fmt.Errorf("protocol policy %q only allows HTTP over TCP rules", policy.Name)
+			return entry, fmt.Errorf("protocol policy %q only allows HTTP over TCP rules", policy.Name)
 		}
 		if policy.AllowPlainTCPOnly && rule.Protocol != "tcp" {
-			return fmt.Errorf("protocol policy %q only allows plain TCP rules", policy.Name)
+			return entry, fmt.Errorf("protocol policy %q only allows plain TCP rules", policy.Name)
 		}
 	}
-	return nil
+	return entry, nil
 }
 
 func (s *Server) allocatePort(entryGroupID uint, protocol string, start, end int, excludeID uint) (int, error) {
-	if start <= 0 || end <= 0 || start > end {
-		start, end = 10000, 60000
-	}
-	for port := start; port <= end; port++ {
-		used, err := s.entryPortInUse(entryGroupID, port, protocol, excludeID)
-		if err != nil {
-			return 0, err
+	var port int
+	err := s.db.Transaction(func(tx *gorm.DB) error {
+		if err := lockEntryGroupsTx(tx, entryGroupID); err != nil {
+			return err
 		}
-		if !used {
-			return port, nil
+		var group models.DeviceGroup
+		if err := tx.First(&group, entryGroupID).Error; err != nil {
+			return err
 		}
-	}
-	return 0, errors.New("no free port in device group range")
+		var err error
+		port, err = s.allocatePortTx(tx, group, protocol, start, end, excludeID)
+		return err
+	})
+	return port, err
 }
 
 func (s *Server) entryPortInUse(entryGroupID uint, port int, protocol string, excludeID uint) (bool, error) {
-	type existingRule struct {
-		ID       uint
-		Protocol string
+	return s.entryPortInUseTx(s.db, entryGroupID, port, protocol, excludeID)
+}
+
+func countForwardRulesTx(tx *gorm.DB, condition string, args any, excludeID uint) (int64, error) {
+	query := tx.Model(&models.ForwardRule{})
+	if values, ok := args.([]any); ok {
+		query = query.Where(condition, values...)
+	} else {
+		query = query.Where(condition, args)
 	}
-	var rows []existingRule
-	query := s.db.Table("forward_rules").
-		Select("forward_rules.id, forward_rules.protocol").
-		Joins("JOIN tunnels ON tunnels.id = forward_rules.tunnel_id").
-		Where("tunnels.entry_group_id = ? AND forward_rules.listen_port = ? AND forward_rules.status NOT IN ?", entryGroupID, port, []string{"deleted", "disabled"})
-	if excludeID != 0 {
-		query = query.Where("forward_rules.id <> ?", excludeID)
+	if excludeID > 0 {
+		query = query.Where("id <> ?", excludeID)
 	}
-	if err := query.Scan(&rows).Error; err != nil {
-		return false, err
-	}
-	for _, row := range rows {
-		if transportsOverlap(protocol, row.Protocol) {
-			return true, nil
-		}
-	}
-	return false, nil
+	var count int64
+	err := query.Count(&count).Error
+	return count, err
 }
 
 func transportsOverlap(a, b string) bool {
@@ -2166,6 +2533,10 @@ func forbiddenRemoteHost(host string) (bool, string) {
 }
 
 func (s *Server) effectivePolicy(rule *models.ForwardRule, tunnel *models.Tunnel, entry *models.DeviceGroup) (*models.ProtocolPolicy, error) {
+	return effectivePolicyWithDB(s.db, rule, tunnel, entry)
+}
+
+func effectivePolicyWithDB(db *gorm.DB, rule *models.ForwardRule, tunnel *models.Tunnel, entry *models.DeviceGroup) (*models.ProtocolPolicy, error) {
 	var id *uint
 	switch {
 	case rule.ProtocolPolicyID != nil:
@@ -2179,10 +2550,29 @@ func (s *Server) effectivePolicy(rule *models.ForwardRule, tunnel *models.Tunnel
 		return nil, nil
 	}
 	var policy models.ProtocolPolicy
-	if err := s.db.First(&policy, *id).Error; err != nil {
+	if err := db.First(&policy, *id).Error; err != nil {
 		return nil, errors.New("protocol policy not found")
 	}
 	return &policy, nil
+}
+
+func (s *Server) userBelongsToTenant(userID, tenantID uint) bool {
+	if userID == 0 || tenantID == 0 {
+		return false
+	}
+	var count int64
+	return s.db.Model(&models.User{}).Where("id = ? AND tenant_id = ?", userID, tenantID).Count(&count).Error == nil && count == 1
+}
+
+func canManageForwardRule(c *gin.Context, rule models.ForwardRule) bool {
+	switch ctxRole(c) {
+	case "admin":
+		return true
+	case "tenant_admin":
+		return rule.TenantID != nil && *rule.TenantID == ctxTenantID(c)
+	default:
+		return rule.UserID == ctxUserID(c)
+	}
 }
 
 func encryptedTunnelProtocol(protocol string) bool {
@@ -2493,6 +2883,7 @@ func (s *Server) agentConfig(c *gin.Context) {
 		policyIDs[*group.ProtocolPolicyID] = struct{}{}
 	}
 	userIDs := map[uint]struct{}{}
+	tenantIDs := map[uint]struct{}{}
 	ruleIDs := make([]uint, 0, len(rules))
 	for _, tunnel := range tunnels {
 		if tunnel.ProtocolPolicyID != nil {
@@ -2502,6 +2893,9 @@ func (s *Server) agentConfig(c *gin.Context) {
 	for _, rule := range rules {
 		ruleIDs = append(ruleIDs, rule.ID)
 		userIDs[rule.UserID] = struct{}{}
+		if rule.TenantID != nil && *rule.TenantID > 0 {
+			tenantIDs[*rule.TenantID] = struct{}{}
+		}
 		if rule.ProtocolPolicyID != nil {
 			policyIDs[*rule.ProtocolPolicyID] = struct{}{}
 		}
@@ -2530,6 +2924,13 @@ func (s *Server) agentConfig(c *gin.Context) {
 			limitQuery = s.db.Where("user_id IN ?", ids)
 		} else {
 			limitQuery = limitQuery.Or("user_id IN ?", ids)
+		}
+	}
+	if ids := uintSetValues(tenantIDs); len(ids) > 0 {
+		if limitQuery == nil {
+			limitQuery = s.db.Where("tenant_id IN ?", ids)
+		} else {
+			limitQuery = limitQuery.Or("tenant_id IN ?", ids)
 		}
 	}
 	if limitQuery != nil {
@@ -2593,8 +2994,12 @@ func maxRevisionTime(revision int64, updatedAt time.Time) int64 {
 
 func (s *Server) activeAgentRules(candidates []models.ForwardRule, now time.Time) ([]models.ForwardRule, int64, error) {
 	userIDs := map[uint]struct{}{}
+	tenantIDs := map[uint]struct{}{}
 	for _, rule := range candidates {
 		userIDs[rule.UserID] = struct{}{}
+		if rule.TenantID != nil && *rule.TenantID > 0 {
+			tenantIDs[*rule.TenantID] = struct{}{}
+		}
 	}
 	if len(userIDs) == 0 {
 		return nil, 0, nil
@@ -2614,6 +3019,25 @@ func (s *Server) activeAgentRules(candidates []models.ForwardRule, now time.Time
 			}
 		}
 	}
+	if err := s.rollDueTenantPeriods(now); err != nil {
+		return nil, 0, err
+	}
+	var tenants []models.Tenant
+	if len(tenantIDs) > 0 {
+		if err := s.db.Where("id IN ?", uintSetValues(tenantIDs)).Find(&tenants).Error; err != nil {
+			return nil, 0, err
+		}
+	}
+	tenantByID := make(map[uint]models.Tenant, len(tenants))
+	for _, tenant := range tenants {
+		tenantByID[tenant.ID] = tenant
+		if tenant.ExpiresAt != nil && !tenant.ExpiresAt.After(now) {
+			revision := tenant.ExpiresAt.UnixNano() + 1
+			if revision > stateRevision {
+				stateRevision = revision
+			}
+		}
+	}
 	active := make([]models.ForwardRule, 0, len(candidates))
 	for _, rule := range candidates {
 		user, ok := byID[rule.UserID]
@@ -2622,6 +3046,12 @@ func (s *Server) activeAgentRules(candidates []models.ForwardRule, now time.Time
 		}
 		if user.FlowLimitBytes > 0 && user.UsedBytes >= user.FlowLimitBytes {
 			continue
+		}
+		if rule.TenantID != nil && *rule.TenantID > 0 {
+			tenant, ok := tenantByID[*rule.TenantID]
+			if !ok || !tenantActiveAt(tenant, now) || tenant.QuotaBlocked || (tenant.TrafficLimitBytes > 0 && tenant.UsedBytes >= tenant.TrafficLimitBytes) {
+				continue
+			}
 		}
 		active = append(active, rule)
 	}
@@ -2698,12 +3128,8 @@ func (s *Server) agentConfigAck(c *gin.Context) {
 func (s *Server) agentTraffic(c *gin.Context) {
 	node := ctxNode(c)
 	var req struct {
-		ReportID string `json:"reportId"`
-		Samples  []struct {
-			RuleID   uint  `json:"ruleId"`
-			InBytes  int64 `json:"inBytes"`
-			OutBytes int64 `json:"outBytes"`
-		} `json:"samples"`
+		ReportID string                    `json:"reportId"`
+		Samples  []agentTrafficSampleInput `json:"samples"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		bad(c, err)
@@ -2714,6 +3140,10 @@ func (s *Server) agentTraffic(c *gin.Context) {
 		return
 	}
 	req.ReportID = strings.TrimSpace(req.ReportID)
+	if len(req.ReportID) > 120 {
+		bad(c, errors.New("reportId must not exceed 120 characters"))
+		return
+	}
 	for _, sample := range req.Samples {
 		if sample.RuleID == 0 {
 			bad(c, errors.New("ruleId is required"))
@@ -2733,58 +3163,16 @@ func (s *Server) agentTraffic(c *gin.Context) {
 	err := s.db.Transaction(func(tx *gorm.DB) error {
 		if req.ReportID != "" {
 			marker := models.AgentTrafficReport{NodeID: node.ID, ReportID: req.ReportID, Accepted: accepted}
-			if err := tx.Create(&marker).Error; err != nil {
-				var existing models.AgentTrafficReport
-				if lookupErr := tx.Where("node_id = ? AND report_id = ?", node.ID, marker.ReportID).First(&existing).Error; lookupErr == nil {
-					duplicateAccepted = existing.Accepted
-					return nil
-				}
-				return err
-			}
-		}
-		exhaustedUsers := map[uint]struct{}{}
-		now := time.Now()
-		for _, sample := range req.Samples {
-			rule, err := s.findNodeRule(tx, node, sample.RuleID)
+			storedAccepted, duplicate, err := insertTrafficReportMarkerTx(tx, &marker)
 			if err != nil {
 				return err
 			}
-			if sample.InBytes > 0 {
-				if err := tx.Create(&models.TrafficSample{UserID: rule.UserID, RuleID: rule.ID, NodeID: node.ID, Direction: "in", Bytes: sample.InBytes, SampledAt: now}).Error; err != nil {
-					return err
-				}
-			}
-			if sample.OutBytes > 0 {
-				if err := tx.Create(&models.TrafficSample{UserID: rule.UserID, RuleID: rule.ID, NodeID: node.ID, Direction: "out", Bytes: sample.OutBytes, SampledAt: now}).Error; err != nil {
-					return err
-				}
-			}
-			total := sample.InBytes + sample.OutBytes
-			if err := tx.Model(&models.ForwardRule{}).Where("id = ?", rule.ID).Updates(map[string]any{
-				"in_bytes":  gorm.Expr("in_bytes + ?", sample.InBytes),
-				"out_bytes": gorm.Expr("out_bytes + ?", sample.OutBytes),
-			}).Error; err != nil {
-				return err
-			}
-			if err := tx.Model(&models.User{}).Where("id = ?", rule.UserID).Update("used_bytes", gorm.Expr("used_bytes + ?", total)).Error; err != nil {
-				return err
-			}
-			if total > 0 {
-				var user models.User
-				if err := tx.Select("id", "flow_limit_bytes", "used_bytes").First(&user, rule.UserID).Error; err != nil {
-					return err
-				}
-				if user.FlowLimitBytes > 0 && user.UsedBytes >= user.FlowLimitBytes {
-					exhaustedUsers[user.ID] = struct{}{}
-				}
+			if duplicate {
+				duplicateAccepted = storedAccepted
+				return nil
 			}
 		}
-		for userID := range exhaustedUsers {
-			if err := s.exhaustUserQuota(tx, userID, now.UnixNano()); err != nil {
-				return err
-			}
-		}
-		return nil
+		return s.accountAgentTrafficTx(tx, node, req.Samples, time.Now().UTC())
 	})
 	if err != nil {
 		if errors.Is(err, errAgentPayload) {
@@ -2818,7 +3206,7 @@ func (s *Server) exhaustUserQuota(tx *gorm.DB, userID uint, revision int64) erro
 	}
 	if err := tx.Model(&models.ForwardRule{}).
 		Where("user_id = ? AND status NOT IN ?", userID, []string{"paused", "disabled", "deleted", "quota_exhausted"}).
-		Updates(map[string]any{"status": "quota_exhausted", "revision": revision}).Error; err != nil {
+		Updates(map[string]any{"status": "quota_exhausted", "quota_source": "user", "revision": revision}).Error; err != nil {
 		return err
 	}
 	for _, tunnelID := range tunnelIDs {
@@ -2827,6 +3215,60 @@ func (s *Server) exhaustUserQuota(tx *gorm.DB, userID uint, revision int64) erro
 		}
 	}
 	return nil
+}
+
+func (s *Server) reconcileUserQuotaTx(tx *gorm.DB, user *models.User, revision int64) error {
+	if user.FlowLimitBytes > 0 && user.UsedBytes >= user.FlowLimitBytes {
+		return s.exhaustUserQuota(tx, user.ID, revision)
+	}
+	var rules []models.ForwardRule
+	if err := tx.Where("user_id = ? AND status = ? AND quota_source = ?", user.ID, "quota_exhausted", "user").Find(&rules).Error; err != nil {
+		return err
+	}
+	tenantBlocked := false
+	if user.TenantID != nil && *user.TenantID > 0 {
+		var tenant models.Tenant
+		if err := tx.First(&tenant, *user.TenantID).Error; err != nil {
+			return err
+		}
+		tenantBlocked = tenant.QuotaBlocked || (tenant.TrafficLimitBytes > 0 && tenant.UsedBytes >= tenant.TrafficLimitBytes)
+	}
+	for _, rule := range rules {
+		updates := map[string]any{"status": "unsynced", "quota_source": "", "revision": revision}
+		if tenantBlocked {
+			updates["status"] = "quota_exhausted"
+			updates["quota_source"] = "tenant"
+		}
+		if err := tx.Model(&models.ForwardRule{}).Where("id = ?", rule.ID).Updates(updates).Error; err != nil {
+			return err
+		}
+	}
+	return s.bumpUserRevisionWithDB(tx, user.ID, revision)
+}
+
+func (s *Server) resetUserTraffic(c *gin.Context) {
+	var user models.User
+	if err := s.db.First(&user, c.Param("id")).Error; err != nil {
+		notFound(c)
+		return
+	}
+	if !canManageUser(c, user) {
+		forbidden(c)
+		return
+	}
+	revision := time.Now().UnixNano()
+	if err := s.db.Transaction(func(tx *gorm.DB) error {
+		user.UsedBytes = 0
+		if err := tx.Model(&user).Update("used_bytes", 0).Error; err != nil {
+			return err
+		}
+		return s.reconcileUserQuotaTx(tx, &user, revision)
+	}); err != nil {
+		fail(c, err)
+		return
+	}
+	s.audit(c, actor(c), "user.traffic_reset", "user", fmt.Sprint(user.ID), "{}")
+	c.JSON(http.StatusOK, user)
 }
 
 func (s *Server) agentViolation(c *gin.Context) {

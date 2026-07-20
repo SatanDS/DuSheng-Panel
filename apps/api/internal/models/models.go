@@ -13,8 +13,54 @@ type SchemaMigration struct {
 	AppliedAt time.Time `json:"appliedAt"`
 }
 
+type Tenant struct {
+	BaseModel
+	Name              string     `gorm:"uniqueIndex;size:120;not null" json:"name"`
+	Code              string     `gorm:"uniqueIndex;size:60;not null" json:"code"`
+	Status            string     `gorm:"index;size:20;not null;default:active" json:"status"`
+	TrafficLimitBytes int64      `gorm:"not null;default:0" json:"trafficLimitBytes"`
+	UsedBytes         int64      `gorm:"not null;default:0" json:"usedBytes"`
+	ForwardLimit      int        `gorm:"not null;default:0" json:"forwardLimit"`
+	UserLimit         int        `gorm:"not null;default:0" json:"userLimit"`
+	ResetIntervalDays int        `gorm:"not null;default:0" json:"resetIntervalDays"`
+	PeriodStartedAt   *time.Time `gorm:"index" json:"periodStartedAt"`
+	NextResetAt       *time.Time `gorm:"index" json:"nextResetAt"`
+	QuotaBlocked      bool       `gorm:"index;not null;default:false" json:"quotaBlocked"`
+	QuotaBlockedAt    *time.Time `json:"quotaBlockedAt"`
+	ExpiresAt         *time.Time `gorm:"index" json:"expiresAt"`
+	Notes             string     `gorm:"type:text" json:"notes"`
+}
+
+type TenantTunnelGrant struct {
+	BaseModel
+	TenantID     uint `gorm:"uniqueIndex:idx_tenant_tunnel_grant;index;not null" json:"tenantId"`
+	TunnelID     uint `gorm:"uniqueIndex:idx_tenant_tunnel_grant;index;not null" json:"tunnelId"`
+	ForwardLimit int  `gorm:"not null;default:0" json:"forwardLimit"`
+	PortStart    int  `gorm:"not null;default:0" json:"portStart"`
+	PortEnd      int  `gorm:"not null;default:0" json:"portEnd"`
+}
+
+type TenantTrafficHourlyBucket struct {
+	BaseModel
+	TenantID        uint      `gorm:"uniqueIndex:idx_tenant_traffic_hour;index;not null" json:"tenantId"`
+	BucketStartedAt time.Time `gorm:"uniqueIndex:idx_tenant_traffic_hour;index;not null" json:"bucketStartedAt"`
+	InBytes         int64     `gorm:"not null;default:0" json:"inBytes"`
+	OutBytes        int64     `gorm:"not null;default:0" json:"outBytes"`
+	BilledBytes     int64     `gorm:"not null;default:0" json:"billedBytes"`
+}
+
+type PortLease struct {
+	BaseModel
+	EntryGroupID uint   `gorm:"uniqueIndex:idx_port_lease_scope;index;not null" json:"entryGroupId"`
+	BindIP       string `gorm:"uniqueIndex:idx_port_lease_scope;size:80;not null;default:*" json:"bindIp"`
+	Transport    string `gorm:"uniqueIndex:idx_port_lease_scope;uniqueIndex:idx_port_lease_rule_transport;size:8;not null" json:"transport"`
+	ListenPort   int    `gorm:"uniqueIndex:idx_port_lease_scope;index;not null" json:"listenPort"`
+	RuleID       uint   `gorm:"uniqueIndex:idx_port_lease_rule_transport;index;not null" json:"ruleId"`
+}
+
 type User struct {
 	BaseModel
+	TenantID       *uint      `gorm:"index" json:"tenantId"`
 	Username       string     `gorm:"uniqueIndex;size:80;not null" json:"username"`
 	DisplayName    string     `gorm:"size:120" json:"displayName"`
 	PasswordHash   string     `gorm:"size:255;not null" json:"-"`
@@ -174,14 +220,16 @@ type Tunnel struct {
 
 type ForwardRule struct {
 	BaseModel
+	TenantID         *uint  `gorm:"index" json:"tenantId"`
 	UserID           uint   `gorm:"index;not null" json:"userId"`
-	TunnelID         uint   `gorm:"index;uniqueIndex:idx_forward_rules_tunnel_listen;not null" json:"tunnelId"`
+	TunnelID         uint   `gorm:"index;not null" json:"tunnelId"`
 	Name             string `gorm:"size:120;not null" json:"name"`
 	Protocol         string `gorm:"size:20;not null;default:tcp" json:"protocol"`
-	ListenPort       int    `gorm:"index;uniqueIndex:idx_forward_rules_tunnel_listen;not null" json:"listenPort"`
+	ListenPort       int    `gorm:"index;not null" json:"listenPort"`
 	RemoteHost       string `gorm:"size:255;not null" json:"remoteHost"`
 	RemotePort       int    `gorm:"not null" json:"remotePort"`
 	Status           string `gorm:"index;size:30;not null;default:unsynced" json:"status"`
+	QuotaSource      string `gorm:"index;size:20" json:"quotaSource"`
 	Strategy         string `gorm:"size:40;not null;default:least_conn" json:"strategy"`
 	ProtocolPolicyID *uint  `json:"protocolPolicyId"`
 	InBytes          int64  `json:"inBytes"`
@@ -226,6 +274,7 @@ type ProtocolPolicy struct {
 type SpeedLimit struct {
 	BaseModel
 	Name        string `gorm:"size:120;not null" json:"name"`
+	TenantID    *uint  `gorm:"index" json:"tenantId"`
 	UserID      *uint  `gorm:"index" json:"userId"`
 	TunnelID    *uint  `gorm:"index" json:"tunnelId"`
 	RuleID      *uint  `gorm:"index" json:"ruleId"`
@@ -237,12 +286,13 @@ type SpeedLimit struct {
 
 type TrafficSample struct {
 	BaseModel
+	TenantID  *uint     `gorm:"index;index:idx_traffic_tenant_sampled" json:"tenantId"`
 	UserID    uint      `gorm:"index;index:idx_traffic_user_sampled" json:"userId"`
 	RuleID    uint      `gorm:"index;index:idx_traffic_rule_sampled" json:"ruleId"`
 	NodeID    uint      `gorm:"index;index:idx_traffic_node_sampled" json:"nodeId"`
 	Direction string    `gorm:"size:10" json:"direction"`
 	Bytes     int64     `json:"bytes"`
-	SampledAt time.Time `gorm:"index;index:idx_traffic_user_sampled;index:idx_traffic_rule_sampled;index:idx_traffic_node_sampled" json:"sampledAt"`
+	SampledAt time.Time `gorm:"index;index:idx_traffic_tenant_sampled;index:idx_traffic_user_sampled;index:idx_traffic_rule_sampled;index:idx_traffic_node_sampled" json:"sampledAt"`
 }
 
 type AgentTrafficReport struct {

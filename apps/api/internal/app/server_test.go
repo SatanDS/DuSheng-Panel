@@ -25,6 +25,10 @@ func testServer(t *testing.T) *Server {
 	db, err := gorm.Open(sqlite.Dialector{DriverName: "sqlite", DSN: fmt.Sprintf("file:%s?mode=memory&cache=shared", name)}, &gorm.Config{})
 	require.NoError(t, err)
 	require.NoError(t, db.AutoMigrate(
+		&models.Tenant{},
+		&models.TenantTunnelGrant{},
+		&models.TenantTrafficHourlyBucket{},
+		&models.PortLease{},
 		&models.User{},
 		&models.DeviceGroup{},
 		&models.LineProvider{},
@@ -123,6 +127,9 @@ func adminToken(t *testing.T, s *Server) string {
 
 func TestHealthAndMetricsEndpoints(t *testing.T) {
 	s := testServer(t)
+	require.NoError(t, s.db.Create(&models.Tenant{
+		Name: "Metrics Tenant", Code: "metrics-tenant", Status: "active", UsedBytes: 42, QuotaBlocked: true,
+	}).Error)
 	router := testRouter(t, s)
 	rec := jsonRequest(t, router, http.MethodGet, "/healthz", nil, "")
 	require.Equal(t, http.StatusOK, rec.Code)
@@ -134,6 +141,10 @@ func TestHealthAndMetricsEndpoints(t *testing.T) {
 	router.ServeHTTP(rec, req)
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Contains(t, rec.Body.String(), "dusheng_panel_accounted_bytes")
+	require.Contains(t, rec.Body.String(), `dusheng_panel_tenants{status="active"} 1`)
+	require.Contains(t, rec.Body.String(), "dusheng_panel_tenant_accounted_bytes 42")
+	require.Contains(t, rec.Body.String(), "dusheng_panel_tenant_quota_blocked 1")
+	require.Contains(t, rec.Body.String(), "dusheng_panel_tenant_tunnel_grants 0")
 	require.Contains(t, rec.Body.String(), "dusheng_api_http_requests_total")
 }
 
@@ -293,25 +304,28 @@ func TestPrepareForwardRuleRejectsExpiredUser(t *testing.T) {
 	require.ErrorContains(t, s.prepareForwardRule(&rule, 0), "expired")
 }
 
-func TestForwardRuleUniqueTunnelListenPort(t *testing.T) {
+func TestPortLeaseUniqueEntryGroupTransportAndPort(t *testing.T) {
 	s := testServer(t)
-	user, _, tunnel, _ := seedForwardFixture(t, s)
-	first := models.ForwardRule{
-		UserID:     user.ID,
-		TunnelID:   tunnel.ID,
-		Name:       "first",
-		Protocol:   "tcp",
-		Strategy:   "least_conn",
-		ListenPort: 20001,
-		RemoteHost: "127.0.0.1",
-		RemotePort: 8081,
+	_, entry, _, _ := seedForwardFixture(t, s)
+	first := models.PortLease{
+		EntryGroupID: entry.ID,
+		BindIP:       "*",
+		Transport:    "tcp",
+		ListenPort:   20001,
+		RuleID:       1001,
 	}
 	require.NoError(t, s.db.Create(&first).Error)
 
 	second := first
 	second.ID = 0
-	second.Name = "second"
+	second.RuleID = 1002
 	require.Error(t, s.db.Create(&second).Error)
+
+	udp := first
+	udp.ID = 0
+	udp.Transport = "udp"
+	udp.RuleID = 1003
+	require.NoError(t, s.db.Create(&udp).Error)
 }
 
 func TestPrepareForwardRuleRejectsOverlappingEntryGroupPort(t *testing.T) {
@@ -1248,6 +1262,357 @@ func TestInstallTokenCanRegisterOnlyOnce(t *testing.T) {
 		"uuid":         "single-use-node-2",
 	}, "")
 	require.Equal(t, http.StatusUnauthorized, rec.Code)
+}
+
+func TestTenantTrafficQuotaIsIdempotentAndStopsAgentConfig(t *testing.T) {
+	s := testServer(t)
+	user, entry, tunnel, _ := seedForwardFixture(t, s)
+	now := time.Now().UTC()
+	nextReset := now.Add(30 * 24 * time.Hour)
+	tenant := models.Tenant{
+		Name: "Game Team", Code: "game-team", Status: "active", TrafficLimitBytes: 10,
+		ResetIntervalDays: 30, PeriodStartedAt: &now, NextResetAt: &nextReset,
+	}
+	require.NoError(t, s.db.Create(&tenant).Error)
+	user.TenantID = &tenant.ID
+	user.FlowLimitBytes = 1 << 30
+	require.NoError(t, s.db.Save(&user).Error)
+	require.NoError(t, s.db.Create(&models.TenantTunnelGrant{TenantID: tenant.ID, TunnelID: tunnel.ID}).Error)
+	rule := models.ForwardRule{
+		TenantID: &tenant.ID, UserID: user.ID, TunnelID: tunnel.ID, Name: "tenant-quota-rule",
+		Protocol: "tcp", Strategy: "least_conn", ListenPort: 20001,
+		RemoteHost: "127.0.0.1", RemotePort: 8081, Status: "active", Revision: 1,
+	}
+	require.NoError(t, s.db.Create(&rule).Error)
+	nodeToken := "tenant-quota-node-token"
+	node := models.Node{
+		DeviceGroupID: entry.ID, Name: "tenant-node", UUID: "tenant-quota-node",
+		TokenHash: auth.TokenHash(nodeToken), Status: "online",
+	}
+	require.NoError(t, s.db.Create(&node).Error)
+	router := testRouter(t, s)
+	body := map[string]any{
+		"reportId": "tenant-report-1",
+		"samples":  []map[string]any{{"ruleId": rule.ID, "inBytes": 6, "outBytes": 5}},
+	}
+	rec := jsonRequest(t, router, http.MethodPost, "/api/v1/agent/traffic", body, nodeToken)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	rec = jsonRequest(t, router, http.MethodPost, "/api/v1/agent/traffic", body, nodeToken)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "duplicate")
+
+	require.NoError(t, s.db.First(&tenant, tenant.ID).Error)
+	require.Equal(t, int64(11), tenant.UsedBytes)
+	require.True(t, tenant.QuotaBlocked)
+	require.NoError(t, s.db.First(&rule, rule.ID).Error)
+	require.Equal(t, "quota_exhausted", rule.Status)
+	require.Equal(t, "tenant", rule.QuotaSource)
+	var buckets []models.TenantTrafficHourlyBucket
+	require.NoError(t, s.db.Where("tenant_id = ?", tenant.ID).Find(&buckets).Error)
+	require.Len(t, buckets, 1)
+	require.Equal(t, int64(11), buckets[0].BilledBytes)
+
+	rec = jsonRequest(t, router, http.MethodGet, "/api/v1/agent/config", nil, nodeToken)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var configPayload struct {
+		ForwardRules []models.ForwardRule `json:"forwardRules"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &configPayload))
+	require.Empty(t, configPayload.ForwardRules)
+
+	admin := adminToken(t, s)
+	rec = jsonRequest(t, router, http.MethodPost, fmt.Sprintf("/api/v1/tenants/%d/traffic/reset", tenant.ID), map[string]any{}, admin)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.NoError(t, s.db.First(&tenant, tenant.ID).Error)
+	require.Zero(t, tenant.UsedBytes)
+	require.False(t, tenant.QuotaBlocked)
+	require.NoError(t, s.db.First(&rule, rule.ID).Error)
+	require.Equal(t, "unsynced", rule.Status)
+	require.Empty(t, rule.QuotaSource)
+}
+
+func TestTenantQuotaResetKeepsUserQuotaExhausted(t *testing.T) {
+	s := testServer(t)
+	user, entry, tunnel, _ := seedForwardFixture(t, s)
+	now := time.Now().UTC()
+	tenant := models.Tenant{
+		Name: "Layered Quota", Code: "layered-quota", Status: "active", TrafficLimitBytes: 10,
+		PeriodStartedAt: &now,
+	}
+	require.NoError(t, s.db.Create(&tenant).Error)
+	user.TenantID = &tenant.ID
+	user.FlowLimitBytes = 10
+	require.NoError(t, s.db.Save(&user).Error)
+	require.NoError(t, s.db.Create(&models.TenantTunnelGrant{TenantID: tenant.ID, TunnelID: tunnel.ID}).Error)
+	rule := models.ForwardRule{
+		TenantID: &tenant.ID, UserID: user.ID, TunnelID: tunnel.ID, Name: "layered-quota-rule",
+		Protocol: "tcp", Strategy: "least_conn", ListenPort: 20001,
+		RemoteHost: "127.0.0.1", RemotePort: 8081, Status: "active", Revision: 1,
+	}
+	require.NoError(t, s.db.Create(&rule).Error)
+	nodeToken := "layered-quota-node-token"
+	node := models.Node{
+		DeviceGroupID: entry.ID, Name: "layered-node", UUID: "layered-quota-node",
+		TokenHash: auth.TokenHash(nodeToken), Status: "online",
+	}
+	require.NoError(t, s.db.Create(&node).Error)
+	router := testRouter(t, s)
+	rec := jsonRequest(t, router, http.MethodPost, "/api/v1/agent/traffic", map[string]any{
+		"reportId": "layered-report-1",
+		"samples":  []map[string]any{{"ruleId": rule.ID, "inBytes": 6, "outBytes": 5}},
+	}, nodeToken)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	require.NoError(t, s.db.First(&rule, rule.ID).Error)
+	require.Equal(t, "quota_exhausted", rule.Status)
+	require.Equal(t, "tenant", rule.QuotaSource)
+
+	admin := adminToken(t, s)
+	rec = jsonRequest(t, router, http.MethodPost, fmt.Sprintf("/api/v1/tenants/%d/traffic/reset", tenant.ID), map[string]any{}, admin)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.NoError(t, s.db.First(&rule, rule.ID).Error)
+	require.Equal(t, "quota_exhausted", rule.Status)
+	require.Equal(t, "user", rule.QuotaSource)
+
+	rec = jsonRequest(t, router, http.MethodGet, "/api/v1/agent/config", nil, nodeToken)
+	require.Equal(t, http.StatusOK, rec.Code)
+	var configPayload struct {
+		ForwardRules []models.ForwardRule `json:"forwardRules"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &configPayload))
+	require.Empty(t, configPayload.ForwardRules)
+
+	rec = jsonRequest(t, router, http.MethodPost, fmt.Sprintf("/api/v1/users/%d/traffic/reset", user.ID), map[string]any{}, admin)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.NoError(t, s.db.First(&rule, rule.ID).Error)
+	require.Equal(t, "unsynced", rule.Status)
+	require.Empty(t, rule.QuotaSource)
+}
+
+func TestTenantStatusUpdateBumpsNodeRevisionAndStopsConfig(t *testing.T) {
+	s := testServer(t)
+	user, entry, tunnel, _ := seedForwardFixture(t, s)
+	tenant := models.Tenant{Name: "Revision Tenant", Code: "revision-tenant", Status: "active"}
+	require.NoError(t, s.db.Create(&tenant).Error)
+	user.TenantID = &tenant.ID
+	require.NoError(t, s.db.Save(&user).Error)
+	rule := models.ForwardRule{
+		TenantID: &tenant.ID, UserID: user.ID, TunnelID: tunnel.ID, Name: "tenant-status-rule",
+		Protocol: "tcp", ListenPort: 20001, RemoteHost: "127.0.0.1", RemotePort: 8081, Status: "active",
+	}
+	require.NoError(t, s.db.Create(&rule).Error)
+	node := models.Node{DeviceGroupID: entry.ID, Name: "tenant-status-node", UUID: "tenant-status-node", TokenHash: "hash", DesiredRevision: 1}
+	require.NoError(t, s.db.Create(&node).Error)
+	router := testRouter(t, s)
+	rec := jsonRequest(t, router, http.MethodPut, fmt.Sprintf("/api/v1/tenants/%d", tenant.ID), map[string]any{
+		"name": tenant.Name, "code": tenant.Code, "status": "suspended",
+	}, adminToken(t, s))
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.NoError(t, s.db.First(&node, node.ID).Error)
+	require.Greater(t, node.DesiredRevision, int64(1))
+	active, _, err := s.activeAgentRules([]models.ForwardRule{rule}, time.Now().UTC())
+	require.NoError(t, err)
+	require.Empty(t, active)
+}
+
+func TestTenantTunnelGrantRejectsBreakingChangesAndBumpsRevision(t *testing.T) {
+	s := testServer(t)
+	user, entry, tunnel, _ := seedForwardFixture(t, s)
+	tenant := models.Tenant{Name: "Grant Tenant", Code: "grant-tenant", Status: "active"}
+	require.NoError(t, s.db.Create(&tenant).Error)
+	user.TenantID = &tenant.ID
+	require.NoError(t, s.db.Save(&user).Error)
+	grant := models.TenantTunnelGrant{TenantID: tenant.ID, TunnelID: tunnel.ID, ForwardLimit: 2, PortStart: 20000, PortEnd: 20002}
+	require.NoError(t, s.db.Create(&grant).Error)
+	rule := models.ForwardRule{
+		TenantID: &tenant.ID, UserID: user.ID, TunnelID: tunnel.ID, Name: "grant-rule",
+		Protocol: "tcp", ListenPort: 20001, RemoteHost: "127.0.0.1", RemotePort: 8081, Status: "active",
+	}
+	require.NoError(t, s.db.Create(&rule).Error)
+	node := models.Node{DeviceGroupID: entry.ID, Name: "grant-node", UUID: "grant-node", TokenHash: "hash", DesiredRevision: 1}
+	require.NoError(t, s.db.Create(&node).Error)
+	router := testRouter(t, s)
+	admin := adminToken(t, s)
+
+	rec := jsonRequest(t, router, http.MethodPut, fmt.Sprintf("/api/v1/tenant-tunnel-grants/%d", grant.ID), map[string]any{
+		"tenantId": tenant.ID, "tunnelId": tunnel.ID, "forwardLimit": 2, "portStart": 20002, "portEnd": 20002,
+	}, admin)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "existing rule")
+
+	rec = jsonRequest(t, router, http.MethodPut, fmt.Sprintf("/api/v1/tenant-tunnel-grants/%d", grant.ID), map[string]any{
+		"tenantId": tenant.ID, "tunnelId": tunnel.ID, "forwardLimit": 1, "portStart": 20001, "portEnd": 20002,
+	}, admin)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.NoError(t, s.db.First(&node, node.ID).Error)
+	require.Greater(t, node.DesiredRevision, int64(1))
+}
+
+func TestTenantTunnelGrantControlsPortRangeAndRuleCount(t *testing.T) {
+	s := testServer(t)
+	user, _, tunnel, _ := seedForwardFixture(t, s)
+	tenant := models.Tenant{Name: "Port Tenant", Code: "port-tenant", Status: "active", ForwardLimit: 5}
+	require.NoError(t, s.db.Create(&tenant).Error)
+	user.TenantID = &tenant.ID
+	user.ForwardLimit = 10
+	require.NoError(t, s.db.Save(&user).Error)
+	rule := models.ForwardRule{
+		UserID: user.ID, TunnelID: tunnel.ID, Name: "tenant-port", Protocol: "tcp",
+		RemoteHost: "198.51.100.10", RemotePort: 443,
+	}
+	require.ErrorContains(t, s.prepareForwardRule(&rule, 0), "not authorized")
+	require.NoError(t, s.db.Create(&models.TenantTunnelGrant{
+		TenantID: tenant.ID, TunnelID: tunnel.ID, ForwardLimit: 1, PortStart: 20001, PortEnd: 20002,
+	}).Error)
+	rule.ListenPort = 20000
+	require.ErrorContains(t, s.prepareForwardRule(&rule, 0), "authorized range")
+	rule.ListenPort = 0
+	require.NoError(t, s.prepareForwardRule(&rule, 0))
+	require.Equal(t, 20001, rule.ListenPort)
+	rule.TenantID = &tenant.ID
+	rule.Status = "active"
+	require.NoError(t, s.db.Create(&rule).Error)
+	second := rule
+	second.ID = 0
+	second.Name = "tenant-port-2"
+	second.ListenPort = 20002
+	require.ErrorContains(t, s.prepareForwardRule(&second, 0), "tenant tunnel forward rule limit")
+}
+
+func TestTenantAdministratorUserScope(t *testing.T) {
+	s := testServer(t)
+	tenantA := models.Tenant{Name: "Tenant A", Code: "tenant-a", Status: "active"}
+	tenantB := models.Tenant{Name: "Tenant B", Code: "tenant-b", Status: "active"}
+	require.NoError(t, s.db.Create(&tenantA).Error)
+	require.NoError(t, s.db.Create(&tenantB).Error)
+	hash, err := auth.HashPassword("secret")
+	require.NoError(t, err)
+	manager := models.User{TenantID: &tenantA.ID, Username: "tenant-manager", PasswordHash: hash, Role: "tenant_admin", Status: "active"}
+	ownUser := models.User{TenantID: &tenantA.ID, Username: "tenant-user", PasswordHash: hash, Role: "user", Status: "active"}
+	otherUser := models.User{TenantID: &tenantB.ID, Username: "other-user", PasswordHash: hash, Role: "user", Status: "active"}
+	require.NoError(t, s.db.Create(&manager).Error)
+	require.NoError(t, s.db.Create(&ownUser).Error)
+	require.NoError(t, s.db.Create(&otherUser).Error)
+	entry := models.DeviceGroup{Name: "tenant-entry", Role: "entry", PortStart: 20000, PortEnd: 21000, TrafficRatio: 1}
+	require.NoError(t, s.db.Create(&entry).Error)
+	authorizedTunnel := models.Tunnel{Name: "tenant-authorized", Mode: "single", EntryGroupID: entry.ID, Protocol: "direct", FlowAccounting: "single", EntryTrafficRatio: 1, ExitTrafficRatio: 1}
+	hiddenTunnel := models.Tunnel{Name: "tenant-hidden", Mode: "single", EntryGroupID: entry.ID, Protocol: "direct", FlowAccounting: "single", EntryTrafficRatio: 1, ExitTrafficRatio: 1}
+	require.NoError(t, s.db.Create(&authorizedTunnel).Error)
+	require.NoError(t, s.db.Create(&hiddenTunnel).Error)
+	require.NoError(t, s.db.Create(&models.TenantTunnelGrant{TenantID: tenantA.ID, TunnelID: authorizedTunnel.ID}).Error)
+	token, err := auth.GenerateToken(manager.ID, manager.Role, auth.TokenTypeAccess, "test-secret-for-unit-tests", time.Hour)
+	require.NoError(t, err)
+	router := testRouter(t, s)
+	rec := jsonRequest(t, router, http.MethodGet, "/api/v1/users?pageSize=20", nil, token)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Contains(t, rec.Body.String(), "tenant-user")
+	require.NotContains(t, rec.Body.String(), "other-user")
+	rec = jsonRequest(t, router, http.MethodPost, "/api/v1/users", map[string]any{
+		"username": "escalation", "password": "secret", "role": "admin", "status": "active",
+	}, token)
+	require.Equal(t, http.StatusBadRequest, rec.Code)
+	rec = jsonRequest(t, router, http.MethodGet, "/api/v1/tenant/traffic", nil, token)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Contains(t, rec.Body.String(), `"code":"tenant-a"`)
+	rec = jsonRequest(t, router, http.MethodGet, "/api/v1/tunnels?pageSize=20", nil, token)
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Contains(t, rec.Body.String(), "tenant-authorized")
+	require.NotContains(t, rec.Body.String(), "tenant-hidden")
+}
+
+func TestTenantUserLimitIsEnforcedInsideUserWrite(t *testing.T) {
+	s := testServer(t)
+	tenant := models.Tenant{Name: "Limited Tenant", Code: "limited-tenant", Status: "active", UserLimit: 1}
+	require.NoError(t, s.db.Create(&tenant).Error)
+	router := testRouter(t, s)
+	admin := adminToken(t, s)
+	for index, expected := range []int{http.StatusCreated, http.StatusBadRequest} {
+		rec := jsonRequest(t, router, http.MethodPost, "/api/v1/users", map[string]any{
+			"tenantId": tenant.ID, "username": fmt.Sprintf("limited-user-%d", index), "password": "secret", "role": "user", "status": "active",
+		}, admin)
+		require.Equal(t, expected, rec.Code, rec.Body.String())
+	}
+	var count int64
+	require.NoError(t, s.db.Model(&models.User{}).Where("tenant_id = ?", tenant.ID).Count(&count).Error)
+	require.Equal(t, int64(1), count)
+}
+
+func TestTenantAdministratorCannotOverrideRuleProtocolPolicy(t *testing.T) {
+	s := testServer(t)
+	user, _, tunnel, policy := seedForwardFixture(t, s)
+	tenant := models.Tenant{Name: "Policy Tenant", Code: "policy-tenant", Status: "active"}
+	require.NoError(t, s.db.Create(&tenant).Error)
+	user.TenantID = &tenant.ID
+	require.NoError(t, s.db.Save(&user).Error)
+	require.NoError(t, s.db.Create(&models.TenantTunnelGrant{TenantID: tenant.ID, TunnelID: tunnel.ID}).Error)
+	hash, err := auth.HashPassword("secret")
+	require.NoError(t, err)
+	manager := models.User{TenantID: &tenant.ID, Username: "policy-manager", PasswordHash: hash, Role: "tenant_admin", Status: "active"}
+	require.NoError(t, s.db.Create(&manager).Error)
+	token, err := auth.GenerateToken(manager.ID, manager.Role, auth.TokenTypeAccess, "test-secret-for-unit-tests", time.Hour)
+	require.NoError(t, err)
+	router := testRouter(t, s)
+	payload := map[string]any{
+		"userId": user.ID, "tunnelId": tunnel.ID, "name": "managed-rule", "protocol": "tcp",
+		"listenPort": 0, "remoteHost": "8.8.8.8", "remotePort": 53, "strategy": "least_conn",
+	}
+	payload["protocolPolicyId"] = policy.ID
+	rec := jsonRequest(t, router, http.MethodPost, "/api/v1/forward-rules", payload, token)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "only be managed by administrators")
+
+	delete(payload, "protocolPolicyId")
+	rec = jsonRequest(t, router, http.MethodPost, "/api/v1/forward-rules", payload, token)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var rule models.ForwardRule
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &rule))
+	require.NoError(t, s.db.Model(&rule).Update("protocol_policy_id", policy.ID).Error)
+	payload["listenPort"] = rule.ListenPort
+	rec = jsonRequest(t, router, http.MethodPut, fmt.Sprintf("/api/v1/forward-rules/%d", rule.ID), payload, token)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.NoError(t, s.db.First(&rule, rule.ID).Error)
+	require.NotNil(t, rule.ProtocolPolicyID)
+	require.Equal(t, policy.ID, *rule.ProtocolPolicyID)
+
+	payload["protocolPolicyId"] = policy.ID
+	rec = jsonRequest(t, router, http.MethodPost, "/api/v1/forward-rules/batch/preview", map[string]any{"rules": []any{payload}}, token)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+}
+
+func TestForwardRuleBatchPreviewAndCreateAreAtomic(t *testing.T) {
+	s := testServer(t)
+	user, _, tunnel, _ := seedForwardFixture(t, s)
+	user.ForwardLimit = 10
+	require.NoError(t, s.db.Save(&user).Error)
+	token := adminToken(t, s)
+	router := testRouter(t, s)
+	rules := []map[string]any{
+		{"userId": user.ID, "tunnelId": tunnel.ID, "name": "batch-a", "protocol": "tcp", "listenPort": 0, "remoteHost": "127.0.0.1", "remotePort": 8081},
+		{"userId": user.ID, "tunnelId": tunnel.ID, "name": "batch-b", "protocol": "tcp", "listenPort": 0, "remoteHost": "127.0.0.1", "remotePort": 8082},
+	}
+	rec := jsonRequest(t, router, http.MethodPost, "/api/v1/forward-rules/batch/preview", map[string]any{"rules": rules}, token)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var preview struct {
+		Items []models.ForwardRule `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &preview))
+	require.Len(t, preview.Items, 2)
+	require.NotEqual(t, preview.Items[0].ListenPort, preview.Items[1].ListenPort)
+	var count int64
+	require.NoError(t, s.db.Model(&models.ForwardRule{}).Where("name LIKE ?", "batch-%").Count(&count).Error)
+	require.Zero(t, count)
+
+	rec = jsonRequest(t, router, http.MethodPost, "/api/v1/forward-rules/batch", map[string]any{"rules": rules}, token)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var created struct {
+		Items []models.ForwardRule `json:"items"`
+	}
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &created))
+	require.Len(t, created.Items, 2)
+	require.NotEqual(t, created.Items[0].ListenPort, created.Items[1].ListenPort)
+	var leases int64
+	require.NoError(t, s.db.Model(&models.PortLease{}).Where("rule_id IN ?", []uint{created.Items[0].ID, created.Items[1].ID}).Count(&leases).Error)
+	require.Equal(t, int64(2), leases)
 }
 
 func ptrTime(value time.Time) *time.Time {

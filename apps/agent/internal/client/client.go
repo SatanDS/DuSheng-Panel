@@ -166,6 +166,7 @@ type Tunnel struct {
 
 type ForwardRule struct {
 	ID               uint   `json:"id"`
+	TenantID         *uint  `json:"tenantId"`
 	UserID           uint   `json:"userId"`
 	TunnelID         uint   `json:"tunnelId"`
 	Name             string `json:"name"`
@@ -218,6 +219,7 @@ type ProtocolPolicy struct {
 type SpeedLimit struct {
 	ID          uint   `json:"id"`
 	Name        string `json:"name"`
+	TenantID    *uint  `json:"tenantId"`
 	UserID      *uint  `json:"userId"`
 	TunnelID    *uint  `json:"tunnelId"`
 	RuleID      *uint  `json:"ruleId"`

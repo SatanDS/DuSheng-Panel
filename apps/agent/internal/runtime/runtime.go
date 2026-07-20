@@ -79,6 +79,7 @@ type Runtime struct {
 	listeners         map[listenerKey]managedListener
 	draining          map[uint64]managedListener
 	trackers          map[uint]*limitTracker
+	tenantTrackers    map[uint]*limitTracker
 	running           bool
 	lastApplyErr      string
 	lastApplyStatus   string
@@ -155,16 +156,17 @@ func New(reporter Reporter, logger *log.Logger, options Options) *Runtime {
 		options.DrainTimeout = defaultDrainTimeout
 	}
 	rt := &Runtime{
-		reporter:  reporter,
-		logger:    logger,
-		options:   options,
-		traffic:   newTrafficBuffer(reporter, logger, options),
-		dpi:       dpi.New(options.DPIAddress, options.DPITimeout),
-		listeners: map[listenerKey]managedListener{},
-		draining:  map[uint64]managedListener{},
-		trackers:  map[uint]*limitTracker{},
-		stopFlush: make(chan struct{}),
-		dpiClose:  make(chan string, defaultDPICloseQueueSize),
+		reporter:       reporter,
+		logger:         logger,
+		options:        options,
+		traffic:        newTrafficBuffer(reporter, logger, options),
+		dpi:            dpi.New(options.DPIAddress, options.DPITimeout),
+		listeners:      map[listenerKey]managedListener{},
+		draining:       map[uint64]managedListener{},
+		trackers:       map[uint]*limitTracker{},
+		tenantTrackers: map[uint]*limitTracker{},
+		stopFlush:      make(chan struct{}),
+		dpiClose:       make(chan string, defaultDPICloseQueueSize),
 	}
 	if rt.dpi != nil && rt.dpi.Enabled() {
 		go rt.probeDPI()
@@ -189,6 +191,7 @@ func (r *Runtime) Apply(ctx context.Context, cfg client.AgentConfig) error {
 	current := r.listeners
 	next := make(map[listenerKey]managedListener, len(desired))
 	nextTrackers := make(map[uint]*limitTracker)
+	nextTenantTrackers := make(map[uint]*limitTracker)
 	reused := make(map[managedListener]struct{}, len(current))
 	currentByBind := make(map[string]managedListener, len(current))
 	for _, listener := range current {
@@ -212,6 +215,19 @@ func (r *Runtime) Apply(ctx context.Context, cfg client.AgentConfig) error {
 			nextTrackers[desiredCfg.rule.ID] = tracker
 		}
 		desiredCfg.tracker = tracker
+		if desiredCfg.rule.TenantID != nil && *desiredCfg.rule.TenantID > 0 && !desiredCfg.tenantLimit.empty() {
+			tenantID := *desiredCfg.rule.TenantID
+			tenantTracker := nextTenantTrackers[tenantID]
+			if tenantTracker == nil {
+				if existing := r.tenantTrackers[tenantID]; existing != nil && existing.sameLimit(desiredCfg.tenantLimit) {
+					tenantTracker = existing
+				} else {
+					tenantTracker = newLimitTracker(desiredCfg.tenantLimit)
+				}
+				nextTenantTrackers[tenantID] = tenantTracker
+			}
+			desiredCfg.tenantTracker = tenantTracker
+		}
 
 		existing := current[key]
 		if existing == nil || existing.bind() != listenerBind(desiredCfg) {
@@ -258,6 +274,7 @@ func (r *Runtime) Apply(ctx context.Context, cfg client.AgentConfig) error {
 	}
 	r.listeners = next
 	r.trackers = nextTrackers
+	r.tenantTrackers = nextTenantTrackers
 	r.running = true
 	r.lastApplyErr = ""
 	r.lastApplyStatus = "applied"
@@ -335,6 +352,7 @@ func (r *Runtime) Status() map[string]any {
 		"lastApplyAt":         r.lastApplyAt,
 		"lastApplyDurationMs": r.lastApplyDuration.Milliseconds(),
 		"trafficBuffer":       r.traffic.status(),
+		"tenantLimitTrackers": len(r.tenantTrackers),
 		"listenerErrors": map[string]int64{
 			"accept":              atomic.LoadInt64(&r.acceptErrors),
 			"dial":                atomic.LoadInt64(&r.dialErrors),
@@ -370,6 +388,7 @@ func (r *Runtime) Stop(ctx context.Context) error {
 	r.listeners = map[listenerKey]managedListener{}
 	r.draining = map[uint64]managedListener{}
 	r.trackers = map[uint]*limitTracker{}
+	r.tenantTrackers = map[uint]*limitTracker{}
 	r.mu.Unlock()
 
 	done := make(chan struct{})
@@ -409,6 +428,7 @@ func (r *Runtime) desiredListeners(cfg client.AgentConfig) (map[listenerKey]rule
 		}
 		policy := effectivePolicy(rule, tunnel, cfg.DeviceGroup, policies)
 		limit := effectiveLimit(rule, cfg.SpeedLimits)
+		tenantLimit := effectiveTenantLimit(rule, cfg.SpeedLimits)
 		listenHost := r.listenHost(cfg.DeviceGroup)
 		base := ruleRuntimeConfig{
 			rule:        rule,
@@ -416,18 +436,19 @@ func (r *Runtime) desiredListeners(cfg client.AgentConfig) (map[listenerKey]rule
 			deviceGroup: cfg.DeviceGroup,
 			policy:      policy,
 			limit:       limit,
+			tenantLimit: tenantLimit,
 			listenAddr:  net.JoinHostPort(listenHost, strconv.Itoa(rule.ListenPort)),
 		}
 		if isTCPRule(rule) {
 			cfg := base
 			cfg.network = "tcp"
-			cfg.fingerprint = fingerprint(rule, tunnel, cfg.deviceGroup, policy, limit, listenHost, cfg.network)
+			cfg.fingerprint = fingerprint(rule, tunnel, cfg.deviceGroup, policy, limit, tenantLimit, listenHost, cfg.network)
 			desired[listenerKey{RuleID: rule.ID, Network: cfg.network}] = cfg
 		}
 		if isUDPRule(rule) {
 			cfg := base
 			cfg.network = "udp"
-			cfg.fingerprint = fingerprint(rule, tunnel, cfg.deviceGroup, policy, limit, listenHost, cfg.network)
+			cfg.fingerprint = fingerprint(rule, tunnel, cfg.deviceGroup, policy, limit, tenantLimit, listenHost, cfg.network)
 			desired[listenerKey{RuleID: rule.ID, Network: cfg.network}] = cfg
 		}
 	}
@@ -525,16 +546,48 @@ func (r *Runtime) probeDPI() {
 }
 
 type ruleRuntimeConfig struct {
-	rule        client.ForwardRule
-	tunnel      client.Tunnel
-	deviceGroup client.DeviceGroup
-	policy      *client.ProtocolPolicy
-	limit       effectiveSpeedLimit
-	tracker     *limitTracker
-	network     string
-	listenAddr  string
-	fingerprint string
-	generation  uint64
+	rule          client.ForwardRule
+	tunnel        client.Tunnel
+	deviceGroup   client.DeviceGroup
+	policy        *client.ProtocolPolicy
+	limit         effectiveSpeedLimit
+	tracker       *limitTracker
+	tenantLimit   effectiveSpeedLimit
+	tenantTracker *limitTracker
+	network       string
+	listenAddr    string
+	fingerprint   string
+	generation    uint64
+}
+
+func (c ruleRuntimeConfig) acquire(sourceIP string) bool {
+	if c.tracker != nil && !c.tracker.acquire(sourceIP) {
+		return false
+	}
+	if c.tenantTracker != nil && !c.tenantTracker.acquire(sourceIP) {
+		if c.tracker != nil {
+			c.tracker.release(sourceIP)
+		}
+		return false
+	}
+	return true
+}
+
+func (c ruleRuntimeConfig) release(sourceIP string) {
+	if c.tenantTracker != nil {
+		c.tenantTracker.release(sourceIP)
+	}
+	if c.tracker != nil {
+		c.tracker.release(sourceIP)
+	}
+}
+
+func (c ruleRuntimeConfig) uploadLimiter() *tokenBucketSet {
+	return newTokenBucketSet(c.tracker.uploadLimiter(), c.tenantTracker.uploadLimiter())
+}
+
+func (c ruleRuntimeConfig) downloadLimiter() *tokenBucketSet {
+	return newTokenBucketSet(c.tracker.downloadLimiter(), c.tenantTracker.downloadLimiter())
 }
 
 func (r *Runtime) newGeneration() uint64 {
@@ -818,7 +871,10 @@ func (l *ruleListener) handle(conn net.Conn) {
 		}
 	}
 
+	uploadLimiter := cfg.uploadLimiter()
+	downloadLimiter := cfg.downloadLimiter()
 	if len(firstPacket) > 0 {
+		uploadLimiter.wait(len(firstPacket))
 		if _, err := target.Write(firstPacket); err != nil {
 			atomic.AddInt64(&l.runtime.upstreamWriteErrors, 1)
 			return
@@ -826,6 +882,7 @@ func (l *ruleListener) handle(conn net.Conn) {
 		l.runtime.traffic.add(cfg.rule.ID, int64(len(firstPacket)), 0)
 	}
 	if len(upstreamFirst) > 0 {
+		downloadLimiter.wait(len(upstreamFirst))
 		if _, err := conn.Write(upstreamFirst); err != nil {
 			atomic.AddInt64(&l.runtime.upstreamWriteErrors, 1)
 			return
@@ -833,8 +890,6 @@ func (l *ruleListener) handle(conn net.Conn) {
 		l.runtime.traffic.add(cfg.rule.ID, 0, int64(len(upstreamFirst)))
 	}
 
-	uploadLimiter := newTokenBucket(cfg.limit.UploadBps)
-	downloadLimiter := newTokenBucket(cfg.limit.DownloadBps)
 	errc := make(chan error, 2)
 	go func() {
 		err := copyWithLimit(target, conn, uploadLimiter, func(packet []byte) error {
@@ -889,7 +944,7 @@ func (l *ruleListener) acquire(sourceIP string) bool {
 }
 
 func (l *ruleListener) acquireConfig(cfg ruleRuntimeConfig, sourceIP string) bool {
-	if cfg.tracker != nil && !cfg.tracker.acquire(sourceIP) {
+	if !cfg.acquire(sourceIP) {
 		return false
 	}
 	atomic.AddInt64(&l.activeConns, 1)
@@ -902,9 +957,7 @@ func (l *ruleListener) release(sourceIP string) {
 
 func (l *ruleListener) releaseConfig(cfg ruleRuntimeConfig, sourceIP string) {
 	atomic.AddInt64(&l.activeConns, -1)
-	if cfg.tracker != nil {
-		cfg.tracker.release(sourceIP)
-	}
+	cfg.release(sourceIP)
 }
 
 func (l *ruleListener) trackConn(conn net.Conn, generation uint64) {
@@ -1074,8 +1127,8 @@ type udpSession struct {
 	sourceIP         string
 	upstream         net.Conn
 	dpiFlow          *dpiFlow
-	uploadLimiter    *tokenBucket
-	downloadLimiter  *tokenBucket
+	uploadLimiter    *tokenBucketSet
+	downloadLimiter  *tokenBucketSet
 	lastSeen         int64
 	inspectedPackets int
 	closeOnce        sync.Once
@@ -1121,9 +1174,7 @@ func (l *udpListener) closeGenerationAfter(generation uint64, timeout time.Durat
 	l.mu.Unlock()
 	for _, session := range stale {
 		session.close()
-		if session.cfg.tracker != nil {
-			session.cfg.tracker.release(session.sourceIP)
-		}
+		session.cfg.release(session.sourceIP)
 	}
 }
 
@@ -1227,7 +1278,7 @@ func (l *udpListener) handleDatagram(clientAddr net.Addr, packet []byte) {
 		}
 	}
 
-	if cfg.tracker != nil && !cfg.tracker.acquire(sourceIP) {
+	if !cfg.acquire(sourceIP) {
 		dpiFlow.close()
 		atomic.AddInt64(&l.runtime.udpRejectedSessions, 1)
 		l.runtime.logger.Printf("runtime udp session rejected by limit rule=%d client=%s", cfg.rule.ID, clientAddr.String())
@@ -1236,9 +1287,7 @@ func (l *udpListener) handleDatagram(clientAddr net.Addr, packet []byte) {
 	upstream, err := net.DialTimeout("udp", net.JoinHostPort(cfg.rule.RemoteHost, strconv.Itoa(cfg.rule.RemotePort)), 10*time.Second)
 	if err != nil {
 		dpiFlow.close()
-		if cfg.tracker != nil {
-			cfg.tracker.release(sourceIP)
-		}
+		cfg.release(sourceIP)
 		atomic.AddInt64(&l.runtime.udpDialErrors, 1)
 		l.runtime.logger.Printf("runtime udp dial failed rule=%d target=%s:%d: %v", cfg.rule.ID, cfg.rule.RemoteHost, cfg.rule.RemotePort, err)
 		return
@@ -1251,8 +1300,8 @@ func (l *udpListener) handleDatagram(clientAddr net.Addr, packet []byte) {
 		sourceIP:         sourceIP,
 		upstream:         upstream,
 		dpiFlow:          dpiFlow,
-		uploadLimiter:    newTokenBucket(cfg.limit.UploadBps),
-		downloadLimiter:  newTokenBucket(cfg.limit.DownloadBps),
+		uploadLimiter:    cfg.uploadLimiter(),
+		downloadLimiter:  cfg.downloadLimiter(),
 		lastSeen:         time.Now().UnixNano(),
 		inspectedPackets: 1,
 	}
@@ -1261,9 +1310,7 @@ func (l *udpListener) handleDatagram(clientAddr net.Addr, packet []byte) {
 	if existing := l.sessions[key]; existing != nil {
 		l.mu.Unlock()
 		session.close()
-		if cfg.tracker != nil {
-			cfg.tracker.release(sourceIP)
-		}
+		cfg.release(sourceIP)
 		if !existing.inspectPacket(packet) {
 			return
 		}
@@ -1273,9 +1320,7 @@ func (l *udpListener) handleDatagram(clientAddr net.Addr, packet []byte) {
 	if l.runtime.options.MaxUDPSessionsPerRule > 0 && len(l.sessions) >= l.runtime.options.MaxUDPSessionsPerRule {
 		l.mu.Unlock()
 		session.close()
-		if cfg.tracker != nil {
-			cfg.tracker.release(sourceIP)
-		}
+		cfg.release(sourceIP)
 		atomic.AddInt64(&l.runtime.udpRejectedSessions, 1)
 		l.runtime.logger.Printf("runtime udp session rejected by runtime cap rule=%d client=%s", cfg.rule.ID, clientAddr.String())
 		return
@@ -1301,9 +1346,7 @@ func (l *udpListener) closeIdleSessions(now time.Time) {
 	l.mu.Unlock()
 	for _, session := range stale {
 		session.close()
-		if session.cfg.tracker != nil {
-			session.cfg.tracker.release(session.sourceIP)
-		}
+		session.cfg.release(session.sourceIP)
 	}
 	if len(stale) > 0 {
 		atomic.AddInt64(&l.runtime.udpCleanedSessions, int64(len(stale)))
@@ -1316,9 +1359,7 @@ func (l *udpListener) removeSession(session *udpSession) {
 		delete(l.sessions, session.key)
 		l.mu.Unlock()
 		session.close()
-		if session.cfg.tracker != nil {
-			session.cfg.tracker.release(session.sourceIP)
-		}
+		session.cfg.release(session.sourceIP)
 		return
 	}
 	l.mu.Unlock()
@@ -1399,9 +1440,7 @@ func (l *udpListener) closeAllSessions() {
 	l.mu.Unlock()
 	for _, session := range sessions {
 		session.close()
-		if session.cfg.tracker != nil {
-			session.cfg.tracker.release(session.sourceIP)
-		}
+		session.cfg.release(session.sourceIP)
 	}
 }
 
@@ -1786,15 +1825,24 @@ type effectiveSpeedLimit struct {
 	MaxIPs      int
 }
 
+func (l effectiveSpeedLimit) empty() bool {
+	return l.UploadBps <= 0 && l.DownloadBps <= 0 && l.MaxConns <= 0 && l.MaxIPs <= 0
+}
+
 type limitTracker struct {
-	limit   effectiveSpeedLimit
-	mu      sync.Mutex
-	active  int64
-	ipCount map[string]int
+	limit          effectiveSpeedLimit
+	mu             sync.Mutex
+	active         int64
+	ipCount        map[string]int
+	uploadBucket   *tokenBucket
+	downloadBucket *tokenBucket
 }
 
 func newLimitTracker(limit effectiveSpeedLimit) *limitTracker {
-	return &limitTracker{limit: limit, ipCount: map[string]int{}}
+	return &limitTracker{
+		limit: limit, ipCount: map[string]int{},
+		uploadBucket: newTokenBucket(limit.UploadBps), downloadBucket: newTokenBucket(limit.DownloadBps),
+	}
 }
 
 func (t *limitTracker) sameLimit(limit effectiveSpeedLimit) bool {
@@ -1843,6 +1891,20 @@ func (t *limitTracker) activeCount() int64 {
 	return t.active
 }
 
+func (t *limitTracker) uploadLimiter() *tokenBucket {
+	if t == nil {
+		return nil
+	}
+	return t.uploadBucket
+}
+
+func (t *limitTracker) downloadLimiter() *tokenBucket {
+	if t == nil {
+		return nil
+	}
+	return t.downloadBucket
+}
+
 func effectiveLimit(rule client.ForwardRule, limits []client.SpeedLimit) effectiveSpeedLimit {
 	levels := [][]client.SpeedLimit{{}, {}, {}}
 	for _, limit := range limits {
@@ -1863,6 +1925,19 @@ func effectiveLimit(rule client.ForwardRule, limits []client.SpeedLimit) effecti
 	return effectiveSpeedLimit{}
 }
 
+func effectiveTenantLimit(rule client.ForwardRule, limits []client.SpeedLimit) effectiveSpeedLimit {
+	if rule.TenantID == nil || *rule.TenantID == 0 {
+		return effectiveSpeedLimit{}
+	}
+	matched := make([]client.SpeedLimit, 0)
+	for _, limit := range limits {
+		if limit.TenantID != nil && *limit.TenantID == *rule.TenantID && limit.UserID == nil && limit.TunnelID == nil && limit.RuleID == nil {
+			matched = append(matched, limit)
+		}
+	}
+	return strictestLimit(matched)
+}
+
 func strictestLimit(limits []client.SpeedLimit) effectiveSpeedLimit {
 	var out effectiveSpeedLimit
 	for _, limit := range limits {
@@ -1879,6 +1954,35 @@ type tokenBucket struct {
 	mu     sync.Mutex
 	tokens float64
 	last   time.Time
+}
+
+type tokenBucketSet struct {
+	buckets []*tokenBucket
+}
+
+func newTokenBucketSet(buckets ...*tokenBucket) *tokenBucketSet {
+	filtered := make([]*tokenBucket, 0, len(buckets))
+	seen := make(map[*tokenBucket]struct{}, len(buckets))
+	for _, bucket := range buckets {
+		if bucket == nil {
+			continue
+		}
+		if _, ok := seen[bucket]; ok {
+			continue
+		}
+		seen[bucket] = struct{}{}
+		filtered = append(filtered, bucket)
+	}
+	return &tokenBucketSet{buckets: filtered}
+}
+
+func (s *tokenBucketSet) wait(n int) {
+	if s == nil {
+		return
+	}
+	for _, bucket := range s.buckets {
+		bucket.wait(n)
+	}
 }
 
 func newTokenBucket(rate int64) *tokenBucket {
@@ -1927,7 +2031,7 @@ func (b *tokenBucket) wait(n int) {
 	}
 }
 
-func copyWithLimit(dst net.Conn, src net.Conn, limiter *tokenBucket, inspect func([]byte) error, count func(int64)) error {
+func copyWithLimit(dst net.Conn, src net.Conn, limiter *tokenBucketSet, inspect func([]byte) error, count func(int64)) error {
 	buf := make([]byte, 32*1024)
 	for {
 		n, readErr := src.Read(buf)
@@ -2177,9 +2281,10 @@ func policyFromClient(policy *client.ProtocolPolicy, network string) protocol.Po
 	}
 }
 
-func fingerprint(rule client.ForwardRule, tunnel client.Tunnel, group client.DeviceGroup, policy *client.ProtocolPolicy, limit effectiveSpeedLimit, listenHost, network string) string {
+func fingerprint(rule client.ForwardRule, tunnel client.Tunnel, group client.DeviceGroup, policy *client.ProtocolPolicy, limit, tenantLimit effectiveSpeedLimit, listenHost, network string) string {
 	ruleValue := struct {
 		ID               uint
+		TenantID         *uint
 		UserID           uint
 		TunnelID         uint
 		Name             string
@@ -2192,6 +2297,7 @@ func fingerprint(rule client.ForwardRule, tunnel client.Tunnel, group client.Dev
 		ProtocolPolicyID *uint
 	}{
 		ID:               rule.ID,
+		TenantID:         rule.TenantID,
 		UserID:           rule.UserID,
 		TunnelID:         rule.TunnelID,
 		Name:             rule.Name,
@@ -2225,14 +2331,15 @@ func fingerprint(rule client.ForwardRule, tunnel client.Tunnel, group client.Dev
 		AdvancedJSON:      tunnel.AdvancedJSON,
 	}
 	value := struct {
-		Rule       any
-		Tunnel     any
-		GroupID    uint
-		Policy     *client.ProtocolPolicy
-		Limit      effectiveSpeedLimit
-		ListenHost string
-		Network    string
-	}{ruleValue, tunnelValue, group.ID, policy, limit, listenHost, network}
+		Rule        any
+		Tunnel      any
+		GroupID     uint
+		Policy      *client.ProtocolPolicy
+		Limit       effectiveSpeedLimit
+		TenantLimit effectiveSpeedLimit
+		ListenHost  string
+		Network     string
+	}{ruleValue, tunnelValue, group.ID, policy, limit, tenantLimit, listenHost, network}
 	content, _ := json.Marshal(value)
 	return string(content)
 }

@@ -15,6 +15,7 @@ tags:
   - name: System
   - name: Auth
   - name: User
+  - name: Tenant
   - name: Admin
   - name: Agent
 paths:
@@ -137,6 +138,175 @@ paths:
         "401":
           $ref: "#/components/responses/Unauthorized"
 
+  /api/v1/tenant:
+    get:
+      tags: [Tenant]
+      operationId: getCurrentTenant
+      summary: Get the tenant assigned to the current tenant administrator
+      security: [{ BearerAuth: [] }]
+      responses:
+        "200":
+          description: Current tenant.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Tenant" } } }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/tenant/traffic:
+    get:
+      tags: [Tenant]
+      operationId: getCurrentTenantTraffic
+      summary: Get the current tenant usage and hourly trend
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: Tenant usage and traffic buckets.
+          content: { application/json: { schema: { $ref: "#/components/schemas/TenantTrafficResponse" } } }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/tenants:
+    get:
+      tags: [Admin]
+      operationId: listTenants
+      summary: List tenants
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - $ref: "#/components/parameters/Search"
+        - $ref: "#/components/parameters/Status"
+      responses:
+        "200":
+          description: Tenant page.
+          content: { application/json: { schema: { $ref: "#/components/schemas/TenantPage" } } }
+        "403": { $ref: "#/components/responses/Forbidden" }
+    post:
+      tags: [Admin]
+      operationId: createTenant
+      summary: Create a tenant
+      security: [{ BearerAuth: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/TenantWrite" } } }
+      responses:
+        "201":
+          description: Tenant created.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Tenant" } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "403": { $ref: "#/components/responses/Forbidden" }
+
+  /api/v1/tenants/{id}:
+    put:
+      tags: [Admin]
+      operationId: updateTenant
+      summary: Replace a tenant
+      security: [{ BearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/TenantWrite" } } }
+      responses:
+        "200":
+          description: Tenant updated.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Tenant" } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Admin]
+      operationId: deleteTenant
+      summary: Delete an unreferenced tenant
+      security: [{ BearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "204": { $ref: "#/components/responses/NoContent" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/tenants/{id}/traffic:
+    get:
+      tags: [Admin]
+      operationId: getTenantTraffic
+      summary: Get tenant usage and hourly trend
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Id"
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+      responses:
+        "200":
+          description: Tenant usage and traffic buckets.
+          content: { application/json: { schema: { $ref: "#/components/schemas/TenantTrafficResponse" } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/tenants/{id}/traffic/reset:
+    post:
+      tags: [Admin]
+      operationId: resetTenantTraffic
+      summary: Reset the tenant billing period usage
+      security: [{ BearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: Reset tenant.
+          content: { application/json: { schema: { $ref: "#/components/schemas/Tenant" } } }
+        "404": { $ref: "#/components/responses/NotFound" }
+
+  /api/v1/tenant-tunnel-grants:
+    get:
+      tags: [Admin]
+      operationId: listTenantTunnelGrants
+      summary: List tenant tunnel grants
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - $ref: "#/components/parameters/TenantId"
+        - $ref: "#/components/parameters/TunnelId"
+      responses:
+        "200":
+          description: Grant page.
+          content: { application/json: { schema: { $ref: "#/components/schemas/TenantTunnelGrantPage" } } }
+    post:
+      tags: [Admin]
+      operationId: createTenantTunnelGrant
+      summary: Grant a tenant access to a tunnel and optional port range
+      security: [{ BearerAuth: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/TenantTunnelGrantWrite" } } }
+      responses:
+        "201":
+          description: Grant created.
+          content: { application/json: { schema: { $ref: "#/components/schemas/TenantTunnelGrant" } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /api/v1/tenant-tunnel-grants/{id}:
+    put:
+      tags: [Admin]
+      operationId: updateTenantTunnelGrant
+      summary: Replace a tenant tunnel grant
+      security: [{ BearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/TenantTunnelGrantWrite" } } }
+      responses:
+        "200":
+          description: Grant updated.
+          content: { application/json: { schema: { $ref: "#/components/schemas/TenantTunnelGrant" } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+    delete:
+      tags: [Admin]
+      operationId: deleteTenantTunnelGrant
+      summary: Delete an unused tenant tunnel grant
+      security: [{ BearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "204": { $ref: "#/components/responses/NoContent" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
   /api/v1/forward-rules:
     get:
       tags: [User]
@@ -184,6 +354,36 @@ paths:
           $ref: "#/components/responses/BadRequest"
         "401":
           $ref: "#/components/responses/Unauthorized"
+
+  /api/v1/forward-rules/batch/preview:
+    post:
+      tags: [User]
+      operationId: previewForwardRuleBatch
+      summary: Validate and allocate ports for a rule batch without committing
+      security: [{ BearerAuth: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/ForwardRuleBatchWrite" } } }
+      responses:
+        "200":
+          description: Batch preview.
+          content: { application/json: { schema: { $ref: "#/components/schemas/ForwardRuleBatchResponse" } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /api/v1/forward-rules/batch:
+    post:
+      tags: [User]
+      operationId: createForwardRuleBatch
+      summary: Atomically create up to 100 forwarding rules
+      security: [{ BearerAuth: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/ForwardRuleBatchWrite" } } }
+      responses:
+        "201":
+          description: Batch created.
+          content: { application/json: { schema: { $ref: "#/components/schemas/ForwardRuleBatchResponse" } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
 
   /api/v1/forward-rules/{id}:
     put:
@@ -319,6 +519,20 @@ paths:
           $ref: "#/components/responses/Forbidden"
         "404":
           $ref: "#/components/responses/NotFound"
+
+  /api/v1/users/{id}/traffic/reset:
+    post:
+      tags: [Tenant]
+      operationId: resetUserTraffic
+      summary: Reset a user traffic counter and restore eligible rules
+      security: [{ BearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "200":
+          description: User with reset usage.
+          content: { application/json: { schema: { $ref: "#/components/schemas/User" } } }
+        "403": { $ref: "#/components/responses/Forbidden" }
+        "404": { $ref: "#/components/responses/NotFound" }
 
   /api/v1/device-groups:
     get:
@@ -646,9 +860,10 @@ paths:
 
   /api/v1/tunnels:
     get:
-      tags: [Admin]
+      tags: [User]
       operationId: listTunnels
-      summary: List tunnels
+      summary: List tunnels visible to the current account
+      description: Tenant accounts only receive tunnels granted to their tenant; administrators receive all tunnels.
       security:
         - BearerAuth: []
       parameters:
@@ -1320,6 +1535,13 @@ components:
       schema:
         type: integer
         minimum: 1
+    TenantId:
+      name: tenantId
+      in: query
+      required: false
+      schema:
+        type: integer
+        minimum: 1
     TunnelId:
       name: tunnelId
       in: query
@@ -1514,6 +1736,27 @@ components:
               items:
                 $ref: "#/components/schemas/User"
 
+    TenantPage:
+      allOf:
+        - $ref: "#/components/schemas/PageMeta"
+        - type: object
+          properties:
+            items: { type: array, items: { $ref: "#/components/schemas/Tenant" } }
+
+    TenantTunnelGrantPage:
+      allOf:
+        - $ref: "#/components/schemas/PageMeta"
+        - type: object
+          properties:
+            items: { type: array, items: { $ref: "#/components/schemas/TenantTunnelGrant" } }
+
+    TenantTrafficHourlyBucketPage:
+      allOf:
+        - $ref: "#/components/schemas/PageMeta"
+        - type: object
+          properties:
+            items: { type: array, items: { $ref: "#/components/schemas/TenantTrafficHourlyBucket" } }
+
     ForwardRulePage:
       allOf:
         - $ref: "#/components/schemas/PageMeta"
@@ -1686,12 +1929,76 @@ components:
         accessToken:
           type: string
 
+    Tenant:
+      allOf:
+        - $ref: "#/components/schemas/BaseModel"
+        - $ref: "#/components/schemas/TenantWrite"
+        - type: object
+          required: [usedBytes, quotaBlocked]
+          properties:
+            usedBytes: { type: integer, format: int64, minimum: 0 }
+            periodStartedAt: { type: [string, "null"], format: date-time }
+            nextResetAt: { type: [string, "null"], format: date-time }
+            quotaBlocked: { type: boolean }
+            quotaBlockedAt: { type: [string, "null"], format: date-time }
+
+    TenantWrite:
+      type: object
+      required: [name, code]
+      properties:
+        name: { type: string, minLength: 1, maxLength: 120 }
+        code: { type: string, pattern: "^[a-z0-9][a-z0-9_-]{1,59}$" }
+        status: { type: string, enum: [active, suspended, disabled], default: active }
+        trafficLimitBytes: { type: integer, format: int64, minimum: 0 }
+        forwardLimit: { type: integer, minimum: 0 }
+        userLimit: { type: integer, minimum: 0 }
+        resetIntervalDays: { type: integer, minimum: 0, maximum: 3660 }
+        expiresAt: { type: [string, "null"], format: date-time }
+        notes: { type: string }
+
+    TenantTunnelGrant:
+      allOf:
+        - $ref: "#/components/schemas/BaseModel"
+        - $ref: "#/components/schemas/TenantTunnelGrantWrite"
+
+    TenantTunnelGrantWrite:
+      type: object
+      required: [tenantId, tunnelId]
+      properties:
+        tenantId: { type: integer, minimum: 1 }
+        tunnelId: { type: integer, minimum: 1 }
+        forwardLimit: { type: integer, minimum: 0 }
+        portStart: { type: integer, minimum: 0, maximum: 65535 }
+        portEnd: { type: integer, minimum: 0, maximum: 65535 }
+
+    TenantTrafficHourlyBucket:
+      allOf:
+        - $ref: "#/components/schemas/BaseModel"
+        - type: object
+          required: [tenantId, bucketStartedAt, inBytes, outBytes, billedBytes]
+          properties:
+            tenantId: { type: integer, minimum: 1 }
+            bucketStartedAt: { type: string, format: date-time }
+            inBytes: { type: integer, format: int64, minimum: 0 }
+            outBytes: { type: integer, format: int64, minimum: 0 }
+            billedBytes: { type: integer, format: int64, minimum: 0 }
+
+    TenantTrafficResponse:
+      type: object
+      required: [tenant, buckets]
+      properties:
+        tenant: { $ref: "#/components/schemas/Tenant" }
+        buckets: { $ref: "#/components/schemas/TenantTrafficHourlyBucketPage" }
+
     User:
       allOf:
         - $ref: "#/components/schemas/BaseModel"
         - type: object
           required: [username, role, status, flowLimitBytes, usedBytes, forwardLimit]
           properties:
+            tenantId:
+              type: [integer, "null"]
+              minimum: 1
             username:
               type: string
               maxLength: 80
@@ -1721,6 +2028,9 @@ components:
       type: object
       required: [username, password]
       properties:
+        tenantId:
+          type: [integer, "null"]
+          minimum: 1
         username:
           type: string
           minLength: 1
@@ -1749,6 +2059,9 @@ components:
     UserUpdate:
       type: object
       properties:
+        tenantId:
+          type: [integer, "null"]
+          minimum: 1
         username:
           type: string
           minLength: 1
@@ -1776,7 +2089,7 @@ components:
 
     UserRole:
       type: string
-      enum: [admin, user]
+      enum: [admin, tenant_admin, user]
 
     UserStatus:
       type: string
@@ -2104,6 +2417,9 @@ components:
         - type: object
           required: [status, inBytes, outBytes, revision, violationCount]
           properties:
+            tenantId:
+              type: [integer, "null"]
+              minimum: 1
             status:
               $ref: "#/components/schemas/ForwardRuleStatus"
             inBytes:
@@ -2119,6 +2435,9 @@ components:
               format: int64
             lastSyncError:
               type: string
+            quotaSource:
+              type: string
+              enum: ["", user, tenant]
             violationCount:
               type: integer
               minimum: 0
@@ -2164,6 +2483,27 @@ components:
         protocolPolicyId:
           type: [integer, "null"]
           minimum: 1
+          description: Rule-level override. Only administrators may set or change this field; other accounts inherit the existing rule, tunnel, or entry-group policy.
+
+    ForwardRuleBatchWrite:
+      type: object
+      required: [rules]
+      properties:
+        rules:
+          type: array
+          minItems: 1
+          maxItems: 100
+          items: { $ref: "#/components/schemas/ForwardRuleWrite" }
+
+    ForwardRuleBatchResponse:
+      type: object
+      required: [items, count]
+      properties:
+        items:
+          type: array
+          items: { $ref: "#/components/schemas/ForwardRule" }
+        count: { type: integer, minimum: 0, maximum: 100 }
+        preview: { type: boolean }
 
     ForwardRuleProtocol:
       type: string
@@ -2319,6 +2659,9 @@ components:
           type: string
           minLength: 1
           maxLength: 120
+        tenantId:
+          type: [integer, "null"]
+          minimum: 1
         userId:
           type: [integer, "null"]
           minimum: 1
@@ -2349,6 +2692,9 @@ components:
         - type: object
           required: [userId, ruleId, nodeId, direction, bytes, sampledAt]
           properties:
+            tenantId:
+              type: [integer, "null"]
+              minimum: 1
             userId:
               type: integer
               minimum: 1
