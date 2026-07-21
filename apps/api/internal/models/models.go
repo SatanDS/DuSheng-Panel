@@ -40,6 +40,15 @@ type TenantTunnelGrant struct {
 	PortEnd      int  `gorm:"not null;default:0" json:"portEnd"`
 }
 
+type UserTunnelGrant struct {
+	BaseModel
+	UserID       uint `gorm:"uniqueIndex:idx_user_tunnel_grant;index;not null" json:"userId"`
+	TunnelID     uint `gorm:"uniqueIndex:idx_user_tunnel_grant;index;not null" json:"tunnelId"`
+	ForwardLimit int  `gorm:"not null;default:0" json:"forwardLimit"`
+	PortStart    int  `gorm:"not null;default:0" json:"portStart"`
+	PortEnd      int  `gorm:"not null;default:0" json:"portEnd"`
+}
+
 type TenantTrafficHourlyBucket struct {
 	BaseModel
 	TenantID        uint      `gorm:"uniqueIndex:idx_tenant_traffic_hour;index;not null" json:"tenantId"`

@@ -21,7 +21,7 @@ func TestOpenAppliesVersionedSchemaOnce(t *testing.T) {
 	if err != nil {
 		t.Fatalf("DB() error = %v", err)
 	}
-	for _, model := range []any{&models.Tenant{}, &models.TenantTunnelGrant{}, &models.PortLease{}, &models.Node{}, &models.LineCircuit{}, &models.LineProbe{}, &models.AgentEvent{}} {
+	for _, model := range []any{&models.Tenant{}, &models.TenantTunnelGrant{}, &models.UserTunnelGrant{}, &models.PortLease{}, &models.Node{}, &models.LineCircuit{}, &models.LineProbe{}, &models.AgentEvent{}} {
 		if !db.Migrator().HasTable(model) {
 			t.Fatalf("missing migrated table for %T", model)
 		}
@@ -30,8 +30,8 @@ func TestOpenAppliesVersionedSchemaOnce(t *testing.T) {
 	if err := db.Model(&models.SchemaMigration{}).Count(&firstCount).Error; err != nil {
 		t.Fatalf("count migrations: %v", err)
 	}
-	if firstCount < 3 {
-		t.Fatalf("migration count = %d, want at least 3", firstCount)
+	if firstCount < 4 {
+		t.Fatalf("migration count = %d, want at least 4", firstCount)
 	}
 	secondDB, err := Open(cfg)
 	if err != nil {

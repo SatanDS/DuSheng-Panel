@@ -258,6 +258,7 @@ paths:
       tags: [Admin]
       operationId: listTenantTunnelGrants
       summary: List tenant tunnel grants
+      deprecated: true
       security: [{ BearerAuth: [] }]
       parameters:
         - $ref: "#/components/parameters/Page"
@@ -272,6 +273,7 @@ paths:
       tags: [Admin]
       operationId: createTenantTunnelGrant
       summary: Grant a tenant access to a tunnel and optional port range
+      deprecated: true
       security: [{ BearerAuth: [] }]
       requestBody:
         required: true
@@ -287,6 +289,7 @@ paths:
       tags: [Admin]
       operationId: updateTenantTunnelGrant
       summary: Replace a tenant tunnel grant
+      deprecated: true
       security: [{ BearerAuth: [] }]
       parameters: [{ $ref: "#/components/parameters/Id" }]
       requestBody:
@@ -301,11 +304,68 @@ paths:
       tags: [Admin]
       operationId: deleteTenantTunnelGrant
       summary: Delete an unused tenant tunnel grant
+      deprecated: true
       security: [{ BearerAuth: [] }]
       parameters: [{ $ref: "#/components/parameters/Id" }]
       responses:
         "204": { $ref: "#/components/responses/NoContent" }
         "400": { $ref: "#/components/responses/BadRequest" }
+
+  /api/v1/user-tunnel-grants:
+    get:
+      tags: [Admin]
+      operationId: listUserTunnelGrants
+      summary: List direct user tunnel grants
+      security: [{ BearerAuth: [] }]
+      parameters:
+        - $ref: "#/components/parameters/Page"
+        - $ref: "#/components/parameters/PageSize"
+        - $ref: "#/components/parameters/UserId"
+        - $ref: "#/components/parameters/TunnelId"
+      responses:
+        "200":
+          description: User tunnel grant page.
+          content: { application/json: { schema: { $ref: "#/components/schemas/UserTunnelGrantPage" } } }
+    post:
+      tags: [Admin]
+      operationId: createUserTunnelGrant
+      summary: Grant a regular user access to a tunnel and optional port range
+      security: [{ BearerAuth: [] }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/UserTunnelGrantWrite" } } }
+      responses:
+        "201":
+          description: User tunnel grant created.
+          content: { application/json: { schema: { $ref: "#/components/schemas/UserTunnelGrant" } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+
+  /api/v1/user-tunnel-grants/{id}:
+    put:
+      tags: [Admin]
+      operationId: updateUserTunnelGrant
+      summary: Replace a direct user tunnel grant
+      security: [{ BearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      requestBody:
+        required: true
+        content: { application/json: { schema: { $ref: "#/components/schemas/UserTunnelGrantWrite" } } }
+      responses:
+        "200":
+          description: User tunnel grant updated.
+          content: { application/json: { schema: { $ref: "#/components/schemas/UserTunnelGrant" } } }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
+    delete:
+      tags: [Admin]
+      operationId: deleteUserTunnelGrant
+      summary: Delete an unused direct user tunnel grant
+      security: [{ BearerAuth: [] }]
+      parameters: [{ $ref: "#/components/parameters/Id" }]
+      responses:
+        "204": { $ref: "#/components/responses/NoContent" }
+        "400": { $ref: "#/components/responses/BadRequest" }
+        "404": { $ref: "#/components/responses/NotFound" }
 
   /api/v1/forward-rules:
     get:
@@ -1750,6 +1810,13 @@ components:
           properties:
             items: { type: array, items: { $ref: "#/components/schemas/TenantTunnelGrant" } }
 
+    UserTunnelGrantPage:
+      allOf:
+        - $ref: "#/components/schemas/PageMeta"
+        - type: object
+          properties:
+            items: { type: array, items: { $ref: "#/components/schemas/UserTunnelGrant" } }
+
     TenantTrafficHourlyBucketPage:
       allOf:
         - $ref: "#/components/schemas/PageMeta"
@@ -1968,6 +2035,21 @@ components:
         tenantId: { type: integer, minimum: 1 }
         tunnelId: { type: integer, minimum: 1 }
         forwardLimit: { type: integer, minimum: 0 }
+        portStart: { type: integer, minimum: 0, maximum: 65535 }
+        portEnd: { type: integer, minimum: 0, maximum: 65535 }
+
+    UserTunnelGrant:
+      allOf:
+        - $ref: "#/components/schemas/BaseModel"
+        - $ref: "#/components/schemas/UserTunnelGrantWrite"
+
+    UserTunnelGrantWrite:
+      type: object
+      required: [userId, tunnelId]
+      properties:
+        userId: { type: integer, minimum: 1, description: Regular user receiving direct line access. }
+        tunnelId: { type: integer, minimum: 1 }
+        forwardLimit: { type: integer, minimum: 0, description: Zero means unlimited for this user and tunnel. }
         portStart: { type: integer, minimum: 0, maximum: 65535 }
         portEnd: { type: integer, minimum: 0, maximum: 65535 }
 

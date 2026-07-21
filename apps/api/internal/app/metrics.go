@@ -68,6 +68,7 @@ type panelCollector struct {
 	tenantBytes        *prometheus.Desc
 	tenantQuotaBlocked *prometheus.Desc
 	tenantTunnelGrants *prometheus.Desc
+	userTunnelGrants   *prometheus.Desc
 	violations         *prometheus.Desc
 }
 
@@ -84,6 +85,7 @@ func newPanelCollector(db *gorm.DB) *panelCollector {
 		tenantBytes:        prometheus.NewDesc("dusheng_panel_tenant_accounted_bytes", "Total bytes accounted to tenant billing periods.", nil, nil),
 		tenantQuotaBlocked: prometheus.NewDesc("dusheng_panel_tenant_quota_blocked", "Tenants currently blocked by traffic quota.", nil, nil),
 		tenantTunnelGrants: prometheus.NewDesc("dusheng_panel_tenant_tunnel_grants", "Configured tenant-to-tunnel grants.", nil, nil),
+		userTunnelGrants:   prometheus.NewDesc("dusheng_panel_user_tunnel_grants", "Configured direct user-to-tunnel grants.", nil, nil),
 		violations:         prometheus.NewDesc("dusheng_panel_protocol_violations_24h", "Protocol violations recorded during the last 24 hours.", nil, nil),
 	}
 }
@@ -99,6 +101,7 @@ func (c *panelCollector) Describe(ch chan<- *prometheus.Desc) {
 	ch <- c.tenantBytes
 	ch <- c.tenantQuotaBlocked
 	ch <- c.tenantTunnelGrants
+	ch <- c.userTunnelGrants
 	ch <- c.violations
 }
 
@@ -125,6 +128,9 @@ func (c *panelCollector) Collect(ch chan<- prometheus.Metric) {
 	var grants int64
 	if err := c.db.Model(&models.TenantTunnelGrant{}).Count(&grants).Error; err == nil {
 		ch <- prometheus.MustNewConstMetric(c.tenantTunnelGrants, prometheus.GaugeValue, float64(grants))
+	}
+	if err := c.db.Model(&models.UserTunnelGrant{}).Count(&grants).Error; err == nil {
+		ch <- prometheus.MustNewConstMetric(c.userTunnelGrants, prometheus.GaugeValue, float64(grants))
 	}
 	var violations int64
 	if err := c.db.Model(&models.ProtocolViolation{}).Where("occurred_at >= ?", time.Now().Add(-24*time.Hour)).Count(&violations).Error; err == nil {

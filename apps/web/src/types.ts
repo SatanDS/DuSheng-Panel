@@ -24,6 +24,15 @@ export interface User extends Entity {
   expiresAt: string | null;
 }
 
+export interface UserTunnelGrant extends Entity {
+  id: number;
+  userId: number;
+  tunnelId: number;
+  forwardLimit: number;
+  portStart: number;
+  portEnd: number;
+}
+
 export interface ForwardRule extends Entity {
   id: number;
 	tenantId: number | null;

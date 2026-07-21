@@ -133,6 +133,10 @@ func NewServer(cfg config.Config, db *gorm.DB) *gin.Engine {
 	admin.POST("/tenant-tunnel-grants", s.createTenantTunnelGrant)
 	admin.PUT("/tenant-tunnel-grants/:id", s.updateTenantTunnelGrant)
 	admin.DELETE("/tenant-tunnel-grants/:id", s.deleteTenantTunnelGrant)
+	admin.GET("/user-tunnel-grants", s.listUserTunnelGrants)
+	admin.POST("/user-tunnel-grants", s.createUserTunnelGrant)
+	admin.PUT("/user-tunnel-grants/:id", s.updateUserTunnelGrant)
+	admin.DELETE("/user-tunnel-grants/:id", s.deleteUserTunnelGrant)
 	admin.GET("/device-groups", s.listDeviceGroups)
 	admin.POST("/device-groups", s.createDeviceGroup)
 	admin.PUT("/device-groups/:id", s.updateDeviceGroup)
@@ -844,7 +848,12 @@ func (s *Server) deleteUser(c *gin.Context) {
 		bad(c, errors.New("user is still referenced by forwarding rules or speed limits"))
 		return
 	}
-	if err := s.db.Delete(&user).Error; err != nil {
+	if err := s.db.Transaction(func(tx *gorm.DB) error {
+		if err := tx.Where("user_id = ?", user.ID).Delete(&models.UserTunnelGrant{}).Error; err != nil {
+			return err
+		}
+		return tx.Delete(&user).Error
+	}); err != nil {
 		fail(c, err)
 		return
 	}
@@ -1220,11 +1229,38 @@ type tunnelPayload struct {
 
 func (s *Server) listTunnels(c *gin.Context) {
 	query := s.db.Model(&models.Tunnel{})
-	if ctxRole(c) != "admin" && ctxTenantID(c) > 0 {
-		grants := s.db.Model(&models.TenantTunnelGrant{}).
-			Select("tunnel_id").
-			Where("tenant_id = ?", ctxTenantID(c))
-		query = query.Where("id IN (?)", grants)
+	switch ctxRole(c) {
+	case "admin":
+	case "user":
+		var directGrantCount int64
+		if err := s.db.Model(&models.UserTunnelGrant{}).Where("user_id = ?", ctxUserID(c)).Count(&directGrantCount).Error; err != nil {
+			fail(c, err)
+			return
+		}
+		if directGrantCount > 0 {
+			grants := s.db.Model(&models.UserTunnelGrant{}).
+				Select("tunnel_id").
+				Where("user_id = ?", ctxUserID(c))
+			query = query.Where("id IN (?)", grants)
+		} else if ctxTenantID(c) > 0 {
+			grants := s.db.Model(&models.TenantTunnelGrant{}).
+				Select("tunnel_id").
+				Where("tenant_id = ?", ctxTenantID(c))
+			query = query.Where("id IN (?)", grants)
+		} else {
+			query = query.Where("1 = 0")
+		}
+	case "tenant_admin":
+		if ctxTenantID(c) == 0 {
+			query = query.Where("1 = 0")
+		} else {
+			grants := s.db.Model(&models.TenantTunnelGrant{}).
+				Select("tunnel_id").
+				Where("tenant_id = ?", ctxTenantID(c))
+			query = query.Where("id IN (?)", grants)
+		}
+	default:
+		query = query.Where("1 = 0")
 	}
 	query = applySearch(query, c, "name", "mode", "protocol", "flow_accounting")
 	query = filterString(query, c, "mode", "mode")
@@ -1283,7 +1319,7 @@ func (s *Server) deleteTunnel(c *gin.Context) {
 		notFound(c)
 		return
 	}
-	var rules, limits int64
+	var rules, limits, tenantGrants, userGrants int64
 	if err := s.db.Model(&models.ForwardRule{}).Where("tunnel_id = ?", row.ID).Count(&rules).Error; err != nil {
 		fail(c, err)
 		return
@@ -1292,8 +1328,16 @@ func (s *Server) deleteTunnel(c *gin.Context) {
 		fail(c, err)
 		return
 	}
-	if rules+limits > 0 {
-		bad(c, errors.New("tunnel is still referenced by forwarding rules or speed limits"))
+	if err := s.db.Model(&models.TenantTunnelGrant{}).Where("tunnel_id = ?", row.ID).Count(&tenantGrants).Error; err != nil {
+		fail(c, err)
+		return
+	}
+	if err := s.db.Model(&models.UserTunnelGrant{}).Where("tunnel_id = ?", row.ID).Count(&userGrants).Error; err != nil {
+		fail(c, err)
+		return
+	}
+	if rules+limits+tenantGrants+userGrants > 0 {
+		bad(c, errors.New("tunnel is still referenced by forwarding rules, speed limits, or line grants"))
 		return
 	}
 	if err := s.db.Delete(&row).Error; err != nil {
@@ -2357,8 +2401,9 @@ func (s *Server) prepareForwardRuleTx(tx *gorm.DB, rule *models.ForwardRule, exc
 		return entry, errors.New("entry device group not found")
 	}
 	portStart, portEnd := entry.PortStart, entry.PortEnd
-	if user.TenantID != nil && *user.TenantID > 0 {
-		var tenant models.Tenant
+	var tenant models.Tenant
+	hasTenant := user.TenantID != nil && *user.TenantID > 0
+	if hasTenant {
 		if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).First(&tenant, *user.TenantID).Error; err != nil {
 			return entry, errors.New("tenant not found")
 		}
@@ -2372,13 +2417,6 @@ func (s *Server) prepareForwardRuleTx(tx *gorm.DB, rule *models.ForwardRule, exc
 		if tenant.QuotaBlocked || (tenant.TrafficLimitBytes > 0 && tenant.UsedBytes >= tenant.TrafficLimitBytes) {
 			return entry, errors.New("tenant traffic is exhausted")
 		}
-		var grant models.TenantTunnelGrant
-		if err := tx.Where("tenant_id = ? AND tunnel_id = ?", tenant.ID, tunnel.ID).First(&grant).Error; err != nil {
-			return entry, errors.New("tenant is not authorized to use this tunnel")
-		}
-		if grant.PortStart > 0 && grant.PortEnd > 0 {
-			portStart, portEnd = grant.PortStart, grant.PortEnd
-		}
 		if tenant.ForwardLimit > 0 {
 			count, err := countForwardRulesTx(tx, "tenant_id = ?", tenant.ID, excludeID)
 			if err != nil {
@@ -2388,14 +2426,55 @@ func (s *Server) prepareForwardRuleTx(tx *gorm.DB, rule *models.ForwardRule, exc
 				return entry, errors.New("tenant forward rule limit reached")
 			}
 		}
-		if grant.ForwardLimit > 0 {
-			count, err := countForwardRulesTx(tx, "tenant_id = ? AND tunnel_id = ?", []any{tenant.ID, tunnel.ID}, excludeID)
-			if err != nil {
+	}
+
+	if user.Role != "admin" {
+		var directGrantCount int64
+		if user.Role == "user" {
+			if err := tx.Model(&models.UserTunnelGrant{}).Where("user_id = ?", user.ID).Count(&directGrantCount).Error; err != nil {
 				return entry, err
 			}
-			if count >= int64(grant.ForwardLimit) {
-				return entry, errors.New("tenant tunnel forward rule limit reached")
+		}
+		if directGrantCount > 0 {
+			var grant models.UserTunnelGrant
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+				Where("user_id = ? AND tunnel_id = ?", user.ID, tunnel.ID).
+				First(&grant).Error; err != nil {
+				return entry, errors.New("user is not authorized to use this tunnel")
 			}
+			if grant.PortStart > 0 && grant.PortEnd > 0 {
+				portStart, portEnd = grant.PortStart, grant.PortEnd
+			}
+			if grant.ForwardLimit > 0 {
+				count, err := countForwardRulesTx(tx, "user_id = ? AND tunnel_id = ?", []any{user.ID, tunnel.ID}, excludeID)
+				if err != nil {
+					return entry, err
+				}
+				if count >= int64(grant.ForwardLimit) {
+					return entry, errors.New("user tunnel forward rule limit reached")
+				}
+			}
+		} else if hasTenant {
+			var grant models.TenantTunnelGrant
+			if err := tx.Clauses(clause.Locking{Strength: "UPDATE"}).
+				Where("tenant_id = ? AND tunnel_id = ?", tenant.ID, tunnel.ID).
+				First(&grant).Error; err != nil {
+				return entry, errors.New("tenant is not authorized to use this tunnel")
+			}
+			if grant.PortStart > 0 && grant.PortEnd > 0 {
+				portStart, portEnd = grant.PortStart, grant.PortEnd
+			}
+			if grant.ForwardLimit > 0 {
+				count, err := countForwardRulesTx(tx, "tenant_id = ? AND tunnel_id = ?", []any{tenant.ID, tunnel.ID}, excludeID)
+				if err != nil {
+					return entry, err
+				}
+				if count >= int64(grant.ForwardLimit) {
+					return entry, errors.New("tenant tunnel forward rule limit reached")
+				}
+			}
+		} else {
+			return entry, errors.New("user is not authorized to use this tunnel")
 		}
 	}
 	if rule.ListenPort == 0 {
@@ -3019,6 +3098,17 @@ func (s *Server) activeAgentRules(candidates []models.ForwardRule, now time.Time
 			}
 		}
 	}
+	var userGrants []models.UserTunnelGrant
+	if err := s.db.Where("user_id IN ?", uintSetValues(userIDs)).Find(&userGrants).Error; err != nil {
+		return nil, 0, err
+	}
+	directTunnelsByUser := make(map[uint]map[uint]struct{})
+	for _, grant := range userGrants {
+		if directTunnelsByUser[grant.UserID] == nil {
+			directTunnelsByUser[grant.UserID] = map[uint]struct{}{}
+		}
+		directTunnelsByUser[grant.UserID][grant.TunnelID] = struct{}{}
+	}
 	if err := s.rollDueTenantPeriods(now); err != nil {
 		return nil, 0, err
 	}
@@ -3046,6 +3136,11 @@ func (s *Server) activeAgentRules(candidates []models.ForwardRule, now time.Time
 		}
 		if user.FlowLimitBytes > 0 && user.UsedBytes >= user.FlowLimitBytes {
 			continue
+		}
+		if directTunnels := directTunnelsByUser[user.ID]; user.Role == "user" && len(directTunnels) > 0 {
+			if _, authorized := directTunnels[rule.TunnelID]; !authorized {
+				continue
+			}
 		}
 		if rule.TenantID != nil && *rule.TenantID > 0 {
 			tenant, ok := tenantByID[*rule.TenantID]

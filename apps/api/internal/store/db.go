@@ -65,6 +65,7 @@ func runMigrations(db *gorm.DB) error {
 		return tx.AutoMigrate(
 			&models.Tenant{},
 			&models.TenantTunnelGrant{},
+			&models.UserTunnelGrant{},
 			&models.TenantTrafficHourlyBucket{},
 			&models.PortLease{},
 			&models.User{},
@@ -95,7 +96,7 @@ func runMigrations(db *gorm.DB) error {
 	}); err != nil {
 		return err
 	}
-	return applyMigration(db, "2026072001_tenants_and_port_leases", func(tx *gorm.DB) error {
+	if err := applyMigration(db, "2026072001_tenants_and_port_leases", func(tx *gorm.DB) error {
 		if err := tx.AutoMigrate(
 			&models.Tenant{},
 			&models.TenantTunnelGrant{},
@@ -120,6 +121,11 @@ func runMigrations(db *gorm.DB) error {
 			return err
 		}
 		return backfillPortLeases(tx)
+	}); err != nil {
+		return err
+	}
+	return applyMigration(db, "2026072101_user_tunnel_grants", func(tx *gorm.DB) error {
+		return tx.AutoMigrate(&models.UserTunnelGrant{})
 	})
 }
 

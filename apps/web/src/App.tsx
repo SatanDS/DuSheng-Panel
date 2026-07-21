@@ -3,7 +3,6 @@ import type { FormEvent, ReactNode } from "react";
 import {
   Activity,
   AlertTriangle,
-  Building2,
   Boxes,
 	Check,
 	ChevronDown,
@@ -43,7 +42,8 @@ import type {
   AuditLog,
 	AgentEvent,
 	Session,
-	TenantTrafficPayload
+	TenantTrafficPayload,
+	UserTunnelGrant
 } from "./types";
 
 type PageKey =
@@ -249,15 +249,12 @@ const navItems: NavItem[] = [
 	{ key: "dashboard", label: "总览", icon: Gauge, section: "workspace" },
 	{ key: "quick-start", label: "快速开通", icon: Rocket, section: "workspace" },
 	{ key: "forward-rules", label: "转发规则", icon: Route, section: "business" },
-	{ key: "tenant-overview", label: "租户用量", icon: Building2, section: "business", roles: ["tenant_admin"] },
 	{ key: "nodes", label: "节点", icon: Server, section: "business", roles: ["admin"] },
 	{ key: "tunnels", label: "转发线路", icon: Network, section: "business", roles: ["admin"] },
 	{ key: "users", label: "用户", icon: Users, section: "business", roles: ["admin", "tenant_admin"] },
-	{ key: "tenants", label: "租户", icon: Building2, section: "business", roles: ["admin"] },
 	{ key: "violations", label: "协议告警", icon: AlertTriangle, section: "operations", roles: ["admin"] },
 	{ key: "node-events", label: "节点日志", icon: Activity, section: "operations", roles: ["admin"] },
 	{ key: "audit-logs", label: "操作日志", icon: ScrollText, section: "operations", roles: ["admin"] },
-	{ key: "tenant-tunnel-grants", label: "线路授权", icon: Route, section: "advanced", roles: ["admin"] },
 	{ key: "line-assets", label: "专线资产", icon: Network, section: "advanced", roles: ["admin"] },
 	{ key: "device-groups", label: "节点分组", icon: Boxes, section: "advanced", roles: ["admin"] },
 	{ key: "protocol-policies", label: "协议策略", icon: ShieldCheck, section: "advanced", roles: ["admin"] },
@@ -738,10 +735,9 @@ const resourceConfigs: Record<CRUDPageKey, ResourceConfig> = {
     eyebrow: "带宽、连接数与 IP 限制",
     endpoint: "/speed-limits",
     createLabel: "新建限速",
-    fields: [
-      { key: "name", label: "名称", required: true },
-		{ key: "tenantId", label: "租户", type: "number", optional: true, min: 1, reference: "tenants" },
-      { key: "userId", label: "用户", type: "number", optional: true, min: 1, reference: "users" },
+	fields: [
+	  { key: "name", label: "名称", required: true },
+	  { key: "userId", label: "用户", type: "number", optional: true, min: 1, reference: "users" },
       { key: "tunnelId", label: "线路", type: "number", optional: true, min: 1, reference: "tunnels" },
       { key: "ruleId", label: "转发规则", type: "number", optional: true, min: 1, reference: "forward-rules" },
       { key: "uploadBps", label: "上传 Bps", type: "number", min: 0 },
@@ -749,11 +745,10 @@ const resourceConfigs: Record<CRUDPageKey, ResourceConfig> = {
       { key: "maxConns", label: "最大连接数", type: "number", min: 0 },
       { key: "maxIps", label: "最大 IP 数", type: "number", min: 0 }
     ],
-    columns: [
-      { key: "id", label: "ID", className: "mono" },
-      { key: "name", label: "名称" },
-		{ key: "tenantId", label: "租户" },
-      { key: "userId", label: "用户" },
+	columns: [
+	  { key: "id", label: "ID", className: "mono" },
+	  { key: "name", label: "名称" },
+	  { key: "userId", label: "用户" },
       { key: "tunnelId", label: "线路" },
       { key: "ruleId", label: "规则" },
       { key: "uploadBps", label: "上行", render: (row) => formatBps(row.uploadBps) },
@@ -820,22 +815,11 @@ const resourceConfigs: Record<CRUDPageKey, ResourceConfig> = {
     title: "用户",
     eyebrow: "账号、配额与到期时间",
     endpoint: "/users",
-    createLabel: "新建用户",
-    fields: [
-		{ key: "tenantId", label: "所属租户", type: "number", optional: true, min: 1, reference: "tenants" },
-      { key: "username", label: "用户名", required: true },
-      { key: "displayName", label: "显示名称" },
-      { key: "password", label: "密码", type: "password", requiredOnCreate: true, placeholder: "编辑时留空则不修改" },
-      {
-        key: "role",
-        label: "角色",
-        type: "select",
-        options: [
-          { value: "admin", label: "管理员" },
-		  { value: "tenant_admin", label: "租户管理员" },
-          { value: "user", label: "普通用户" }
-        ]
-      },
+	createLabel: "新建用户",
+	fields: [
+	  { key: "username", label: "用户名", required: true },
+	  { key: "displayName", label: "显示名称" },
+	  { key: "password", label: "密码", type: "password", requiredOnCreate: true, placeholder: "编辑时留空则不修改" },
       {
         key: "status",
         label: "状态",
@@ -850,11 +834,10 @@ const resourceConfigs: Record<CRUDPageKey, ResourceConfig> = {
       { key: "forwardLimit", label: "规则数量上限", type: "number", min: 0 },
       { key: "expiresAt", label: "到期时间", type: "datetime-local", optional: true }
     ],
-    columns: [
-      { key: "id", label: "ID", className: "mono" },
-      { key: "username", label: "用户名" },
-		{ key: "tenantId", label: "租户" },
-      { key: "displayName", label: "显示名" },
+	columns: [
+	  { key: "id", label: "ID", className: "mono" },
+	  { key: "username", label: "用户名" },
+	  { key: "displayName", label: "显示名" },
       { key: "role", label: "角色", render: (row) => <Badge>{displayValue(row.role)}</Badge> },
       { key: "status", label: "状态", render: (row) => <StatusPill value={text(row.status)} /> },
       { key: "usedBytes", label: "已用", render: (row) => formatBytes(row.usedBytes) },
@@ -1244,6 +1227,7 @@ interface QuickStartSnapshot {
 	onlineNodes: number;
 	tunnels: number;
 	users: number;
+	grants: number;
 	rules: number;
 }
 
@@ -1268,10 +1252,11 @@ function QuickStartPage({
 			try {
 				const rulesPromise = api.page<Entity>("/forward-rules", { pageSize: 1 });
 				if (role === "admin") {
-					const [nodes, tunnels, users, rules] = await Promise.all([
+					const [nodes, tunnels, users, grants, rules] = await Promise.all([
 						api.page<Entity>("/nodes", { pageSize: 200 }),
 						api.page<Entity>("/tunnels", { pageSize: 1 }),
 						api.page<Entity>("/users", { pageSize: 200 }),
+						api.page<UserTunnelGrant>("/user-tunnel-grants", { pageSize: 1 }),
 						rulesPromise
 					]);
 					if (alive) {
@@ -1279,6 +1264,7 @@ function QuickStartPage({
 							onlineNodes: nodes.items.filter((node) => node.status === "online").length,
 							tunnels: tunnels.total,
 							users: users.items.filter((user) => user.role === "user").length,
+							grants: grants.total,
 							rules: rules.total
 						});
 					}
@@ -1292,13 +1278,14 @@ function QuickStartPage({
 							onlineNodes: -1,
 							tunnels: -1,
 							users: users.items.filter((user) => user.role === "user").length,
+							grants: -1,
 							rules: rules.total
 						});
 					}
 				} else {
 					const rules = await rulesPromise;
 					if (alive) {
-						setSnapshot({ onlineNodes: -1, tunnels: -1, users: -1, rules: rules.total });
+						setSnapshot({ onlineNodes: -1, tunnels: -1, users: -1, grants: -1, rules: rules.total });
 					}
 				}
 			} catch (err) {
@@ -1325,8 +1312,14 @@ function QuickStartPage({
 	if (role === "admin") {
 		steps.push(
 			{ title: "接入节点", status: snapshot?.onlineNodes ? `${snapshot.onlineNodes} 个在线` : "等待节点上线", ready: Boolean(snapshot?.onlineNodes), target: "nodes", action: "安装节点" },
-			{ title: "确认转发线路", status: snapshot?.tunnels ? `${snapshot.tunnels} 条已配置` : "尚未配置", ready: Boolean(snapshot?.tunnels), target: "tunnels", action: "配置线路" },
-			{ title: "创建业务用户", status: snapshot?.users ? `${snapshot.users} 个用户` : "尚未创建", ready: Boolean(snapshot?.users), target: "users", action: "创建用户" }
+			{ title: "创建业务用户", status: snapshot?.users ? `${snapshot.users} 个用户` : "尚未创建", ready: Boolean(snapshot?.users), target: "users", action: "创建用户" },
+			{
+				title: "授权用户线路",
+				status: snapshot?.grants ? `${snapshot.grants} 条授权` : snapshot?.tunnels ? "等待授权" : "尚无可授权线路",
+				ready: Boolean(snapshot?.grants),
+				target: snapshot?.tunnels ? "users" : "tunnels",
+				action: snapshot?.tunnels ? "授权线路" : "配置线路"
+			}
 		);
 	} else if (role === "tenant_admin") {
 		steps.push({ title: "创建业务用户", status: snapshot?.users ? `${snapshot.users} 个用户` : "尚未创建", ready: Boolean(snapshot?.users), target: "users", action: "创建用户" });
@@ -1562,9 +1555,10 @@ function ResourcePage({ config, refreshSeed, role }: { config: ResourceConfig; r
     };
 	}, [fields]);
 
-  const pageCount = Math.max(1, Math.ceil(total / pageSize));
-  const currentPage = Math.min(page, pageCount);
-  const visibleRows = rows;
+	const pageCount = Math.max(1, Math.ceil(total / pageSize));
+	const currentPage = Math.min(page, pageCount);
+	const visibleRows = rows;
+	const selectedRow = editingId === null ? undefined : rows.find((row) => row.id === editingId);
 
   async function submit(event: FormEvent) {
     event.preventDefault();
@@ -1579,16 +1573,23 @@ function ResourcePage({ config, refreshSeed, role }: { config: ResourceConfig; r
 
     try {
 	  const payload = payloadFromDraft(fields, draft);
-      if (editingId === null) {
-        await api.post<Entity>(config.endpoint, payload);
-        setNotice(`${config.title}已创建`);
-      } else {
-        await api.put<Entity>(`${config.endpoint}/${editingId}`, payload);
-        setNotice(`${config.title} #${editingId} 已更新`);
-      }
+	  let saved: Entity;
+	  if (editingId === null) {
+		saved = await api.post<Entity>(config.endpoint, payload);
+		setNotice(config.key === "users" ? "用户已创建，可继续配置线路授权" : `${config.title}已创建`);
+	  } else {
+		saved = await api.put<Entity>(`${config.endpoint}/${editingId}`, payload);
+		setNotice(`${config.title} #${editingId} 已更新`);
+	  }
 
-      resetDraft();
-      setReloadSeed((seed) => seed + 1);
+	  if (config.key === "users" && typeof saved.id === "number") {
+		setEditingId(saved.id);
+		setDraft(draftFromRow(fields, saved));
+		setRows((current) => [saved, ...current.filter((row) => row.id !== saved.id)].slice(0, pageSize));
+	  } else {
+		resetDraft();
+	  }
+	  setReloadSeed((seed) => seed + 1);
     } catch (err) {
       setError(err instanceof Error ? err.message : "保存失败");
     } finally {
@@ -1779,10 +1780,177 @@ function ResourcePage({ config, refreshSeed, role }: { config: ResourceConfig; r
             </div>
           </form>
         </section>
-      </div>
+		</div>
+		{config.key === "users" && role === "admin" && editingId !== null && selectedRow?.role === "user" ? (
+			<UserTunnelGrantPanel
+				userId={editingId}
+				username={text(selectedRow.username)}
+				refreshSeed={reloadSeed + refreshSeed}
+			/>
+		) : null}
 		{config.key === "tenants" && editingId !== null ? <TenantTrafficPanel tenantId={editingId} refreshSeed={reloadSeed + refreshSeed} /> : null}
-    </div>
-  );
+	  </div>
+	);
+}
+
+function UserTunnelGrantPanel({ userId, username, refreshSeed }: { userId: number; username: string; refreshSeed: number }) {
+	const [rows, setRows] = useState<UserTunnelGrant[]>([]);
+	const [tunnels, setTunnels] = useState<Entity[]>([]);
+	const [editingId, setEditingId] = useState<number | null>(null);
+	const [tunnelId, setTunnelId] = useState("");
+	const [forwardLimit, setForwardLimit] = useState("0");
+	const [portStart, setPortStart] = useState("0");
+	const [portEnd, setPortEnd] = useState("0");
+	const [loading, setLoading] = useState(true);
+	const [saving, setSaving] = useState(false);
+	const [error, setError] = useState<string | null>(null);
+	const [notice, setNotice] = useState<string | null>(null);
+
+	const load = useCallback(async () => {
+		setLoading(true);
+		setError(null);
+		try {
+			const [grants, tunnelPage] = await Promise.all([
+				api.page<UserTunnelGrant>("/user-tunnel-grants", { pageSize: 200, userId }),
+				api.page<Entity>("/tunnels", { pageSize: 200 })
+			]);
+			setRows(grants.items);
+			setTunnels(tunnelPage.items);
+		} catch (err) {
+			setError(err instanceof Error ? err.message : "用户线路授权请求失败");
+		} finally {
+			setLoading(false);
+		}
+	}, [userId]);
+
+	useEffect(() => {
+		setEditingId(null);
+		setTunnelId("");
+		setForwardLimit("0");
+		setPortStart("0");
+		setPortEnd("0");
+		setNotice(null);
+		void load();
+	}, [load, refreshSeed]);
+
+	function resetForm() {
+		setEditingId(null);
+		setTunnelId("");
+		setForwardLimit("0");
+		setPortStart("0");
+		setPortEnd("0");
+	}
+
+	function editGrant(row: UserTunnelGrant) {
+		setEditingId(row.id);
+		setTunnelId(String(row.tunnelId));
+		setForwardLimit(String(row.forwardLimit ?? 0));
+		setPortStart(String(row.portStart ?? 0));
+		setPortEnd(String(row.portEnd ?? 0));
+		setError(null);
+		setNotice(null);
+	}
+
+	async function submit(event: FormEvent) {
+		event.preventDefault();
+		setSaving(true);
+		setError(null);
+		setNotice(null);
+		const payload = {
+			userId,
+			tunnelId: Number(tunnelId),
+			forwardLimit: Number(forwardLimit || 0),
+			portStart: Number(portStart || 0),
+			portEnd: Number(portEnd || 0)
+		};
+		try {
+			if (editingId === null) {
+				await api.post<UserTunnelGrant>("/user-tunnel-grants", payload);
+				setNotice("线路授权已创建");
+			} else {
+				await api.put<UserTunnelGrant>(`/user-tunnel-grants/${editingId}`, payload);
+				setNotice("线路授权已更新");
+			}
+			resetForm();
+			await load();
+		} catch (err) {
+			setError(err instanceof Error ? err.message : "线路授权保存失败");
+		} finally {
+			setSaving(false);
+		}
+	}
+
+	async function deleteGrant(row: UserTunnelGrant) {
+		if (!window.confirm(`确认删除 ${username} 的线路 #${row.tunnelId} 授权？`)) {
+			return;
+		}
+		setSaving(true);
+		setError(null);
+		setNotice(null);
+		try {
+			await api.delete<void>(`/user-tunnel-grants/${row.id}`);
+			setNotice("线路授权已删除");
+			if (editingId === row.id) {
+				resetForm();
+			}
+			await load();
+		} catch (err) {
+			setError(err instanceof Error ? err.message : "线路授权删除失败");
+		} finally {
+			setSaving(false);
+		}
+	}
+
+	const tunnelNames = new Map(tunnels.map((tunnel) => [Number(tunnel.id), referenceLabel("tunnels", tunnel)]));
+	const availableTunnels = tunnels.filter((tunnel) => {
+		const id = Number(tunnel.id);
+		return (editingId !== null && id === Number(tunnelId)) || !rows.some((row) => row.tunnelId === id);
+	});
+
+	return (
+		<section className="panel user-grant-panel">
+			<PanelHeader title={`线路授权 · ${username}`} icon={Route} meta={`${rows.length} 条`} />
+			{error ? <div className="notice error grant-notice">{error}</div> : null}
+			{notice ? <div className="notice success grant-notice">{notice}</div> : null}
+			<div className="user-grant-layout">
+				<div className="user-grant-table">
+					{loading ? <StateBlock tone="loading" title="正在加载线路授权" /> : (
+						<DataTable
+							rows={rows}
+							selectedId={editingId}
+							onRowClick={(row) => editGrant(row as UserTunnelGrant)}
+							columns={[
+								{ key: "tunnelId", label: "线路", render: (row) => tunnelNames.get(Number(row.tunnelId)) ?? `#${row.tunnelId}` },
+								{ key: "forwardLimit", label: "规则上限", render: (row) => Number(row.forwardLimit) > 0 ? row.forwardLimit as number : "不限" },
+								{ key: "portStart", label: "端口范围", render: (row) => Number(row.portStart) > 0 ? `${row.portStart}-${row.portEnd}` : "跟随线路" },
+								{ key: "updatedAt", label: "更新于", render: (row) => formatDate(row.updatedAt) }
+							]}
+							actions={(row) => <div className="row-actions">
+								<button className="icon-button small" type="button" title="编辑" onClick={() => editGrant(row as UserTunnelGrant)}><Pencil size={14} /></button>
+								<button className="icon-button small danger" type="button" title="删除" disabled={saving} onClick={() => void deleteGrant(row as UserTunnelGrant)}><Trash2 size={14} /></button>
+							</div>}
+						/>
+					)}
+				</div>
+				<form className="resource-form user-grant-form" onSubmit={submit}>
+					<label className="field full">
+						<span>转发线路</span>
+						<select value={tunnelId} required disabled={saving} onChange={(event) => setTunnelId(event.target.value)}>
+							<option value="">请选择线路</option>
+							{availableTunnels.map((tunnel) => <option key={Number(tunnel.id)} value={Number(tunnel.id)}>{referenceLabel("tunnels", tunnel)}</option>)}
+						</select>
+					</label>
+					<label className="field"><span>本线路规则上限</span><input type="number" min={0} value={forwardLimit} disabled={saving} onChange={(event) => setForwardLimit(event.target.value)} /></label>
+					<label className="field"><span>授权起始端口</span><input type="number" min={0} max={65535} value={portStart} disabled={saving} onChange={(event) => setPortStart(event.target.value)} /></label>
+					<label className="field"><span>授权结束端口</span><input type="number" min={0} max={65535} value={portEnd} disabled={saving} onChange={(event) => setPortEnd(event.target.value)} /></label>
+					<div className="form-actions">
+						<button className="primary-action" type="submit" disabled={saving || !tunnelId}><Save size={15} />{saving ? "保存中" : editingId === null ? "授权" : "更新"}</button>
+						<button className="ghost-action" type="button" disabled={saving} onClick={resetForm}><X size={15} />清空</button>
+					</div>
+				</form>
+			</div>
+		</section>
+	);
 }
 
 function PolicyEvaluator({ policies }: { policies: Entity[] }) {

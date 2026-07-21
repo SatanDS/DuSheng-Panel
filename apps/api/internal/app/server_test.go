@@ -27,6 +27,7 @@ func testServer(t *testing.T) *Server {
 	require.NoError(t, db.AutoMigrate(
 		&models.Tenant{},
 		&models.TenantTunnelGrant{},
+		&models.UserTunnelGrant{},
 		&models.TenantTrafficHourlyBucket{},
 		&models.PortLease{},
 		&models.User{},
@@ -92,6 +93,9 @@ func seedForwardFixture(t *testing.T, s *Server) (models.User, models.DeviceGrou
 		ExitTrafficRatio:  1,
 	}
 	require.NoError(t, s.db.Create(&tunnel).Error)
+	require.NoError(t, s.db.Create(&models.UserTunnelGrant{
+		UserID: user.ID, TunnelID: tunnel.ID, PortStart: entry.PortStart, PortEnd: entry.PortEnd,
+	}).Error)
 	return user, entry, tunnel, policy
 }
 
@@ -145,6 +149,7 @@ func TestHealthAndMetricsEndpoints(t *testing.T) {
 	require.Contains(t, rec.Body.String(), "dusheng_panel_tenant_accounted_bytes 42")
 	require.Contains(t, rec.Body.String(), "dusheng_panel_tenant_quota_blocked 1")
 	require.Contains(t, rec.Body.String(), "dusheng_panel_tenant_tunnel_grants 0")
+	require.Contains(t, rec.Body.String(), "dusheng_panel_user_tunnel_grants 0")
 	require.Contains(t, rec.Body.String(), "dusheng_api_http_requests_total")
 }
 
@@ -343,6 +348,7 @@ func TestPrepareForwardRuleRejectsOverlappingEntryGroupPort(t *testing.T) {
 		ExitTrafficRatio:  1,
 	}
 	require.NoError(t, s.db.Create(&otherTunnel).Error)
+	require.NoError(t, s.db.Create(&models.UserTunnelGrant{UserID: user.ID, TunnelID: otherTunnel.ID}).Error)
 	first := models.ForwardRule{
 		UserID:     user.ID,
 		TunnelID:   tunnel.ID,
@@ -873,6 +879,7 @@ func TestResourceMovesBumpOldAndNewNodeRevisions(t *testing.T) {
 		FlowAccounting: "single", EntryTrafficRatio: 1, ExitTrafficRatio: 1,
 	}
 	require.NoError(t, s.db.Create(&tunnelB).Error)
+	require.NoError(t, s.db.Create(&models.UserTunnelGrant{UserID: user.ID, TunnelID: tunnelB.ID}).Error)
 	rule := models.ForwardRule{
 		UserID: user.ID, TunnelID: tunnelA.ID, Name: "move-rule", Protocol: "tcp", ListenPort: 21500,
 		RemoteHost: "198.51.100.10", RemotePort: 443, Status: "active", Strategy: "least_conn",
@@ -1461,6 +1468,7 @@ func TestTenantTunnelGrantControlsPortRangeAndRuleCount(t *testing.T) {
 	user.TenantID = &tenant.ID
 	user.ForwardLimit = 10
 	require.NoError(t, s.db.Save(&user).Error)
+	require.NoError(t, s.db.Where("user_id = ?", user.ID).Delete(&models.UserTunnelGrant{}).Error)
 	rule := models.ForwardRule{
 		UserID: user.ID, TunnelID: tunnel.ID, Name: "tenant-port", Protocol: "tcp",
 		RemoteHost: "198.51.100.10", RemotePort: 443,
@@ -1482,6 +1490,178 @@ func TestTenantTunnelGrantControlsPortRangeAndRuleCount(t *testing.T) {
 	second.Name = "tenant-port-2"
 	second.ListenPort = 20002
 	require.ErrorContains(t, s.prepareForwardRule(&second, 0), "tenant tunnel forward rule limit")
+}
+
+func TestUserTunnelGrantControlsVisibilityPortRangeAndRuleCount(t *testing.T) {
+	s := testServer(t)
+	user, entry, tunnel, _ := seedForwardFixture(t, s)
+	user.ForwardLimit = 10
+	require.NoError(t, s.db.Save(&user).Error)
+	hiddenTunnel := models.Tunnel{
+		Name: "hidden-user-tunnel", Mode: "single", EntryGroupID: entry.ID, Protocol: "direct",
+		FlowAccounting: "single", EntryTrafficRatio: 1, ExitTrafficRatio: 1,
+	}
+	require.NoError(t, s.db.Create(&hiddenTunnel).Error)
+	userToken, err := auth.GenerateToken(user.ID, user.Role, auth.TokenTypeAccess, "test-secret-for-unit-tests", time.Hour)
+	require.NoError(t, err)
+	router := testRouter(t, s)
+	admin := adminToken(t, s)
+	rec := jsonRequest(t, router, http.MethodGet, "/api/v1/tunnels?pageSize=20", nil, userToken)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), tunnel.Name)
+	require.NotContains(t, rec.Body.String(), hiddenTunnel.Name)
+
+	var grant models.UserTunnelGrant
+	require.NoError(t, s.db.Where("user_id = ? AND tunnel_id = ?", user.ID, tunnel.ID).First(&grant).Error)
+	node := models.Node{DeviceGroupID: entry.ID, Name: "user-grant-node", UUID: "user-grant-node", TokenHash: "hash", DesiredRevision: 1}
+	require.NoError(t, s.db.Create(&node).Error)
+	rec = jsonRequest(t, router, http.MethodPut, fmt.Sprintf("/api/v1/user-tunnel-grants/%d", grant.ID), map[string]any{
+		"userId": user.ID, "tunnelId": tunnel.ID, "forwardLimit": 1, "portStart": 20001, "portEnd": 20002,
+	}, admin)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.NoError(t, s.db.First(&node, node.ID).Error)
+	require.Greater(t, node.DesiredRevision, int64(1))
+
+	rule := models.ForwardRule{
+		UserID: user.ID, TunnelID: tunnel.ID, Name: "direct-user-rule", Protocol: "tcp",
+		ListenPort: 20000, RemoteHost: "198.51.100.10", RemotePort: 443,
+	}
+	require.ErrorContains(t, s.prepareForwardRule(&rule, 0), "authorized range")
+	rule.ListenPort = 0
+	require.NoError(t, s.prepareForwardRule(&rule, 0))
+	require.Equal(t, 20001, rule.ListenPort)
+	rule.Status = "active"
+	require.NoError(t, s.db.Create(&rule).Error)
+
+	second := rule
+	second.ID = 0
+	second.Name = "direct-user-rule-2"
+	second.ListenPort = 20002
+	require.ErrorContains(t, s.prepareForwardRule(&second, 0), "user tunnel forward rule limit")
+
+	rec = jsonRequest(t, router, http.MethodPut, fmt.Sprintf("/api/v1/user-tunnel-grants/%d", grant.ID), map[string]any{
+		"userId": user.ID, "tunnelId": tunnel.ID, "forwardLimit": 1, "portStart": 20002, "portEnd": 20002,
+	}, admin)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "existing rule")
+	rec = jsonRequest(t, router, http.MethodDelete, fmt.Sprintf("/api/v1/user-tunnel-grants/%d", grant.ID), nil, admin)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+}
+
+func TestTenantlessUserCreationAndDirectGrant(t *testing.T) {
+	s := testServer(t)
+	entry := models.DeviceGroup{Name: "direct-entry", Role: "entry", PortStart: 24000, PortEnd: 24010, TrafficRatio: 1}
+	require.NoError(t, s.db.Create(&entry).Error)
+	tunnel := models.Tunnel{
+		Name: "direct-line", Mode: "single", EntryGroupID: entry.ID, Protocol: "direct",
+		FlowAccounting: "single", EntryTrafficRatio: 1, ExitTrafficRatio: 1,
+	}
+	require.NoError(t, s.db.Create(&tunnel).Error)
+	router := testRouter(t, s)
+	admin := adminToken(t, s)
+	rec := jsonRequest(t, router, http.MethodPost, "/api/v1/users", map[string]any{
+		"username": "direct-user", "password": "secret", "status": "active", "flowLimitBytes": 1024, "forwardLimit": 2,
+	}, admin)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	var user models.User
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &user))
+	require.Equal(t, "user", user.Role)
+	require.Nil(t, user.TenantID)
+
+	userToken, err := auth.GenerateToken(user.ID, user.Role, auth.TokenTypeAccess, "test-secret-for-unit-tests", time.Hour)
+	require.NoError(t, err)
+	rec = jsonRequest(t, router, http.MethodGet, "/api/v1/tunnels?pageSize=20", nil, userToken)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.NotContains(t, rec.Body.String(), tunnel.Name)
+	rec = jsonRequest(t, router, http.MethodPost, "/api/v1/user-tunnel-grants", map[string]any{
+		"userId": user.ID, "tunnelId": tunnel.ID, "forwardLimit": 2, "portStart": 24001, "portEnd": 24005,
+	}, admin)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	rec = jsonRequest(t, router, http.MethodGet, "/api/v1/tunnels?pageSize=20", nil, userToken)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), tunnel.Name)
+}
+
+func TestUserGrantProtectsTunnelAndIsCleanedWithUnusedUser(t *testing.T) {
+	s := testServer(t)
+	user, _, tunnel, _ := seedForwardFixture(t, s)
+	router := testRouter(t, s)
+	admin := adminToken(t, s)
+	rec := jsonRequest(t, router, http.MethodDelete, fmt.Sprintf("/api/v1/tunnels/%d", tunnel.ID), nil, admin)
+	require.Equal(t, http.StatusBadRequest, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), "line grants")
+
+	rec = jsonRequest(t, router, http.MethodDelete, fmt.Sprintf("/api/v1/users/%d", user.ID), nil, admin)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+	var grants int64
+	require.NoError(t, s.db.Model(&models.UserTunnelGrant{}).Where("user_id = ?", user.ID).Count(&grants).Error)
+	require.Zero(t, grants)
+	rec = jsonRequest(t, router, http.MethodDelete, fmt.Sprintf("/api/v1/tunnels/%d", tunnel.ID), nil, admin)
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+}
+
+func TestLegacyTenantGrantFallbackForRegularUser(t *testing.T) {
+	s := testServer(t)
+	user, _, tunnel, _ := seedForwardFixture(t, s)
+	require.NoError(t, s.db.Where("user_id = ?", user.ID).Delete(&models.UserTunnelGrant{}).Error)
+	tenant := models.Tenant{Name: "Legacy Tenant", Code: "legacy-tenant", Status: "active"}
+	require.NoError(t, s.db.Create(&tenant).Error)
+	user.TenantID = &tenant.ID
+	require.NoError(t, s.db.Save(&user).Error)
+	require.NoError(t, s.db.Create(&models.TenantTunnelGrant{TenantID: tenant.ID, TunnelID: tunnel.ID}).Error)
+	token, err := auth.GenerateToken(user.ID, user.Role, auth.TokenTypeAccess, "test-secret-for-unit-tests", time.Hour)
+	require.NoError(t, err)
+	rec := jsonRequest(t, testRouter(t, s), http.MethodGet, "/api/v1/tunnels?pageSize=20", nil, token)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.Contains(t, rec.Body.String(), tunnel.Name)
+}
+
+func TestDirectUserGrantTakesPrecedenceAndStopsLegacyRules(t *testing.T) {
+	s := testServer(t)
+	user, entry, legacyTunnel, _ := seedForwardFixture(t, s)
+	require.NoError(t, s.db.Where("user_id = ?", user.ID).Delete(&models.UserTunnelGrant{}).Error)
+	tenant := models.Tenant{Name: "Transition Tenant", Code: "transition-tenant", Status: "active"}
+	require.NoError(t, s.db.Create(&tenant).Error)
+	user.TenantID = &tenant.ID
+	require.NoError(t, s.db.Save(&user).Error)
+	require.NoError(t, s.db.Create(&models.TenantTunnelGrant{TenantID: tenant.ID, TunnelID: legacyTunnel.ID}).Error)
+	legacyRule := models.ForwardRule{
+		TenantID: &tenant.ID, UserID: user.ID, TunnelID: legacyTunnel.ID, Name: "legacy-rule",
+		Protocol: "tcp", ListenPort: 20001, RemoteHost: "198.51.100.10", RemotePort: 443, Status: "active",
+	}
+	require.NoError(t, s.db.Create(&legacyRule).Error)
+	active, _, err := s.activeAgentRules([]models.ForwardRule{legacyRule}, time.Now().UTC())
+	require.NoError(t, err)
+	require.Len(t, active, 1)
+
+	directEntry := models.DeviceGroup{Name: "direct-transition-entry", Role: "entry", PortStart: 25000, PortEnd: 25010, TrafficRatio: 1}
+	require.NoError(t, s.db.Create(&directEntry).Error)
+	directTunnel := models.Tunnel{
+		Name: "direct-transition-line", Mode: "single", EntryGroupID: directEntry.ID, Protocol: "direct",
+		FlowAccounting: "single", EntryTrafficRatio: 1, ExitTrafficRatio: 1,
+	}
+	require.NoError(t, s.db.Create(&directTunnel).Error)
+	legacyNode := models.Node{DeviceGroupID: entry.ID, Name: "legacy-transition-node", UUID: "legacy-transition-node", TokenHash: "hash", DesiredRevision: 1}
+	require.NoError(t, s.db.Create(&legacyNode).Error)
+	router := testRouter(t, s)
+	rec := jsonRequest(t, router, http.MethodPost, "/api/v1/user-tunnel-grants", map[string]any{
+		"userId": user.ID, "tunnelId": directTunnel.ID, "portStart": 25000, "portEnd": 25010,
+	}, adminToken(t, s))
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+	require.NoError(t, s.db.First(&legacyNode, legacyNode.ID).Error)
+	require.Greater(t, legacyNode.DesiredRevision, int64(1))
+
+	active, _, err = s.activeAgentRules([]models.ForwardRule{legacyRule}, time.Now().UTC())
+	require.NoError(t, err)
+	require.Empty(t, active)
+	token, err := auth.GenerateToken(user.ID, user.Role, auth.TokenTypeAccess, "test-secret-for-unit-tests", time.Hour)
+	require.NoError(t, err)
+	rec = jsonRequest(t, router, http.MethodGet, "/api/v1/tunnels?pageSize=20", nil, token)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	var tunnelPage pageResponse[models.Tunnel]
+	require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &tunnelPage))
+	require.Len(t, tunnelPage.Items, 1)
+	require.Equal(t, directTunnel.ID, tunnelPage.Items[0].ID)
 }
 
 func TestTenantAdministratorUserScope(t *testing.T) {
@@ -1549,6 +1729,7 @@ func TestTenantAdministratorCannotOverrideRuleProtocolPolicy(t *testing.T) {
 	require.NoError(t, s.db.Create(&tenant).Error)
 	user.TenantID = &tenant.ID
 	require.NoError(t, s.db.Save(&user).Error)
+	require.NoError(t, s.db.Where("user_id = ?", user.ID).Delete(&models.UserTunnelGrant{}).Error)
 	require.NoError(t, s.db.Create(&models.TenantTunnelGrant{TenantID: tenant.ID, TunnelID: tunnel.ID}).Error)
 	hash, err := auth.HashPassword("secret")
 	require.NoError(t, err)
