@@ -5,18 +5,24 @@ import {
   AlertTriangle,
   Building2,
   Boxes,
+	Check,
+	ChevronDown,
+	ChevronRight,
   Download,
   Gauge,
   KeyRound,
   LogOut,
+	Menu,
   Network,
   Pencil,
   Plus,
   RefreshCw,
+	Rocket,
   Route,
   Save,
   ScrollText,
   Server,
+	Settings2,
   ShieldCheck,
   SlidersHorizontal,
   Trash2,
@@ -42,6 +48,7 @@ import type {
 
 type PageKey =
   | "dashboard"
+	| "quick-start"
 	| "tenant-overview"
 	| "tenants"
 	| "tenant-tunnel-grants"
@@ -73,8 +80,9 @@ interface FieldConfig {
   step?: number | string;
   rows?: number;
   fullWidth?: boolean;
-  reference?: ReferenceKey;
+	reference?: ReferenceKey;
 	defaultValue?: string | boolean;
+	advanced?: boolean;
 }
 
 interface ColumnConfig {
@@ -84,8 +92,18 @@ interface ColumnConfig {
   className?: string;
 }
 
-type CRUDPageKey = Exclude<PageKey, "dashboard" | "tenant-overview" | "line-assets" | "violations" | "node-events" | "audit-logs">;
+type CRUDPageKey = Exclude<PageKey, "dashboard" | "quick-start" | "tenant-overview" | "line-assets" | "violations" | "node-events" | "audit-logs">;
 type LineAssetKey = "line-providers" | "line-sites" | "line-circuits" | "line-endpoints" | "line-probes";
+
+type NavSectionKey = "workspace" | "business" | "operations" | "advanced";
+
+interface NavItem {
+	key: PageKey;
+	label: string;
+	icon: LucideIcon;
+	section: NavSectionKey;
+	roles?: string[];
+}
 
 interface ResourceConfig {
   key: CRUDPageKey | LineAssetKey;
@@ -220,22 +238,30 @@ const valueLabels: Record<string, string> = {
   install_tokens: "安装令牌"
 };
 
-const navItems: { key: PageKey; label: string; icon: LucideIcon; roles?: string[] }[] = [
-  { key: "dashboard", label: "总览", icon: Gauge },
-  { key: "forward-rules", label: "转发规则", icon: Route },
-	{ key: "tenant-overview", label: "租户用量", icon: Building2, roles: ["tenant_admin"] },
-	{ key: "tenants", label: "租户", icon: Building2, roles: ["admin"] },
-	{ key: "tenant-tunnel-grants", label: "租户线路授权", icon: Route, roles: ["admin"] },
-  { key: "nodes", label: "节点", icon: Server, roles: ["admin"] },
-	{ key: "line-assets", label: "线路资产", icon: Network, roles: ["admin"] },
-	{ key: "node-events", label: "节点事件", icon: Activity, roles: ["admin"] },
-  { key: "device-groups", label: "设备组", icon: Boxes, roles: ["admin"] },
-  { key: "tunnels", label: "线路", icon: Network, roles: ["admin"] },
-  { key: "protocol-policies", label: "协议策略", icon: ShieldCheck, roles: ["admin"] },
-  { key: "speed-limits", label: "限速策略", icon: SlidersHorizontal, roles: ["admin"] },
-  { key: "violations", label: "违规事件", icon: AlertTriangle, roles: ["admin"] },
-  { key: "audit-logs", label: "审计日志", icon: ScrollText, roles: ["admin"] },
-  { key: "users", label: "用户", icon: Users, roles: ["admin", "tenant_admin"] }
+const navSections: { key: NavSectionKey; label: string }[] = [
+	{ key: "workspace", label: "工作台" },
+	{ key: "business", label: "业务管理" },
+	{ key: "operations", label: "运行与安全" },
+	{ key: "advanced", label: "高级设置" }
+];
+
+const navItems: NavItem[] = [
+	{ key: "dashboard", label: "总览", icon: Gauge, section: "workspace" },
+	{ key: "quick-start", label: "快速开通", icon: Rocket, section: "workspace" },
+	{ key: "forward-rules", label: "转发规则", icon: Route, section: "business" },
+	{ key: "tenant-overview", label: "租户用量", icon: Building2, section: "business", roles: ["tenant_admin"] },
+	{ key: "nodes", label: "节点", icon: Server, section: "business", roles: ["admin"] },
+	{ key: "tunnels", label: "转发线路", icon: Network, section: "business", roles: ["admin"] },
+	{ key: "users", label: "用户", icon: Users, section: "business", roles: ["admin", "tenant_admin"] },
+	{ key: "tenants", label: "租户", icon: Building2, section: "business", roles: ["admin"] },
+	{ key: "violations", label: "协议告警", icon: AlertTriangle, section: "operations", roles: ["admin"] },
+	{ key: "node-events", label: "节点日志", icon: Activity, section: "operations", roles: ["admin"] },
+	{ key: "audit-logs", label: "操作日志", icon: ScrollText, section: "operations", roles: ["admin"] },
+	{ key: "tenant-tunnel-grants", label: "线路授权", icon: Route, section: "advanced", roles: ["admin"] },
+	{ key: "line-assets", label: "专线资产", icon: Network, section: "advanced", roles: ["admin"] },
+	{ key: "device-groups", label: "节点分组", icon: Boxes, section: "advanced", roles: ["admin"] },
+	{ key: "protocol-policies", label: "协议策略", icon: ShieldCheck, section: "advanced", roles: ["admin"] },
+	{ key: "speed-limits", label: "限速策略", icon: SlidersHorizontal, section: "advanced", roles: ["admin"] }
 ];
 
 const protocolOptions = [
@@ -433,16 +459,18 @@ const resourceConfigs: Record<CRUDPageKey, ResourceConfig> = {
     createLabel: "新建规则",
     fields: [
       { key: "name", label: "名称", required: true },
-      { key: "userId", label: "用户", type: "number", optional: true, min: 1, reference: "users" },
-      { key: "tunnelId", label: "线路", type: "number", required: true, min: 1, reference: "tunnels" },
-      { key: "protocol", label: "协议", type: "select", options: protocolOptions, required: true },
-      { key: "listenPort", label: "监听端口", type: "number", min: 0, max: 65535 },
-      { key: "remoteHost", label: "上游地址", required: true },
-      { key: "remotePort", label: "上游端口", type: "number", required: true, min: 1, max: 65535 },
+      { key: "userId", label: "用户", type: "number", required: true, min: 1, reference: "users" },
+      { key: "tunnelId", label: "转发线路", type: "number", required: true, min: 1, reference: "tunnels" },
+      { key: "protocol", label: "传输协议", type: "select", options: protocolOptions, required: true, defaultValue: "tcp" },
+      { key: "listenPort", label: "入口端口", type: "number", optional: true, min: 0, max: 65535, placeholder: "留空自动分配" },
+      { key: "remoteHost", label: "目标地址", required: true, placeholder: "例如 10.0.0.2" },
+      { key: "remotePort", label: "目标端口", type: "number", required: true, min: 1, max: 65535 },
       {
         key: "strategy",
         label: "调度策略",
         type: "select",
+		advanced: true,
+		defaultValue: "least_conn",
         options: [
           { value: "least_conn", label: "最少连接" },
           { value: "round_robin", label: "轮询" },
@@ -455,6 +483,8 @@ const resourceConfigs: Record<CRUDPageKey, ResourceConfig> = {
         label: "状态",
         type: "select",
         optional: true,
+		advanced: true,
+		defaultValue: "active",
         options: [
           { value: "active", label: "启用" },
           { value: "paused", label: "暂停" },
@@ -467,7 +497,8 @@ const resourceConfigs: Record<CRUDPageKey, ResourceConfig> = {
         type: "number",
         optional: true,
         min: 1,
-        reference: "protocol-policies"
+        reference: "protocol-policies",
+		advanced: true
       }
     ],
     columns: [
@@ -528,10 +559,10 @@ const resourceConfigs: Record<CRUDPageKey, ResourceConfig> = {
   },
   "device-groups": {
     key: "device-groups",
-    title: "设备组",
+    title: "节点分组",
     eyebrow: "入口、出口与中继池",
     endpoint: "/device-groups",
-    createLabel: "新建设备组",
+    createLabel: "新建节点分组",
     fields: [
       { key: "name", label: "名称", required: true },
       {
@@ -581,10 +612,10 @@ const resourceConfigs: Record<CRUDPageKey, ResourceConfig> = {
   },
   tunnels: {
     key: "tunnels",
-    title: "线路",
+    title: "转发线路",
     eyebrow: "链路路径与计费控制",
     endpoint: "/tunnels",
-    createLabel: "新建线路",
+    createLabel: "新建转发线路",
     fields: [
       { key: "name", label: "名称", required: true },
       {
@@ -763,7 +794,7 @@ const resourceConfigs: Record<CRUDPageKey, ResourceConfig> = {
 	},
 	"tenant-tunnel-grants": {
 		key: "tenant-tunnel-grants",
-		title: "租户线路授权",
+		title: "线路授权",
 		eyebrow: "可用线路、端口段与规则额度",
 		endpoint: "/tenant-tunnel-grants",
 		createLabel: "新增授权",
@@ -838,6 +869,8 @@ export default function App() {
   const [session, setSession] = useState<Session | null>(() => getStoredSession());
   const [activePage, setActivePage] = useState<PageKey>("dashboard");
   const [refreshSeed, setRefreshSeed] = useState(0);
+	const [advancedOpen, setAdvancedOpen] = useState(false);
+	const [mobileNavOpen, setMobileNavOpen] = useState(false);
 
   useEffect(() => {
     setUnauthorizedHandler(() => {
@@ -847,6 +880,12 @@ export default function App() {
 
     return () => setUnauthorizedHandler(undefined);
   }, []);
+
+	useEffect(() => {
+		if (navItems.find((item) => item.key === activePage)?.section === "advanced") {
+			setAdvancedOpen(true);
+		}
+	}, [activePage]);
 
   const logout = useCallback(() => {
     clearSession();
@@ -868,22 +907,61 @@ export default function App() {
             <strong>DuSheng 转发面板</strong>
             <span>节点与规则控制台</span>
           </div>
+			<button
+				className="icon-button mobile-menu-button"
+				type="button"
+				title={mobileNavOpen ? "收起菜单" : "展开菜单"}
+				aria-label={mobileNavOpen ? "收起菜单" : "展开菜单"}
+				aria-expanded={mobileNavOpen}
+				onClick={() => setMobileNavOpen((current) => !current)}
+			>
+				{mobileNavOpen ? <X size={17} /> : <Menu size={17} />}
+			</button>
         </div>
 
-        <nav className="nav-list" aria-label="主导航">
-          {visibleNavItems.map((item) => {
-            const Icon = item.icon;
-            return (
-              <button
-                key={item.key}
-                className={activePage === item.key ? "nav-item active" : "nav-item"}
-                onClick={() => setActivePage(item.key)}
-              >
-                <Icon size={17} />
-                <span>{item.label}</span>
-              </button>
-            );
-          })}
+		<nav className={`nav-list${mobileNavOpen ? " mobile-open" : ""}`} aria-label="主导航">
+			{navSections.map((section) => {
+				const items = visibleNavItems.filter((item) => item.section === section.key);
+				if (items.length === 0) {
+					return null;
+				}
+				const collapsible = section.key === "advanced";
+				return (
+					<div className="nav-section" key={section.key}>
+						{collapsible ? (
+							<button
+								type="button"
+								className="nav-section-toggle"
+								aria-expanded={advancedOpen}
+								onClick={() => setAdvancedOpen((current) => !current)}
+							>
+								<span>{section.label}</span>
+								{advancedOpen ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
+							</button>
+						) : <p className="nav-section-label">{section.label}</p>}
+						{!collapsible || advancedOpen ? (
+							<div className="nav-section-items">
+								{items.map((item) => {
+									const Icon = item.icon;
+									return (
+										<button
+											key={item.key}
+											className={activePage === item.key ? "nav-item active" : "nav-item"}
+											onClick={() => {
+												setActivePage(item.key);
+												setMobileNavOpen(false);
+											}}
+										>
+											<Icon size={17} />
+											<span>{item.label}</span>
+										</button>
+									);
+								})}
+							</div>
+						) : null}
+					</div>
+				);
+			})}
         </nav>
       </aside>
 
@@ -894,6 +972,10 @@ export default function App() {
             <h1>{pageTitle(activePage)}</h1>
           </div>
           <div className="topbar-actions">
+			<button className="primary-action topbar-create" type="button" title="新建转发" aria-label="新建转发" onClick={() => setActivePage("forward-rules")}>
+				<Plus size={16} />
+				<span>新建转发</span>
+			</button>
             <button className="icon-button" title="刷新" onClick={() => setRefreshSeed((seed) => seed + 1)}>
               <RefreshCw size={16} />
             </button>
@@ -907,7 +989,7 @@ export default function App() {
           </div>
         </header>
 
-        <section className="content">{renderPage(activePage, refreshSeed, session.user.role)}</section>
+        <section className="content">{renderPage(activePage, refreshSeed, session.user.role, setActivePage)}</section>
       </main>
     </div>
   );
@@ -971,10 +1053,14 @@ function LoginPage({ onLogin }: { onLogin: (session: Session) => void }) {
   );
 }
 
-function renderPage(activePage: PageKey, refreshSeed: number, role: string) {
+function renderPage(activePage: PageKey, refreshSeed: number, role: string, onNavigate: (page: PageKey) => void) {
   if (activePage === "dashboard") {
-    return <Dashboard refreshSeed={refreshSeed} />;
+    return <Dashboard refreshSeed={refreshSeed} onNavigate={onNavigate} />;
   }
+
+	if (activePage === "quick-start") {
+		return <QuickStartPage refreshSeed={refreshSeed} role={role} onNavigate={onNavigate} />;
+	}
 
 	if (activePage === "tenant-overview") {
 		return <TenantOverviewPage refreshSeed={refreshSeed} />;
@@ -1007,10 +1093,10 @@ function renderPage(activePage: PageKey, refreshSeed: number, role: string) {
 
   if (activePage === "nodes") {
     return (
-      <>
-		<ResourcePage config={resourceConfigs.nodes} refreshSeed={refreshSeed} role={role} />
+		<div className="stack">
         <InstallTokensPanel refreshSeed={refreshSeed} />
-      </>
+		<ResourcePage config={resourceConfigs.nodes} refreshSeed={refreshSeed} role={role} />
+		</div>
     );
   }
 
@@ -1154,7 +1240,129 @@ function TenantTrafficView({ payload }: { payload: TenantTrafficPayload }) {
 	);
 }
 
-function Dashboard({ refreshSeed }: { refreshSeed: number }) {
+interface QuickStartSnapshot {
+	onlineNodes: number;
+	tunnels: number;
+	users: number;
+	rules: number;
+}
+
+function QuickStartPage({
+	refreshSeed,
+	role,
+	onNavigate
+}: {
+	refreshSeed: number;
+	role: string;
+	onNavigate: (page: PageKey) => void;
+}) {
+	const [snapshot, setSnapshot] = useState<QuickStartSnapshot | null>(null);
+	const [loading, setLoading] = useState(true);
+	const [error, setError] = useState<string | null>(null);
+
+	useEffect(() => {
+		let alive = true;
+		async function load() {
+			setLoading(true);
+			setError(null);
+			try {
+				const rulesPromise = api.page<Entity>("/forward-rules", { pageSize: 1 });
+				if (role === "admin") {
+					const [nodes, tunnels, users, rules] = await Promise.all([
+						api.page<Entity>("/nodes", { pageSize: 200 }),
+						api.page<Entity>("/tunnels", { pageSize: 1 }),
+						api.page<Entity>("/users", { pageSize: 200 }),
+						rulesPromise
+					]);
+					if (alive) {
+						setSnapshot({
+							onlineNodes: nodes.items.filter((node) => node.status === "online").length,
+							tunnels: tunnels.total,
+							users: users.items.filter((user) => user.role === "user").length,
+							rules: rules.total
+						});
+					}
+				} else if (role === "tenant_admin") {
+					const [users, rules] = await Promise.all([
+						api.page<Entity>("/users", { pageSize: 200 }),
+						rulesPromise
+					]);
+					if (alive) {
+						setSnapshot({
+							onlineNodes: -1,
+							tunnels: -1,
+							users: users.items.filter((user) => user.role === "user").length,
+							rules: rules.total
+						});
+					}
+				} else {
+					const rules = await rulesPromise;
+					if (alive) {
+						setSnapshot({ onlineNodes: -1, tunnels: -1, users: -1, rules: rules.total });
+					}
+				}
+			} catch (err) {
+				if (alive) {
+					setError(err instanceof Error ? err.message : "开通状态请求失败");
+				}
+			} finally {
+				if (alive) {
+					setLoading(false);
+				}
+			}
+		}
+		void load();
+		return () => {
+			alive = false;
+		};
+	}, [refreshSeed, role]);
+
+	if (loading && !snapshot) {
+		return <StateBlock tone="loading" title="正在检查开通状态" />;
+	}
+
+	const steps: { title: string; status: string; ready: boolean; target: PageKey; action: string }[] = [];
+	if (role === "admin") {
+		steps.push(
+			{ title: "接入节点", status: snapshot?.onlineNodes ? `${snapshot.onlineNodes} 个在线` : "等待节点上线", ready: Boolean(snapshot?.onlineNodes), target: "nodes", action: "安装节点" },
+			{ title: "确认转发线路", status: snapshot?.tunnels ? `${snapshot.tunnels} 条已配置` : "尚未配置", ready: Boolean(snapshot?.tunnels), target: "tunnels", action: "配置线路" },
+			{ title: "创建业务用户", status: snapshot?.users ? `${snapshot.users} 个用户` : "尚未创建", ready: Boolean(snapshot?.users), target: "users", action: "创建用户" }
+		);
+	} else if (role === "tenant_admin") {
+		steps.push({ title: "创建业务用户", status: snapshot?.users ? `${snapshot.users} 个用户` : "尚未创建", ready: Boolean(snapshot?.users), target: "users", action: "创建用户" });
+	}
+	steps.push({ title: "创建转发规则", status: snapshot?.rules ? `${snapshot.rules} 条已创建` : "等待创建", ready: Boolean(snapshot?.rules), target: "forward-rules", action: "新建转发" });
+	const firstPending = steps.findIndex((step) => !step.ready);
+	const readyCount = steps.filter((step) => step.ready).length;
+
+	return (
+		<div className="stack quick-start-page">
+			<section className="quick-start-heading">
+				<div><p>业务开通</p><h2>{role === "admin" ? "四步完成第一条转发" : "创建可用转发"}</h2></div>
+				<div className="setup-progress"><strong>{readyCount}/{steps.length}</strong><span>已就绪</span></div>
+			</section>
+			{error ? <div className="notice error">{error}</div> : null}
+			<div className="setup-grid">
+				{steps.map((step, index) => {
+					const current = firstPending === index;
+					return (
+						<section className={`setup-step${step.ready ? " ready" : current ? " current" : ""}`} key={step.title}>
+							<div className="setup-step-index">{step.ready ? <Check size={17} /> : index + 1}</div>
+							<div className="setup-step-copy"><strong>{step.title}</strong><span>{step.status}</span></div>
+							<button className={current ? "primary-action" : "ghost-action"} type="button" onClick={() => onNavigate(step.target)}>{step.action}<ChevronRight size={15} /></button>
+						</section>
+					);
+				})}
+			</div>
+			<section className="quick-start-actions">
+				<div><span>下一步</span><strong>创建转发规则</strong></div>
+				<button className="primary-action" type="button" onClick={() => onNavigate("forward-rules")}><Plus size={16} />新建转发</button>
+			</section>
+		</div>
+	);
+}
+
+function Dashboard({ refreshSeed, onNavigate }: { refreshSeed: number; onNavigate: (page: PageKey) => void }) {
   const [payload, setPayload] = useState<DashboardPayload | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -1206,6 +1414,14 @@ function Dashboard({ refreshSeed }: { refreshSeed: number }) {
   return (
     <div className="stack">
       {error ? <div className="notice error">{error}</div> : null}
+
+		<section className="dashboard-command-bar">
+			<div><span>常用操作</span><strong>开通与管理转发业务</strong></div>
+			<div className="dashboard-command-actions">
+				<button className="ghost-action" type="button" onClick={() => onNavigate("quick-start")}><Rocket size={15} />快速开通</button>
+				<button className="primary-action" type="button" onClick={() => onNavigate("forward-rules")}><Plus size={15} />新建转发</button>
+			</div>
+		</section>
 
       <div className="metric-grid">
         {stats.map((stat) => (
@@ -1277,7 +1493,10 @@ function ResourcePage({ config, refreshSeed, role }: { config: ResourceConfig; r
   const [page, setPage] = useState(1);
   const [total, setTotal] = useState(0);
   const [references, setReferences] = useState<Record<string, { value: string; label: string }[]>>({});
+	const [showAdvanced, setShowAdvanced] = useState(false);
 	const hasStatusFilter = fields.some((field) => field.key === "status");
+	const standardFields = fields.filter((field) => !field.advanced);
+	const advancedFields = fields.filter((field) => field.advanced);
 
   const load = useCallback(async () => {
     setLoading(true);
@@ -1305,6 +1524,7 @@ function ResourcePage({ config, refreshSeed, role }: { config: ResourceConfig; r
     setQuery("");
     setStatusFilter("");
     setPage(1);
+	setShowAdvanced(false);
 	}, [config.key, fields]);
 
   useEffect(() => {
@@ -1321,7 +1541,8 @@ function ResourcePage({ config, refreshSeed, role }: { config: ResourceConfig; r
         keys.map(async (key) => {
           try {
             const page = await api.page<Entity>(referenceEndpoint(key), { pageSize: 200 });
-            next[key] = page.items.map((row) => ({
+			const candidates = key === "users" ? page.items.filter((row) => row.role === "user") : page.items;
+            next[key] = candidates.map((row) => ({
               value: String(row.id ?? ""),
               label: referenceLabel(key, row)
             }));
@@ -1426,6 +1647,7 @@ function ResourcePage({ config, refreshSeed, role }: { config: ResourceConfig; r
   function resetDraft() {
     setEditingId(null);
 	setDraft(emptyDraft(fields));
+	setShowAdvanced(false);
   }
 
   return (
@@ -1511,7 +1733,7 @@ function ResourcePage({ config, refreshSeed, role }: { config: ResourceConfig; r
             meta={config.disableCreate && editingId === null ? "请选择一条记录" : undefined}
           />
           <form className="resource-form" onSubmit={submit}>
-			{fields.map((field) => (
+			{standardFields.map((field) => (
               <FieldControl
                 key={field.key}
                 field={field}
@@ -1522,6 +1744,24 @@ function ResourcePage({ config, refreshSeed, role }: { config: ResourceConfig; r
                 onChange={(value) => setDraft((current) => ({ ...current, [field.key]: value }))}
               />
             ))}
+			{advancedFields.length > 0 ? (
+				<button className="advanced-fields-toggle" type="button" aria-expanded={showAdvanced} onClick={() => setShowAdvanced((current) => !current)}>
+					<Settings2 size={15} />
+					<span>{showAdvanced ? "收起高级设置" : "高级设置"}</span>
+					{showAdvanced ? <ChevronDown size={15} /> : <ChevronRight size={15} />}
+				</button>
+			) : null}
+			{showAdvanced ? advancedFields.map((field) => (
+				<FieldControl
+					key={field.key}
+					field={field}
+					value={draft[field.key]}
+					disabled={saving || (Boolean(config.disableCreate) && editingId === null)}
+					editing={editingId !== null}
+					referenceOptions={references}
+					onChange={(value) => setDraft((current) => ({ ...current, [field.key]: value }))}
+				/>
+			)) : null}
 
             <div className="form-actions">
               <button
@@ -1649,14 +1889,23 @@ function InstallTokensPanel({ refreshSeed }: { refreshSeed: number }) {
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [total, setTotal] = useState(0);
+	const [groups, setGroups] = useState<{ value: string; label: string }[]>([]);
 
   const load = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
-      const data = await api.page<InstallToken>("/install-tokens", { pageSize: 50 });
+		const [data, groupPage] = await Promise.all([
+			api.page<InstallToken>("/install-tokens", { pageSize: 50 }),
+			api.page<Entity>("/device-groups", { pageSize: 200 })
+		]);
       setTokens(data.items);
       setTotal(data.total);
+		const options = groupPage.items
+			.filter((group) => group.role === "entry")
+			.map((group) => ({ value: String(group.id ?? ""), label: referenceLabel("device-groups", group) }));
+		setGroups(options);
+		setDeviceGroupId((current) => current || options[0]?.value || "");
     } catch (err) {
       setError(err instanceof Error ? err.message : "安装令牌请求失败");
     } finally {
@@ -1746,14 +1995,15 @@ function InstallTokensPanel({ refreshSeed }: { refreshSeed: number }) {
             <input value={label} onChange={(event) => setLabel(event.target.value)} />
           </label>
           <label>
-            设备组 ID
-            <input
-              type="number"
-              min={1}
+            节点分组
+            <select
               value={deviceGroupId}
               onChange={(event) => setDeviceGroupId(event.target.value)}
               required
-            />
+			>
+				<option value="">请选择入口分组</option>
+				{groups.map((group) => <option key={group.value} value={group.value}>{group.label}</option>)}
+			</select>
           </label>
           <label>
             有效期（小时）
@@ -2570,6 +2820,10 @@ function pageTitle(activePage: PageKey) {
   if (activePage === "dashboard") {
     return "运营总览";
   }
+
+	if (activePage === "quick-start") {
+		return "快速开通转发";
+	}
 
   if (activePage === "violations") {
     return "协议告警";
