@@ -103,7 +103,8 @@ ensure_user_and_dirs() {
 download_file() {
   local url="$1"
   local dest="$2"
-  curl -fL --retry 3 --connect-timeout 10 -o "$dest" "$url"
+  echo "Downloading ${url}..."
+  curl --fail --show-error --location --retry 3 --retry-delay 2 --connect-timeout 10 --max-time 300 -o "$dest" "$url"
 }
 
 verify_agent_archive() {

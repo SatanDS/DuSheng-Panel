@@ -153,6 +153,16 @@ func TestHealthAndMetricsEndpoints(t *testing.T) {
 	require.Contains(t, rec.Body.String(), "dusheng_api_http_requests_total")
 }
 
+func TestInstallAgentBootstrapReportsDownloadAndHasTimeout(t *testing.T) {
+	s := testServer(t)
+	rec := jsonRequest(t, testRouter(t, s), http.MethodGet, "/install-agent.sh", nil, "")
+	require.Equal(t, http.StatusOK, rec.Code)
+	require.Contains(t, rec.Header().Get("Content-Type"), "text/x-shellscript")
+	require.Contains(t, rec.Body.String(), "Downloading DuSheng agent installer")
+	require.Contains(t, rec.Body.String(), "--connect-timeout 10 --max-time 90")
+	require.Contains(t, rec.Body.String(), "Set DUSHENG_INSTALLER_URL to a reachable mirror")
+}
+
 func TestRequestBodyLimitRejectsOversizedPayload(t *testing.T) {
 	s := testServer(t)
 	rec := jsonRequest(t, testRouter(t, s), http.MethodPost, "/api/v1/auth/login", map[string]any{

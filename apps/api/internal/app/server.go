@@ -3598,13 +3598,23 @@ set -euo pipefail
 
 INSTALLER_URL="${DUSHENG_INSTALLER_URL:-https://raw.githubusercontent.com/SatanDS/DuSheng-Panel/main/deploy/scripts/install-agent.sh}"
 
+echo "Downloading DuSheng agent installer from ${INSTALLER_URL}..."
+
 if ! command -v curl >/dev/null 2>&1; then
   apt-get update && apt-get install -y curl ca-certificates
 fi
 
 tmp="$(mktemp)"
 trap 'rm -f "$tmp"' EXIT
-curl -fsSL "$INSTALLER_URL" -o "$tmp"
+if ! curl --fail --show-error --location --retry 3 --retry-delay 2 --connect-timeout 10 --max-time 90 "$INSTALLER_URL" -o "$tmp"; then
+  echo "Unable to download the DuSheng agent installer from ${INSTALLER_URL}." >&2
+  echo "Set DUSHENG_INSTALLER_URL to a reachable mirror and retry." >&2
+  exit 1
+fi
+if [ ! -s "$tmp" ]; then
+  echo "Downloaded installer is empty." >&2
+  exit 1
+fi
 exec bash "$tmp" "$@"
 `)
 }
