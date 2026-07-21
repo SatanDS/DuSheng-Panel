@@ -159,6 +159,7 @@ func TestInstallAgentBootstrapReportsDownloadAndHasTimeout(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	require.Contains(t, rec.Header().Get("Content-Type"), "text/x-shellscript")
 	require.Contains(t, rec.Body.String(), "Downloading DuSheng agent installer")
+	require.Contains(t, rec.Body.String(), "${DUSHENG_API_URL%/}/agent-installer.sh")
 	require.Contains(t, rec.Body.String(), "--connect-timeout 10 --max-time 90")
 	require.Contains(t, rec.Body.String(), "Set DUSHENG_INSTALLER_URL to a reachable mirror")
 }

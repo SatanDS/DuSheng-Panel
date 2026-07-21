@@ -3596,7 +3596,7 @@ set -euo pipefail
 : "${DUSHENG_API_URL:?DUSHENG_API_URL is required}"
 : "${DUSHENG_INSTALL_TOKEN:?DUSHENG_INSTALL_TOKEN is required}"
 
-INSTALLER_URL="${DUSHENG_INSTALLER_URL:-https://raw.githubusercontent.com/SatanDS/DuSheng-Panel/main/deploy/scripts/install-agent.sh}"
+INSTALLER_URL="${DUSHENG_INSTALLER_URL:-${DUSHENG_API_URL%/}/agent-installer.sh}"
 
 echo "Downloading DuSheng agent installer from ${INSTALLER_URL}..."
 
