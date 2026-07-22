@@ -13,6 +13,9 @@ AGENT_URL="${DUSHENG_AGENT_URL:-}"
 AGENT_SHA256="${DUSHENG_AGENT_SHA256:-}"
 CHECKSUMS_URL="${DUSHENG_CHECKSUMS_URL:-${RELEASE_BASE}/checksums.txt}"
 SKIP_VERIFY="${DUSHENG_SKIP_VERIFY:-0}"
+DOWNLOAD_CONNECT_TIMEOUT="${DUSHENG_DOWNLOAD_CONNECT_TIMEOUT:-15}"
+DOWNLOAD_MAX_TIME="${DUSHENG_DOWNLOAD_MAX_TIME:-1800}"
+DOWNLOAD_RETRIES="${DUSHENG_DOWNLOAD_RETRIES:-5}"
 GOST_URL="${DUSHENG_GOST_URL:-}"
 GOST_BIN="${DUSHENG_GOST_PATH:-${DUSHENG_GOST_BIN:-/usr/local/bin/gost}}"
 DPI_ENABLED="${DUSHENG_DPI_ENABLED:-1}"
@@ -104,7 +107,12 @@ download_file() {
   local url="$1"
   local dest="$2"
   echo "Downloading ${url}..."
-  curl --fail --show-error --location --retry 3 --retry-delay 2 --connect-timeout 10 --max-time 300 -o "$dest" "$url"
+  # GitHub release downloads can be slow or intermittently reset in some regions.
+  # Keep partial data across curl retries and prefer HTTP/1.1 to avoid broken HTTP/2 streams.
+  curl --fail --show-error --location --http1.1 \
+    --retry "$DOWNLOAD_RETRIES" --retry-all-errors --retry-delay 3 \
+    --connect-timeout "$DOWNLOAD_CONNECT_TIMEOUT" --max-time "$DOWNLOAD_MAX_TIME" \
+    --continue-at - --output "$dest" "$url"
 }
 
 verify_agent_archive() {

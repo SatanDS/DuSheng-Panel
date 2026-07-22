@@ -75,6 +75,9 @@ HTTPS_PORT=7443
 - `DUSHENG_ADMIN_USERNAME` / `DUSHENG_ADMIN_PASSWORD`：生产环境不能同时保留默认管理员账号和密码。
 - `DUSHENG_CORS_ORIGINS`：逗号分隔的允许来源；本地可用 `*`，生产必须设置为面板域名或明确的来源 allowlist。
 - `DUSHENG_AGENT_RELEASE_BASE`：节点安装脚本下载 agent 二进制的 GitHub Release 地址，默认是 `https://github.com/SatanDS/DuSheng-Panel/releases/latest/download`。
+- `DUSHENG_DOWNLOAD_CONNECT_TIMEOUT`：安装器连接下载源的超时秒数，默认 `15`。
+- `DUSHENG_DOWNLOAD_MAX_TIME`：单次 Agent 下载的最长秒数，默认 `1800`；设为 `0` 可取消总时长限制。
+- `DUSHENG_DOWNLOAD_RETRIES`：Agent 下载失败后的重试次数，默认 `5`；重试会从已下载位置继续。
 - `DUSHENG_GOST_PATH` / `DUSHENG_GOST_BIN`：节点端 `gost` 二进制路径，安装脚本会同时写入两者以兼容旧配置。当前第一版入口监听默认由 `dusheng-agent` TCP/UDP runtime 承担，`gost` 保留给后续复杂 tunnel/relay transport。
 - `DUSHENG_METRICS_LISTEN`：Agent Prometheus 指标地址，默认仅监听 `127.0.0.1:19090`；设为空可关闭。
 
