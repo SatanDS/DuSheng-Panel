@@ -45,6 +45,8 @@ services:
       dockerfile: deploy/web.Dockerfile
     image: dusheng-panel/web:local
     restart: unless-stopped
+    volumes:
+      - ${DUSHENG_DOWNLOADS_DIR:-./downloads}:/usr/share/nginx/html/downloads:ro
     expose:
       - "8080"
     depends_on:

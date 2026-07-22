@@ -4,6 +4,8 @@ build/
 .vite/
 coverage/
 release/
+deploy/downloads/*
+!deploy/downloads/.gitkeep
 
 *.exe
 *.test

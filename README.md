@@ -171,6 +171,29 @@ release/*.sigstore.json
 
 面板生成的节点安装命令会显式带上 `DUSHENG_RELEASE_BASE`，默认指向本仓库最新 Release。若你使用自建下载源，只需在面板端 `.env` 中覆盖 `DUSHENG_AGENT_RELEASE_BASE`。
 
+节点所在地区访问 GitHub 较慢时，可以让面板服务器同步正式 Release，并通过面板域名和 CDN 提供版本化下载。以下命令会先下载到临时目录，核对两个架构压缩包的 SHA256，再原子发布到 `deploy/downloads/v0.1.5`：
+
+```bash
+cd /opt/dusheng-panel
+./deploy/scripts/sync-agent-release.sh v0.1.5
+```
+
+随后在面板服务器的 `.env` 中设置对应的不可变版本地址：
+
+```env
+DUSHENG_AGENT_RELEASE_BASE=https://panel.example.com/downloads/v0.1.5
+```
+
+Compose 会将 `deploy/downloads` 只读挂载到 Web 容器。自定义宿主机目录时，可同时设置 `DUSHENG_DOWNLOADS_DIR`。修改 `.env` 后需要重新创建 API 和 Web 容器：
+
+```bash
+docker compose -f deploy/docker-compose.yml up -d --build --force-recreate api web
+curl -fI https://panel.example.com/downloads/v0.1.5/dusheng-agent-linux-amd64.tar.gz
+curl -fsS https://panel.example.com/downloads/v0.1.5/checksums.txt
+```
+
+版本化 URL 可由 CDN 长期缓存。发布新 Agent 时同步到新的版本目录并更新 `DUSHENG_AGENT_RELEASE_BASE`，不要覆盖已经对外使用的版本目录。
+
 每次源码提交推送后，也要同步发布 agent 二进制。推荐用本地发布脚本一次完成构建和上传：
 
 ```powershell
