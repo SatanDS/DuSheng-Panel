@@ -2112,6 +2112,7 @@ func (s *Server) afterSpeedLimitChange(c *gin.Context, db *gorm.DB, limit *model
 }
 
 func (s *Server) listForwardRules(c *gin.Context) {
+	s.markStaleNodesOffline(time.Now())
 	query := s.db.Model(&models.ForwardRule{})
 	if ctxRole(c) == "tenant_admin" {
 		query = query.Where("tenant_id = ?", ctxTenantID(c))
@@ -2123,7 +2124,148 @@ func (s *Server) listForwardRules(c *gin.Context) {
 	query = filterUint(query, c, "user_id", "userId")
 	query = filterUint(query, c, "tunnel_id", "tunnelId")
 	query = filterUint(query, c, "id", "ruleId")
-	respondPage[models.ForwardRule](c, query, "id desc")
+	page, pageSize := pageParams(c)
+	var total int64
+	if err := query.Count(&total).Error; err != nil {
+		fail(c, err)
+		return
+	}
+	var rules []models.ForwardRule
+	if err := query.Order("id desc").Limit(pageSize).Offset((page - 1) * pageSize).Find(&rules).Error; err != nil {
+		fail(c, err)
+		return
+	}
+	items, err := s.forwardRuleListItems(rules)
+	if err != nil {
+		fail(c, err)
+		return
+	}
+	c.JSON(http.StatusOK, pageResponse[forwardRuleListItem]{Items: items, Total: total, Page: page, PageSize: pageSize})
+}
+
+type forwardRuleListItem struct {
+	models.ForwardRule
+	SyncStatus   string `json:"syncStatus"`
+	SyncMessage  string `json:"syncMessage"`
+	TargetNodes  int    `json:"targetNodes"`
+	SyncedNodes  int    `json:"syncedNodes"`
+	PendingNodes int    `json:"pendingNodes"`
+	OfflineNodes int    `json:"offlineNodes"`
+	FailedNodes  int    `json:"failedNodes"`
+}
+
+func (s *Server) forwardRuleListItems(rules []models.ForwardRule) ([]forwardRuleListItem, error) {
+	items := make([]forwardRuleListItem, len(rules))
+	if len(rules) == 0 {
+		return items, nil
+	}
+
+	tunnelIDs := make([]uint, 0, len(rules))
+	seenTunnels := make(map[uint]struct{}, len(rules))
+	for i, rule := range rules {
+		if isLegacyForwardRuleSyncStatus(rule.Status) {
+			rule.Status = "active"
+		}
+		items[i].ForwardRule = rule
+		if _, ok := seenTunnels[rule.TunnelID]; !ok {
+			seenTunnels[rule.TunnelID] = struct{}{}
+			tunnelIDs = append(tunnelIDs, rule.TunnelID)
+		}
+	}
+
+	var tunnels []models.Tunnel
+	if err := s.db.Select("id", "entry_group_id").Where("id IN ?", tunnelIDs).Find(&tunnels).Error; err != nil {
+		return nil, err
+	}
+	entryGroupByTunnel := make(map[uint]uint, len(tunnels))
+	groupIDs := make([]uint, 0, len(tunnels))
+	seenGroups := make(map[uint]struct{}, len(tunnels))
+	for _, tunnel := range tunnels {
+		entryGroupByTunnel[tunnel.ID] = tunnel.EntryGroupID
+		if _, ok := seenGroups[tunnel.EntryGroupID]; !ok {
+			seenGroups[tunnel.EntryGroupID] = struct{}{}
+			groupIDs = append(groupIDs, tunnel.EntryGroupID)
+		}
+	}
+
+	nodesByGroup := make(map[uint][]models.Node, len(groupIDs))
+	if len(groupIDs) > 0 {
+		var nodes []models.Node
+		excludedStatuses := []string{"disabled", "uninstalling", "uninstall_legacy", "uninstall_timeout", "uninstall_failed"}
+		if err := s.db.Where("device_group_id IN ? AND status NOT IN ?", groupIDs, excludedStatuses).Find(&nodes).Error; err != nil {
+			return nil, err
+		}
+		for _, node := range nodes {
+			nodesByGroup[node.DeviceGroupID] = append(nodesByGroup[node.DeviceGroupID], node)
+		}
+	}
+
+	for i := range items {
+		groupID, ok := entryGroupByTunnel[items[i].TunnelID]
+		if !ok {
+			items[i].SyncStatus = "failed"
+			items[i].SyncMessage = "forwarding tunnel not found"
+			continue
+		}
+		populateForwardRuleSync(&items[i], nodesByGroup[groupID])
+	}
+	return items, nil
+}
+
+func populateForwardRuleSync(item *forwardRuleListItem, nodes []models.Node) {
+	item.TargetNodes = len(nodes)
+	if len(nodes) == 0 {
+		item.SyncStatus = "no_nodes"
+		item.SyncMessage = "entry group has no enabled nodes"
+		return
+	}
+
+	for _, node := range nodes {
+		configStatus := strings.ToLower(strings.TrimSpace(node.ConfigStatus))
+		if contains([]string{"rejected", "rolled_back", "lease_expired"}, configStatus) {
+			item.FailedNodes++
+			if item.SyncMessage == "" {
+				message := strings.TrimSpace(node.ConfigMessage)
+				if message == "" {
+					message = configStatus
+				}
+				item.SyncMessage = fmt.Sprintf("node #%d: %s", node.ID, message)
+			}
+			continue
+		}
+		if node.Status != "online" {
+			item.OfflineNodes++
+			item.PendingNodes++
+			continue
+		}
+		requiredRevision := node.DesiredRevision
+		if item.Revision > requiredRevision {
+			requiredRevision = item.Revision
+		}
+		if node.AppliedRevision >= requiredRevision {
+			item.SyncedNodes++
+			continue
+		}
+		item.PendingNodes++
+	}
+
+	switch {
+	case item.FailedNodes > 0:
+		item.SyncStatus = "failed"
+	case item.SyncedNodes == item.TargetNodes:
+		item.SyncStatus = "synced"
+	default:
+		item.SyncStatus = "unsynced"
+		if item.OfflineNodes > 0 {
+			item.SyncMessage = fmt.Sprintf("%d target node(s) offline", item.OfflineNodes)
+		} else {
+			item.SyncMessage = fmt.Sprintf("%d target node(s) waiting to apply configuration", item.PendingNodes)
+		}
+	}
+}
+
+func isLegacyForwardRuleSyncStatus(status string) bool {
+	return contains([]string{"unsynced", "syncing", "failed", "protocol_violation"}, strings.ToLower(strings.TrimSpace(status)))
 }
 
 type forwardRulePayload struct {
@@ -2315,7 +2457,7 @@ func forwardRuleStatusAfterWrite(status string) string {
 	case "paused", "disabled":
 		return normalized
 	default:
-		return "unsynced"
+		return "active"
 	}
 }
 
@@ -3387,7 +3529,7 @@ func (s *Server) reconcileUserQuotaTx(tx *gorm.DB, user *models.User, revision i
 		tenantBlocked = tenant.QuotaBlocked || (tenant.TrafficLimitBytes > 0 && tenant.UsedBytes >= tenant.TrafficLimitBytes)
 	}
 	for _, rule := range rules {
-		updates := map[string]any{"status": "unsynced", "quota_source": "", "revision": revision}
+		updates := map[string]any{"status": "active", "quota_source": "", "revision": revision}
 		if tenantBlocked {
 			updates["status"] = "quota_exhausted"
 			updates["quota_source"] = "tenant"

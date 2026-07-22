@@ -2527,6 +2527,16 @@ components:
             violationCount:
               type: integer
               minimum: 0
+            syncStatus:
+              $ref: "#/components/schemas/ForwardRuleSyncStatus"
+            syncMessage:
+              type: string
+              description: Latest aggregate configuration error or pending reason for applicable entry nodes.
+            targetNodes: { type: integer, minimum: 0 }
+            syncedNodes: { type: integer, minimum: 0 }
+            pendingNodes: { type: integer, minimum: 0 }
+            offlineNodes: { type: integer, minimum: 0 }
+            failedNodes: { type: integer, minimum: 0 }
 
     ForwardRuleWrite:
       type: object
@@ -2597,7 +2607,13 @@ components:
 
     ForwardRuleStatus:
       type: string
-      enum: [unsynced, syncing, active, paused, disabled, failed, protocol_violation, quota_exhausted]
+      description: Operational state. Configuration delivery is reported separately through syncStatus.
+      enum: [active, paused, disabled, quota_exhausted]
+
+    ForwardRuleSyncStatus:
+      type: string
+      description: Aggregate delivery status across enabled nodes in the tunnel entry group.
+      enum: [synced, unsynced, failed, no_nodes]
 
     ProtocolPolicy:
       description: >

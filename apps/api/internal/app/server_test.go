@@ -1237,6 +1237,100 @@ func TestAgentCapabilitiesAndConfigAcknowledgement(t *testing.T) {
 	require.Equal(t, "config.rejected", events[1].Type)
 }
 
+func TestForwardRuleSyncStatusFollowsAllEntryNodeAcknowledgements(t *testing.T) {
+	s := testServer(t)
+	user, entry, tunnel, _ := seedForwardFixture(t, s)
+	now := time.Now()
+	rule := models.ForwardRule{
+		UserID: user.ID, TunnelID: tunnel.ID, Name: "sync-rule", Protocol: "tcp",
+		ListenPort: 20000, RemoteHost: "8.8.8.8", RemotePort: 53, Status: "active",
+		Strategy: "least_conn", Revision: now.UnixNano(),
+	}
+	require.NoError(t, s.db.Create(&rule).Error)
+
+	nodeTokens := []string{"sync-node-a-token", "sync-node-b-token"}
+	nodes := []models.Node{
+		{DeviceGroupID: entry.ID, Name: "sync-a", UUID: "sync-node-a", TokenHash: auth.TokenHash(nodeTokens[0]), Status: "online", LastSeenAt: &now, DesiredRevision: rule.Revision},
+		{DeviceGroupID: entry.ID, Name: "sync-b", UUID: "sync-node-b", TokenHash: auth.TokenHash(nodeTokens[1]), Status: "online", LastSeenAt: &now, DesiredRevision: rule.Revision},
+	}
+	require.NoError(t, s.db.Create(&nodes).Error)
+	router := testRouter(t, s)
+	admin := adminToken(t, s)
+
+	readRule := func() forwardRuleListItem {
+		rec := jsonRequest(t, router, http.MethodGet, fmt.Sprintf("/api/v1/forward-rules?ruleId=%d", rule.ID), nil, admin)
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var page pageResponse[forwardRuleListItem]
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &page))
+		require.Len(t, page.Items, 1)
+		return page.Items[0]
+	}
+
+	ackNode := func(index int) int64 {
+		rec := jsonRequest(t, router, http.MethodGet, "/api/v1/agent/config", nil, nodeTokens[index])
+		require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+		var configPayload struct {
+			Revision int64  `json:"revision"`
+			Nonce    string `json:"nonce"`
+		}
+		require.NoError(t, json.Unmarshal(rec.Body.Bytes(), &configPayload))
+		rec = jsonRequest(t, router, http.MethodPost, "/api/v1/agent/config/ack", map[string]any{
+			"revision": configPayload.Revision, "nonce": configPayload.Nonce, "status": "applied",
+		}, nodeTokens[index])
+		require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+		return configPayload.Revision
+	}
+
+	item := readRule()
+	require.Equal(t, "active", item.Status)
+	require.Equal(t, "unsynced", item.SyncStatus)
+	require.Equal(t, 2, item.TargetNodes)
+	require.Equal(t, 0, item.SyncedNodes)
+	require.Equal(t, 2, item.PendingNodes)
+
+	ackNode(0)
+	item = readRule()
+	require.Equal(t, "unsynced", item.SyncStatus)
+	require.Equal(t, 1, item.SyncedNodes)
+	require.Equal(t, 1, item.PendingNodes)
+
+	secondRevision := ackNode(1)
+	item = readRule()
+	require.Equal(t, "synced", item.SyncStatus)
+	require.Equal(t, 2, item.SyncedNodes)
+	require.Zero(t, item.PendingNodes)
+
+	rejectedRevision := secondRevision + 1
+	require.NoError(t, s.db.Model(&models.Node{}).Where("id = ?", nodes[1].ID).Update("desired_revision", rejectedRevision).Error)
+	require.NoError(t, s.db.First(&nodes[1], nodes[1].ID).Error)
+	rec := jsonRequest(t, router, http.MethodPost, "/api/v1/agent/config/ack", map[string]any{
+		"revision": rejectedRevision,
+		"nonce":    configNonce(nodes[1], rejectedRevision),
+		"status":   "rejected",
+		"message":  "listen tcp :20000: bind failed",
+	}, nodeTokens[1])
+	require.Equal(t, http.StatusNoContent, rec.Code, rec.Body.String())
+
+	item = readRule()
+	require.Equal(t, "failed", item.SyncStatus)
+	require.Equal(t, 1, item.FailedNodes)
+	require.Contains(t, item.SyncMessage, "bind failed")
+}
+
+func TestForwardRuleSyncStatusReportsOfflineAndMissingNodes(t *testing.T) {
+	rule := models.ForwardRule{Status: "unsynced", Revision: 10}
+	item := forwardRuleListItem{ForwardRule: rule}
+	populateForwardRuleSync(&item, nil)
+	require.Equal(t, "no_nodes", item.SyncStatus)
+	require.Zero(t, item.TargetNodes)
+
+	item = forwardRuleListItem{ForwardRule: rule}
+	populateForwardRuleSync(&item, []models.Node{{BaseModel: models.BaseModel{ID: 1}, Status: "offline", DesiredRevision: 10, AppliedRevision: 10}})
+	require.Equal(t, "unsynced", item.SyncStatus)
+	require.Equal(t, 1, item.OfflineNodes)
+	require.Equal(t, 1, item.PendingNodes)
+}
+
 func TestConfigAckRejectsMismatchedNonce(t *testing.T) {
 	s := testServer(t)
 	nodeToken := "nonce-node-token"
@@ -1594,7 +1688,7 @@ func TestTenantTrafficQuotaIsIdempotentAndStopsAgentConfig(t *testing.T) {
 	require.Zero(t, tenant.UsedBytes)
 	require.False(t, tenant.QuotaBlocked)
 	require.NoError(t, s.db.First(&rule, rule.ID).Error)
-	require.Equal(t, "unsynced", rule.Status)
+	require.Equal(t, "active", rule.Status)
 	require.Empty(t, rule.QuotaSource)
 }
 
@@ -1652,7 +1746,7 @@ func TestTenantQuotaResetKeepsUserQuotaExhausted(t *testing.T) {
 	rec = jsonRequest(t, router, http.MethodPost, fmt.Sprintf("/api/v1/users/%d/traffic/reset", user.ID), map[string]any{}, admin)
 	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
 	require.NoError(t, s.db.First(&rule, rule.ID).Error)
-	require.Equal(t, "unsynced", rule.Status)
+	require.Equal(t, "active", rule.Status)
 	require.Empty(t, rule.QuotaSource)
 }
 

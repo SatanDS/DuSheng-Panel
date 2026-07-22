@@ -55,3 +55,50 @@ func TestOpenAppliesVersionedSchemaOnce(t *testing.T) {
 		t.Fatalf("close database: %v", err)
 	}
 }
+
+func TestForwardRuleOperationalStatusMigration(t *testing.T) {
+	databaseURL := "sqlite://" + filepath.ToSlash(filepath.Join(t.TempDir(), "legacy-status.db"))
+	cfg := config.Config{
+		DatabaseURL: databaseURL, JWTSecret: "test-secret", AdminUsername: "admin", AdminPassword: "strong-password",
+	}
+	db, err := Open(cfg)
+	if err != nil {
+		t.Fatalf("Open() error = %v", err)
+	}
+	sqlDB, err := db.DB()
+	if err != nil {
+		t.Fatalf("DB() error = %v", err)
+	}
+	t.Cleanup(func() {
+		if err := sqlDB.Close(); err != nil {
+			t.Errorf("close database: %v", err)
+		}
+	})
+	var user models.User
+	if err := db.Where("role = ?", "admin").First(&user).Error; err != nil {
+		t.Fatalf("find seeded admin: %v", err)
+	}
+	var tunnel models.Tunnel
+	if err := db.First(&tunnel).Error; err != nil {
+		t.Fatalf("find seeded tunnel: %v", err)
+	}
+	rule := models.ForwardRule{
+		UserID: user.ID, TunnelID: tunnel.ID, Name: "legacy", Protocol: "tcp", ListenPort: 12345,
+		RemoteHost: "8.8.8.8", RemotePort: 53, Status: "unsynced", Strategy: "least_conn",
+	}
+	if err := db.Create(&rule).Error; err != nil {
+		t.Fatalf("create legacy forwarding rule: %v", err)
+	}
+	if err := db.Where("version = ?", "2026072201_forward_rule_operational_status").Delete(&models.SchemaMigration{}).Error; err != nil {
+		t.Fatalf("remove migration marker: %v", err)
+	}
+	if err := runMigrations(db); err != nil {
+		t.Fatalf("rerun migrations: %v", err)
+	}
+	if err := db.First(&rule, rule.ID).Error; err != nil {
+		t.Fatalf("reload forwarding rule: %v", err)
+	}
+	if rule.Status != "active" {
+		t.Fatalf("forwarding rule status = %q, want active", rule.Status)
+	}
+}

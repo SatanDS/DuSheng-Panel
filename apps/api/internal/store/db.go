@@ -124,8 +124,15 @@ func runMigrations(db *gorm.DB) error {
 	}); err != nil {
 		return err
 	}
-	return applyMigration(db, "2026072101_user_tunnel_grants", func(tx *gorm.DB) error {
+	if err := applyMigration(db, "2026072101_user_tunnel_grants", func(tx *gorm.DB) error {
 		return tx.AutoMigrate(&models.UserTunnelGrant{})
+	}); err != nil {
+		return err
+	}
+	return applyMigration(db, "2026072201_forward_rule_operational_status", func(tx *gorm.DB) error {
+		return tx.Model(&models.ForwardRule{}).
+			Where("status IN ?", []string{"unsynced", "syncing", "failed", "protocol_violation"}).
+			Update("status", "active").Error
 	})
 }
 

@@ -51,6 +51,13 @@ export interface ForwardRule extends Entity {
   revision: number;
   lastSyncError: string;
   violationCount: number;
+  syncStatus?: string;
+  syncMessage?: string;
+  targetNodes?: number;
+  syncedNodes?: number;
+  pendingNodes?: number;
+  offlineNodes?: number;
+  failedNodes?: number;
 }
 
 export interface Tenant extends Entity {

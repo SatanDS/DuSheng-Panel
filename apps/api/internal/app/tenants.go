@@ -556,7 +556,7 @@ func (s *Server) restoreTenantQuotaRulesTx(tx *gorm.DB, tenantID uint, revision 
 		userByID[user.ID] = user
 	}
 	for _, rule := range rules {
-		updates := map[string]any{"status": "unsynced", "quota_source": "", "revision": revision}
+		updates := map[string]any{"status": "active", "quota_source": "", "revision": revision}
 		user := userByID[rule.UserID]
 		if user.FlowLimitBytes > 0 && user.UsedBytes >= user.FlowLimitBytes {
 			updates["status"] = "quota_exhausted"

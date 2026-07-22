@@ -507,7 +507,8 @@ const resourceConfigs: Record<CRUDPageKey, ResourceConfig> = {
       { key: "listenPort", label: "监听" },
       { key: "remoteHost", label: "上游" },
       { key: "remotePort", label: "端口" },
-      { key: "status", label: "状态", render: (row) => <StatusPill value={text(row.status)} /> },
+      { key: "status", label: "运行状态", render: (row) => <StatusPill value={text(row.status)} /> },
+      { key: "syncStatus", label: "下发状态", render: renderForwardRuleSync },
       { key: "violationCount", label: "违规" },
       { key: "inBytes", label: "入站", render: (row) => formatBytes(row.inBytes) },
       { key: "outBytes", label: "出站", render: (row) => formatBytes(row.outBytes) }
@@ -2875,7 +2876,7 @@ function renderNodeConnectAddress(row: Entity) {
   );
 }
 
-function StatusPill({ value }: { value: string }) {
+function StatusPill({ value, title }: { value: string; title?: string }) {
   const normalized = value.toLowerCase();
   const tone =
     normalized.includes("online") ||
@@ -2898,6 +2899,10 @@ function StatusPill({ value }: { value: string }) {
           normalized.includes("违规") ||
           normalized.includes("禁用") ||
           normalized.includes("暂停") ||
+          normalized.includes("失败") ||
+          normalized.includes("failed") ||
+          normalized.includes("rejected") ||
+          normalized.includes("rolled_back") ||
           normalized.includes("卸载失败")
         ? "bad"
         : normalized.includes("unsynced") ||
@@ -2908,11 +2913,35 @@ function StatusPill({ value }: { value: string }) {
             normalized.includes("告警") ||
             normalized.includes("缺失") ||
             normalized.includes("未配置") ||
+            normalized.includes("无可用节点") ||
             normalized.includes("卸载中")
           ? "warn"
           : "neutral";
 
-  return <span className={`status-pill ${tone}`}>{displayValue(value)}</span>;
+  return <span className={`status-pill ${tone}`} title={title}>{displayValue(value)}</span>;
+}
+
+function renderForwardRuleSync(row: Entity) {
+  const status = String(row.syncStatus ?? "unsynced").toLowerCase();
+  const target = Number(row.targetNodes ?? 0);
+  const synced = Number(row.syncedNodes ?? 0);
+  const failed = Number(row.failedNodes ?? 0);
+  const offline = Number(row.offlineNodes ?? 0);
+  const counts = target > 0 ? ` ${synced}/${target}` : "";
+  const label =
+    status === "synced"
+      ? `已同步${counts}`
+      : status === "failed"
+        ? `同步失败${counts}`
+        : status === "no_nodes"
+          ? "无可用节点"
+          : `未同步${counts}`;
+  const details = [
+    text(row.syncMessage) === "-" ? "" : text(row.syncMessage),
+    failed > 0 ? `${failed} 个节点失败` : "",
+    offline > 0 ? `${offline} 个节点离线` : ""
+  ].filter(Boolean).join("；");
+  return <StatusPill value={label} title={details || undefined} />;
 }
 
 function renderPolicyFlags(row: Entity) {

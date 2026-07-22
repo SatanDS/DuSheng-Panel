@@ -237,7 +237,7 @@ type ForwardRule struct {
 	ListenPort       int    `gorm:"index;not null" json:"listenPort"`
 	RemoteHost       string `gorm:"size:255;not null" json:"remoteHost"`
 	RemotePort       int    `gorm:"not null" json:"remotePort"`
-	Status           string `gorm:"index;size:30;not null;default:unsynced" json:"status"`
+	Status           string `gorm:"index;size:30;not null;default:active" json:"status"`
 	QuotaSource      string `gorm:"index;size:20" json:"quotaSource"`
 	Strategy         string `gorm:"size:40;not null;default:least_conn" json:"strategy"`
 	ProtocolPolicyID *uint  `json:"protocolPolicyId"`
