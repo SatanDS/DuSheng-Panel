@@ -81,6 +81,12 @@ HTTPS_PORT=7443
 - `DUSHENG_GOST_PATH` / `DUSHENG_GOST_BIN`：节点端 `gost` 二进制路径，安装脚本会同时写入两者以兼容旧配置。当前第一版入口监听默认由 `dusheng-agent` TCP/UDP runtime 承担，`gost` 保留给后续复杂 tunnel/relay transport。
 - `DUSHENG_METRICS_LISTEN`：Agent Prometheus 指标地址，默认仅监听 `127.0.0.1:19090`；设为空可关闭。
 
+## 节点连接地址
+
+- `公网 IP (publicIp)` 由 API 根据 Agent 注册和心跳请求的来源地址自动观测，Agent 不上报、管理员也不手动填写。
+- `连接地址 (connectHost)` 由管理员维护，填写用户实际连接节点转发端口时使用的 IP 或域名。普通公网转发可留空；IEPL/IPLC 场景可填写客户端实际可达的专线入口 IP、VIP 或专用域名。
+- 对外展示和使用的有效连接地址优先取 `connectHost`；留空时自动回退到 `publicIp`。这里不要填写面板 API 域名，除非该域名本身确实解析到业务转发入口。
+
 ## 节点 TCP/UDP Runtime
 
 节点端只在逻辑线路的入口设备组下发业务规则；出口组保留给线路资产、探测和后续 transport adapter，不会重复监听用户端口。Agent 会按 TCP、UDP 或 TCP+UDP 规则启动 listener。TCP 连接进入后会执行有界首包/多包检测，支持 TLS ClientHello SNI/ALPN、HTTP Host、HTTP CONNECT、SOCKS4/5、SSH 和未知明文 TCP。命中协议策略后，`block` 会直接关闭连接并上报违规，`alert` / `observe` 会允许转发并记录事件。

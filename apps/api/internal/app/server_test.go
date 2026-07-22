@@ -13,6 +13,7 @@ import (
 	"dusheng-panel/apps/api/internal/auth"
 	"dusheng-panel/apps/api/internal/config"
 	"dusheng-panel/apps/api/internal/models"
+	"github.com/gin-gonic/gin"
 	"github.com/stretchr/testify/require"
 	"gorm.io/driver/sqlite"
 	"gorm.io/gorm"
@@ -127,6 +128,249 @@ func adminToken(t *testing.T, s *Server) string {
 	token, err := auth.GenerateToken(admin.ID, admin.Role, auth.TokenTypeAccess, "test-secret-for-unit-tests", time.Hour)
 	require.NoError(t, err)
 	return token
+}
+
+func TestObservedPublicIP(t *testing.T) {
+	tests := []struct {
+		name       string
+		headers    map[string]string
+		remoteAddr string
+		want       string
+	}{
+		{
+			name: "cloudflare header takes precedence",
+			headers: map[string]string{
+				"CF-Connecting-IP": "203.0.113.10",
+				"X-Forwarded-For":  "198.51.100.20",
+			},
+			remoteAddr: "192.0.2.30:1234",
+			want:       "203.0.113.10",
+		},
+		{
+			name: "xff skips private hops",
+			headers: map[string]string{
+				"X-Forwarded-For": "10.0.0.8, 198.51.100.21, 172.16.0.2",
+			},
+			remoteAddr: "192.0.2.31:1234",
+			want:       "198.51.100.21",
+		},
+		{
+			name:       "remote address fallback",
+			remoteAddr: "192.0.2.32:4321",
+			want:       "192.0.2.32",
+		},
+		{
+			name: "private and local addresses are rejected",
+			headers: map[string]string{
+				"CF-Connecting-IP": "10.0.0.8",
+				"X-Forwarded-For":  "172.16.0.2",
+				"X-Real-IP":        "169.254.1.2",
+			},
+			remoteAddr: "127.0.0.1:4321",
+			want:       "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx, _ := gin.CreateTestContext(httptest.NewRecorder())
+			ctx.Request = httptest.NewRequest(http.MethodPost, "/", nil)
+			ctx.Request.RemoteAddr = tt.remoteAddr
+			for name, value := range tt.headers {
+				ctx.Request.Header.Set(name, value)
+			}
+			require.Equal(t, tt.want, observedPublicIP(ctx))
+		})
+	}
+}
+
+func TestAgentRegisterUsesObservedPublicIPAndIgnoresAddressPayload(t *testing.T) {
+	s := testServer(t)
+	group := models.DeviceGroup{Name: "entry", Role: "entry", TrafficRatio: 1}
+	require.NoError(t, s.db.Create(&group).Error)
+	installToken := "address-register-token"
+	require.NoError(t, s.db.Create(&models.InstallToken{
+		Label: "address-test", TokenHash: auth.TokenHash(installToken), DeviceGroupID: group.ID,
+		ExpiresAt: time.Now().Add(time.Hour),
+	}).Error)
+
+	body, err := json.Marshal(map[string]any{
+		"installToken": installToken,
+		"name":         "address-node",
+		"uuid":         "address-node-uuid",
+		"publicIp":     "8.8.8.8",
+		"connectHost":  "agent-controlled.example.com",
+	})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/register", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("CF-Connecting-IP", "203.0.113.40")
+	req.RemoteAddr = "10.0.0.2:1234"
+	rec := httptest.NewRecorder()
+	testRouter(t, s).ServeHTTP(rec, req)
+	require.Equal(t, http.StatusCreated, rec.Code, rec.Body.String())
+
+	var node models.Node
+	require.NoError(t, s.db.Where("uuid = ?", "address-node-uuid").First(&node).Error)
+	require.Equal(t, "203.0.113.40", node.PublicIP)
+	require.Empty(t, node.ConnectHost)
+}
+
+func TestAgentHeartbeatPreservesManagedNodeAddresses(t *testing.T) {
+	s := testServer(t)
+	group := models.DeviceGroup{Name: "entry", Role: "entry", TrafficRatio: 1}
+	require.NoError(t, s.db.Create(&group).Error)
+	nodeToken := "address-heartbeat-token"
+	node := models.Node{
+		DeviceGroupID: group.ID, Name: "address-node", UUID: "address-heartbeat-node",
+		TokenHash: auth.TokenHash(nodeToken), Status: "online", PublicIP: "203.0.113.50",
+		ConnectHost: "iepl-entry.example.com",
+	}
+	require.NoError(t, s.db.Create(&node).Error)
+
+	body, err := json.Marshal(map[string]any{
+		"version":      "v0.1.5",
+		"publicIp":     "8.8.8.8",
+		"connectHost":  "agent.example.com",
+		"capabilities": []string{"tcp_runtime", "ndpi_v5", "tcp_runtime"},
+	})
+	require.NoError(t, err)
+	req := httptest.NewRequest(http.MethodPost, "/api/v1/agent/heartbeat", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("Authorization", "Bearer "+nodeToken)
+	req.RemoteAddr = "192.168.1.20:1234"
+	rec := httptest.NewRecorder()
+	testRouter(t, s).ServeHTTP(rec, req)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+
+	require.NoError(t, s.db.First(&node, node.ID).Error)
+	require.Equal(t, "203.0.113.50", node.PublicIP)
+	require.Equal(t, "iepl-entry.example.com", node.ConnectHost)
+	require.Equal(t, []string{"tcp_runtime", "ndpi_v5"}, node.Capabilities)
+}
+
+func TestAgentHeartbeatPreservesAdminStatusesAndRevivesOffline(t *testing.T) {
+	tests := []struct {
+		status string
+		want   string
+	}{
+		{status: "disabled", want: "disabled"},
+		{status: "maintenance", want: "maintenance"},
+		{status: "offline", want: "online"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.status, func(t *testing.T) {
+			s := testServer(t)
+			group := models.DeviceGroup{Name: "entry", Role: "entry", TrafficRatio: 1}
+			require.NoError(t, s.db.Create(&group).Error)
+			node := models.Node{
+				DeviceGroupID: group.ID, Name: "status-node", UUID: "status-node-" + tt.status,
+				TokenHash: "hash", Status: "online",
+			}
+			require.NoError(t, s.db.Create(&node).Error)
+			staleNode := node
+			require.NoError(t, s.db.Model(&models.Node{}).Where("id = ?", node.ID).Update("status", tt.status).Error)
+
+			body, err := json.Marshal(map[string]any{"version": "v0.1.5"})
+			require.NoError(t, err)
+			recorder := httptest.NewRecorder()
+			ctx, _ := gin.CreateTestContext(recorder)
+			ctx.Request = httptest.NewRequest(http.MethodPost, "/api/v1/agent/heartbeat", bytes.NewReader(body))
+			ctx.Request.Header.Set("Content-Type", "application/json")
+			ctx.Request.RemoteAddr = "10.0.0.2:1234"
+			ctx.Set("node", staleNode)
+			s.agentHeartbeat(ctx)
+			require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+
+			require.NoError(t, s.db.First(&node, node.ID).Error)
+			require.Equal(t, tt.want, node.Status)
+		})
+	}
+}
+
+func TestAgentHeartbeatDoesNotOverwriteConcurrentAdminUpdate(t *testing.T) {
+	s := testServer(t)
+	groupA := models.DeviceGroup{Name: "entry-a", Role: "entry", TrafficRatio: 1}
+	groupB := models.DeviceGroup{Name: "entry-b", Role: "entry", TrafficRatio: 1}
+	require.NoError(t, s.db.Create(&groupA).Error)
+	require.NoError(t, s.db.Create(&groupB).Error)
+	now := time.Now().UTC()
+	node := models.Node{
+		DeviceGroupID: groupA.ID, Name: "stale-name", UUID: "concurrent-heartbeat-node", TokenHash: "hash",
+		Status: "online", PublicIP: "203.0.113.51", ConnectHost: "old.example.com", DesiredRevision: 1,
+	}
+	require.NoError(t, s.db.Create(&node).Error)
+	staleNode := node
+	require.NoError(t, s.db.Model(&models.Node{}).Where("id = ?", node.ID).Updates(map[string]any{
+		"device_group_id":        groupB.ID,
+		"name":                   "admin-renamed",
+		"connect_host":           "new-iepl.example.com",
+		"status":                 "uninstalling",
+		"desired_revision":       int64(99),
+		"uninstall_command_id":   "uninstall-concurrent",
+		"uninstall_requested_at": &now,
+	}).Error)
+
+	body, err := json.Marshal(map[string]any{
+		"version": "v0.1.5", "appliedRevision": 2, "system": map[string]any{"runtime": "ok"},
+	})
+	require.NoError(t, err)
+	recorder := httptest.NewRecorder()
+	ctx, _ := gin.CreateTestContext(recorder)
+	ctx.Request = httptest.NewRequest(http.MethodPost, "/api/v1/agent/heartbeat", bytes.NewReader(body))
+	ctx.Request.Header.Set("Content-Type", "application/json")
+	ctx.Request.RemoteAddr = "10.0.0.2:1234"
+	ctx.Set("node", staleNode)
+	s.agentHeartbeat(ctx)
+	require.Equal(t, http.StatusOK, recorder.Code, recorder.Body.String())
+
+	require.NoError(t, s.db.First(&node, node.ID).Error)
+	require.Equal(t, groupB.ID, node.DeviceGroupID)
+	require.Equal(t, "admin-renamed", node.Name)
+	require.Equal(t, "new-iepl.example.com", node.ConnectHost)
+	require.Equal(t, "uninstalling", node.Status)
+	require.Equal(t, int64(99), node.DesiredRevision)
+	require.Equal(t, int64(2), node.AppliedRevision)
+
+	var response struct {
+		DesiredRevision int64 `json:"desiredRevision"`
+		Command         struct {
+			ID string `json:"id"`
+		} `json:"command"`
+	}
+	require.NoError(t, json.Unmarshal(recorder.Body.Bytes(), &response))
+	require.Equal(t, int64(99), response.DesiredRevision)
+	require.Equal(t, "uninstall-concurrent", response.Command.ID)
+}
+
+func TestAdminNodeUpdateConnectHostTriState(t *testing.T) {
+	s := testServer(t)
+	token := adminToken(t, s)
+	group := models.DeviceGroup{Name: "entry", Role: "entry", TrafficRatio: 1}
+	require.NoError(t, s.db.Create(&group).Error)
+	node := models.Node{
+		DeviceGroupID: group.ID, Name: "managed-node", UUID: "managed-node-uuid", TokenHash: "hash",
+		Status: "online", PublicIP: "203.0.113.60", ConnectHost: "iepl.example.com",
+	}
+	require.NoError(t, s.db.Create(&node).Error)
+	router := testRouter(t, s)
+
+	rec := jsonRequest(t, router, http.MethodPut, fmt.Sprintf("/api/v1/nodes/%d", node.ID), map[string]any{
+		"name": "renamed-node", "publicIp": "8.8.8.8",
+	}, token)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.NoError(t, s.db.First(&node, node.ID).Error)
+	require.Equal(t, "renamed-node", node.Name)
+	require.Equal(t, "203.0.113.60", node.PublicIP)
+	require.Equal(t, "iepl.example.com", node.ConnectHost)
+
+	rec = jsonRequest(t, router, http.MethodPut, fmt.Sprintf("/api/v1/nodes/%d", node.ID), map[string]any{
+		"connectHost": "",
+	}, token)
+	require.Equal(t, http.StatusOK, rec.Code, rec.Body.String())
+	require.NoError(t, s.db.First(&node, node.ID).Error)
+	require.Empty(t, node.ConnectHost)
 }
 
 func TestHealthAndMetricsEndpoints(t *testing.T) {

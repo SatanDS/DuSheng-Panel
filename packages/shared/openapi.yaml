@@ -2380,9 +2380,12 @@ components:
             publicIp:
               type: string
               maxLength: 80
+              readOnly: true
+              description: Public source IP observed by the API during authenticated agent registration or heartbeat; agents do not submit this value.
             connectHost:
               type: string
               maxLength: 160
+              description: Administrator-maintained client-facing IP address or hostname. When empty, clients use publicIp as the effective connection address.
             lastSeenAt:
               type: [string, "null"]
               format: date-time
@@ -2445,6 +2448,7 @@ components:
         connectHost:
           type: string
           maxLength: 160
+          description: Administrator-maintained client-facing IP address or hostname. Set an empty string to fall back to the API-observed publicIp.
 
     Tunnel:
       allOf:
@@ -2999,12 +3003,6 @@ components:
         version:
           type: string
           maxLength: 80
-        publicIp:
-          type: string
-          maxLength: 80
-        connectHost:
-          type: string
-          maxLength: 160
         capabilities:
           type: array
           items:
@@ -3029,12 +3027,6 @@ components:
         version:
           type: string
           maxLength: 80
-        publicIp:
-          type: string
-          maxLength: 80
-        connectHost:
-          type: string
-          maxLength: 160
         appliedRevision:
           type: integer
           format: int64

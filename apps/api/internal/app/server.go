@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"net/netip"
 	"strconv"
@@ -1004,10 +1005,10 @@ func (s *Server) updateNode(c *gin.Context) {
 		return
 	}
 	var req struct {
-		DeviceGroupID uint   `json:"deviceGroupId"`
-		Name          string `json:"name"`
-		Status        string `json:"status"`
-		ConnectHost   string `json:"connectHost"`
+		DeviceGroupID uint    `json:"deviceGroupId"`
+		Name          string  `json:"name"`
+		Status        string  `json:"status"`
+		ConnectHost   *string `json:"connectHost"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
 		bad(c, err)
@@ -1022,7 +1023,9 @@ func (s *Server) updateNode(c *gin.Context) {
 	if req.Status != "" {
 		node.Status = req.Status
 	}
-	node.ConnectHost = req.ConnectHost
+	if req.ConnectHost != nil {
+		node.ConnectHost = strings.TrimSpace(*req.ConnectHost)
+	}
 	node.DesiredRevision = time.Now().UnixNano()
 	if err := s.db.Save(&node).Error; err != nil {
 		fail(c, err)
@@ -2780,8 +2783,6 @@ func (s *Server) agentRegister(c *gin.Context) {
 		Name         string   `json:"name"`
 		UUID         string   `json:"uuid"`
 		Version      string   `json:"version"`
-		PublicIP     string   `json:"publicIp"`
-		ConnectHost  string   `json:"connectHost"`
 		Capabilities []string `json:"capabilities"`
 	}
 	if err := c.ShouldBindJSON(&req); err != nil {
@@ -2820,8 +2821,7 @@ func (s *Server) agentRegister(c *gin.Context) {
 			Status:        "online",
 			Version:       req.Version,
 			Capabilities:  normalizeCapabilities(req.Capabilities),
-			PublicIP:      req.PublicIP,
-			ConnectHost:   req.ConnectHost,
+			PublicIP:      observedPublicIP(c),
 			LastSeenAt:    &now,
 		}
 		return tx.Create(&node).Error
@@ -2845,8 +2845,6 @@ func (s *Server) agentHeartbeat(c *gin.Context) {
 	node := ctxNode(c)
 	var req struct {
 		Version         string         `json:"version"`
-		PublicIP        string         `json:"publicIp"`
-		ConnectHost     string         `json:"connectHost"`
 		AppliedRevision int64          `json:"appliedRevision"`
 		System          map[string]any `json:"system"`
 		Capabilities    []string       `json:"capabilities"`
@@ -2857,21 +2855,40 @@ func (s *Server) agentHeartbeat(c *gin.Context) {
 	}
 	systemJSON, _ := json.Marshal(req.System)
 	now := time.Now()
-	if !isUninstallStatus(node.Status) {
-		node.Status = "online"
+	updates := map[string]any{
+		"version":      req.Version,
+		"system_json":  string(systemJSON),
+		"last_seen_at": &now,
 	}
-	node.Version = req.Version
 	if req.Capabilities != nil {
-		node.Capabilities = normalizeCapabilities(req.Capabilities)
+		capabilitiesJSON, err := json.Marshal(normalizeCapabilities(req.Capabilities))
+		if err != nil {
+			fail(c, err)
+			return
+		}
+		updates["capabilities"] = string(capabilitiesJSON)
 	}
-	node.PublicIP = req.PublicIP
-	node.ConnectHost = req.ConnectHost
-	if req.AppliedRevision > node.AppliedRevision {
-		node.AppliedRevision = req.AppliedRevision
+	if publicIP := observedPublicIP(c); publicIP != "" {
+		updates["public_ip"] = publicIP
 	}
-	node.SystemJSON = string(systemJSON)
-	node.LastSeenAt = &now
-	if err := s.db.Save(&node).Error; err != nil {
+	if req.AppliedRevision > 0 {
+		updates["applied_revision"] = gorm.Expr(
+			"CASE WHEN applied_revision < ? THEN ? ELSE applied_revision END",
+			req.AppliedRevision,
+			req.AppliedRevision,
+		)
+	}
+	if err := s.db.Model(&models.Node{}).Where("id = ?", node.ID).Updates(updates).Error; err != nil {
+		fail(c, err)
+		return
+	}
+	if err := s.db.Model(&models.Node{}).
+		Where("id = ? AND status NOT IN ?", node.ID, []string{"disabled", "maintenance", "uninstalling", "uninstall_legacy", "uninstall_timeout", "uninstall_failed"}).
+		Update("status", "online").Error; err != nil {
+		fail(c, err)
+		return
+	}
+	if err := s.db.First(&node, node.ID).Error; err != nil {
 		fail(c, err)
 		return
 	}
@@ -2880,6 +2897,47 @@ func (s *Server) agentHeartbeat(c *gin.Context) {
 		response["command"] = command
 	}
 	c.JSON(http.StatusOK, response)
+}
+
+func observedPublicIP(c *gin.Context) string {
+	candidates := make([]string, 0, 8)
+	candidates = append(candidates, splitForwardedIPs(c.GetHeader("CF-Connecting-IP"))...)
+	candidates = append(candidates, splitForwardedIPs(c.GetHeader("X-Forwarded-For"))...)
+	candidates = append(candidates, splitForwardedIPs(c.GetHeader("X-Real-IP"))...)
+
+	remoteAddr := strings.TrimSpace(c.Request.RemoteAddr)
+	if host, _, err := net.SplitHostPort(remoteAddr); err == nil {
+		remoteAddr = host
+	}
+	if remoteAddr != "" {
+		candidates = append(candidates, remoteAddr)
+	}
+
+	for _, candidate := range candidates {
+		ip := net.ParseIP(strings.TrimSpace(candidate))
+		if isPublicAgentIP(ip) {
+			return ip.String()
+		}
+	}
+	return ""
+}
+
+func splitForwardedIPs(value string) []string {
+	if strings.TrimSpace(value) == "" {
+		return nil
+	}
+	return strings.Split(value, ",")
+}
+
+func isPublicAgentIP(ip net.IP) bool {
+	return ip != nil &&
+		ip.IsGlobalUnicast() &&
+		!ip.IsPrivate() &&
+		!ip.IsLoopback() &&
+		!ip.IsLinkLocalUnicast() &&
+		!ip.IsLinkLocalMulticast() &&
+		!ip.IsUnspecified() &&
+		!ip.IsMulticast()
 }
 
 func uninstallCommand(node models.Node) gin.H {

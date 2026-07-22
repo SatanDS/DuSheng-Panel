@@ -72,6 +72,8 @@ interface FieldConfig {
   type?: FieldType;
   options?: { value: string; label: string }[];
   placeholder?: string;
+  hint?: string;
+  readOnly?: boolean;
   required?: boolean;
   requiredOnCreate?: boolean;
   optional?: boolean;
@@ -536,15 +538,27 @@ const resourceConfigs: Record<CRUDPageKey, ResourceConfig> = {
           { value: "uninstall_failed", label: "卸载失败" }
         ]
       },
-      { key: "connectHost", label: "连接地址" }
+      {
+        key: "publicIp",
+        label: "公网 IP（系统自动识别）",
+        placeholder: "等待系统自动识别",
+        hint: "由 API 根据节点注册和心跳请求来源自动识别，仅供查看，无法在面板中手动修改。",
+        readOnly: true
+      },
+      {
+        key: "connectHost",
+        label: "连接地址（可选覆盖）",
+        placeholder: "例如 node.example.com、203.0.113.10 或 IEPL 入口 VIP",
+        hint: "填写用户实际连接转发端口的公网 IP、域名或 IEPL 入口 IP/VIP；不要填写面板 URL。留空时自动使用上方公网 IP。"
+      }
     ],
     columns: [
       { key: "id", label: "ID", className: "mono" },
       { key: "name", label: "名称" },
       { key: "deviceGroupId", label: "组" },
       { key: "status", label: "状态", render: (row) => <StatusPill value={text(row.status)} /> },
-      { key: "publicIp", label: "公网 IP" },
-      { key: "connectHost", label: "连接地址" },
+      { key: "publicIp", label: "公网 IP（系统识别）" },
+      { key: "connectHost", label: "连接地址", render: renderNodeConnectAddress },
       { key: "version", label: "版本" },
 	  { key: "capabilities", label: "能力", render: renderNodeCapabilities },
       { key: "sync", label: "同步", render: renderNodeSync },
@@ -2720,6 +2734,7 @@ function FieldControl({
   onChange: (value: string | boolean) => void;
 }) {
   const id = `field-${field.key}`;
+  const hintId = `${id}-hint`;
   const required = field.required || (field.requiredOnCreate && !editing);
   const className = field.fullWidth || field.type === "checkbox" ? "field full" : "field";
   const referenced = field.reference ? referenceOptions?.[field.reference] ?? [] : [];
@@ -2808,13 +2823,16 @@ function FieldControl({
         type={field.type ?? "text"}
         value={String(value ?? "")}
         placeholder={field.placeholder}
+        aria-describedby={field.hint ? hintId : undefined}
         required={required}
         min={field.min}
         max={field.max}
         step={field.step}
+        readOnly={field.readOnly}
         disabled={disabled}
         onChange={(event) => onChange(event.target.value)}
       />
+      {field.hint ? <small id={hintId} className="field-help">{field.hint}</small> : null}
     </label>
   );
 }
@@ -2837,6 +2855,24 @@ function StateBlock({ title, tone }: { title: string; tone: "loading" | "error" 
 
 function Badge({ children }: { children: ReactNode }) {
   return <span className="badge">{children || "-"}</span>;
+}
+
+function renderNodeConnectAddress(row: Entity) {
+  const connectHost = String(row.connectHost ?? "").trim();
+  const publicIp = String(row.publicIp ?? "").trim();
+
+  if (!connectHost && !publicIp) {
+    return <span className="muted">-</span>;
+  }
+
+  const manual = Boolean(connectHost);
+  const address = connectHost || publicIp;
+  return (
+    <div className="flag-list" title={manual ? "管理员手动设置的连接地址" : "自动使用 API 根据节点请求来源识别的公网 IP"}>
+      <span className="mono">{address}</span>
+      <Badge>{manual ? "手动" : "自动"}</Badge>
+    </div>
+  );
 }
 
 function StatusPill({ value }: { value: string }) {
@@ -3083,6 +3119,10 @@ function draftFromRow(fields: FieldConfig[], row: Entity): FormDraft {
 
 function payloadFromDraft(fields: FieldConfig[], draft: FormDraft) {
   return fields.reduce<Record<string, unknown>>((payload, field) => {
+    if (field.readOnly) {
+      return payload;
+    }
+
     const value = draft[field.key];
 
     if (field.type === "checkbox") {

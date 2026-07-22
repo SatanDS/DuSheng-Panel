@@ -46,15 +46,11 @@ type RegisterRequest struct {
 	Name         string   `json:"name,omitempty"`
 	UUID         string   `json:"uuid,omitempty"`
 	Version      string   `json:"version,omitempty"`
-	PublicIP     string   `json:"publicIp,omitempty"`
-	ConnectHost  string   `json:"connectHost,omitempty"`
 	Capabilities []string `json:"capabilities,omitempty"`
 }
 
 type HeartbeatRequest struct {
 	Version         string         `json:"version"`
-	PublicIP        string         `json:"publicIp,omitempty"`
-	ConnectHost     string         `json:"connectHost,omitempty"`
 	AppliedRevision int64          `json:"appliedRevision"`
 	System          map[string]any `json:"system"`
 	Capabilities    []string       `json:"capabilities,omitempty"`
