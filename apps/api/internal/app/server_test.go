@@ -397,6 +397,15 @@ func TestHealthAndMetricsEndpoints(t *testing.T) {
 	require.Contains(t, rec.Body.String(), "dusheng_api_http_requests_total")
 }
 
+func TestAPIResponsesDisableCaching(t *testing.T) {
+	s := testServer(t)
+	rec := jsonRequest(t, testRouter(t, s), http.MethodGet, "/api/v1/me", nil, "")
+	require.Equal(t, http.StatusUnauthorized, rec.Code)
+	require.Equal(t, "no-store, no-cache, must-revalidate, private", rec.Header().Get("Cache-Control"))
+	require.Equal(t, "no-cache", rec.Header().Get("Pragma"))
+	require.Equal(t, "0", rec.Header().Get("Expires"))
+}
+
 func TestInstallAgentBootstrapReportsDownloadAndHasTimeout(t *testing.T) {
 	s := testServer(t)
 	rec := jsonRequest(t, testRouter(t, s), http.MethodGet, "/install-agent.sh", nil, "")

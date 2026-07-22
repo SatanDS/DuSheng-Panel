@@ -308,7 +308,8 @@ func (c *Client) Heartbeat(ctx context.Context, req HeartbeatRequest) (Heartbeat
 
 func (c *Client) GetConfig(ctx context.Context) (AgentConfig, error) {
 	var resp AgentConfig
-	if err := c.doJSON(ctx, http.MethodGet, "/agent/config", nil, &resp, true); err != nil {
+	path := "/agent/config?requestId=" + fmt.Sprint(time.Now().UnixNano())
+	if err := c.doJSON(ctx, http.MethodGet, path, nil, &resp, true); err != nil {
 		return AgentConfig{}, err
 	}
 	return resp, nil
@@ -364,6 +365,10 @@ func (c *Client) doJSON(ctx context.Context, method, path string, input, output 
 		return err
 	}
 	req.Header.Set("Accept", "application/json")
+	if method == http.MethodGet {
+		req.Header.Set("Cache-Control", "no-cache")
+		req.Header.Set("Pragma", "no-cache")
+	}
 	if input != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}

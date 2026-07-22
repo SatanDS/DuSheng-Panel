@@ -88,7 +88,7 @@ func NewServer(cfg config.Config, db *gorm.DB) *gin.Engine {
 	router.GET("/metrics", gin.WrapH(metrics.handler()))
 	router.GET("/install-agent.sh", s.installAgentScript)
 
-	api := router.Group("/api/v1")
+	api := router.Group("/api/v1", noStore())
 	api.POST("/auth/login", s.login)
 	api.POST("/auth/refresh", s.refresh)
 	api.POST("/agent/register", s.agentRegister)
@@ -186,6 +186,15 @@ func NewServer(cfg config.Config, db *gorm.DB) *gin.Engine {
 	admin.GET("/protocol-violations", s.listProtocolViolations)
 
 	return router
+}
+
+func noStore() gin.HandlerFunc {
+	return func(c *gin.Context) {
+		c.Header("Cache-Control", "no-store, no-cache, must-revalidate, private")
+		c.Header("Pragma", "no-cache")
+		c.Header("Expires", "0")
+		c.Next()
+	}
 }
 
 func cors(origins []string) gin.HandlerFunc {

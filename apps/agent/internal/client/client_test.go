@@ -1,7 +1,10 @@
 package client
 
 import (
+	"context"
 	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 )
 
@@ -62,5 +65,36 @@ func TestAgentIdentityRequestsOnlyContainAgentOwnedFields(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestGetConfigBypassesIntermediateCaches(t *testing.T) {
+	var requestID string
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, req *http.Request) {
+		if req.URL.Path != "/api/v1/agent/config" {
+			t.Errorf("request path = %q", req.URL.Path)
+		}
+		requestID = req.URL.Query().Get("requestId")
+		if req.Header.Get("Cache-Control") != "no-cache" {
+			t.Errorf("Cache-Control = %q", req.Header.Get("Cache-Control"))
+		}
+		if req.Header.Get("Pragma") != "no-cache" {
+			t.Errorf("Pragma = %q", req.Header.Get("Pragma"))
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"revision":1}`))
+	}))
+	defer server.Close()
+
+	client := New(server.URL, "node-token")
+	config, err := client.GetConfig(context.Background())
+	if err != nil {
+		t.Fatalf("GetConfig() error = %v", err)
+	}
+	if config.Revision != 1 {
+		t.Fatalf("revision = %d, want 1", config.Revision)
+	}
+	if requestID == "" {
+		t.Fatal("requestId query parameter is missing")
 	}
 }
